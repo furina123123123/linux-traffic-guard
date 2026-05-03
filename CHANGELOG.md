@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.11.1 - 2026-05-03
+
+### Fixed
+
+- Tightened IPv4/IPv6/CIDR validation so malformed addresses such as `::::`, `2001:::1`, bare `abcd`, and out-of-range prefixes are rejected before they reach ban, whitelist, inspect, or analysis flows.
+- Rejected invalid calendar dates before `mktime` normalization, preventing custom UFW analysis ranges like `2026-13-01` or `2026-02-31` from silently rolling into another date.
+- Split single-port validation from port-list/range validation so firewall and focused-inspect flows no longer accept `80,443` or `80-90` where only one port is meaningful.
+- Rejected zero-valued fail2ban numeric inputs such as `0.0` and `00` through stricter positive-number validation.
+- Filtered invalid `SRC=` values while parsing UFW logs so malformed or spoofed log lines do not enter Top IP, risk, cache, or audit summaries.
+
+### Changed
+
+- Expanded `--self-test` coverage for invalid IPv6, invalid dates, zero factors, single-port/list separation, and invalid UFW sources.
+
 ## 4.11.0 - 2026-05-03
 
 ### Added
