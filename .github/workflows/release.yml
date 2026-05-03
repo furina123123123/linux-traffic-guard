@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Build Linux release assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep
+
+      - name: Verify tag matches source version
+        run: |
+          version="$(sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' linux_traffic_guard.hpp | head -n 1)"
+          tag="${GITHUB_REF_NAME#v}"
+          test "$version" = "$tag"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build and test
+        run: |
+          make clean all
+          make check
+          make check-nosqlite
+          make check-root-guard
+
+      - name: Collect release files
+        run: |
+          mkdir -p release-assets
+          cp ltg release-assets/linux-traffic-guard-${VERSION}-linux-x86_64
+          cp ltg release-assets/ltg-linux-x86_64
+          cp ltg-nosqlite release-assets/linux-traffic-guard-${VERSION}-linux-x86_64-nosqlite
+          cp ltg-nosqlite release-assets/ltg-linux-x86_64-nosqlite
+          strip release-assets/linux-traffic-guard-${VERSION}-linux-x86_64 release-assets/ltg-linux-x86_64 || true
+          strip release-assets/linux-traffic-guard-${VERSION}-linux-x86_64-nosqlite release-assets/ltg-linux-x86_64-nosqlite || true
+          make dist
+          cp linux-traffic-guard-${VERSION}.tar.gz release-assets/
+          (cd release-assets && sha256sum * > SHA256SUMS)
+
+      - name: Write release notes
+        run: |
+          cat > release-notes.md <<EOF
+          Linux Traffic Guard ${VERSION}
+
+          Prebuilt Ubuntu/Linux x86_64 binaries are attached for users who do not want to compile from source.
+
+          Assets:
+          - ltg-linux-x86_64: latest SQLite-enabled binary
+          - ltg-linux-x86_64-nosqlite: latest fallback build without SQLite headers
+          - linux-traffic-guard-${VERSION}.tar.gz: source release package
+          - SHA256SUMS: checksums for all release files
+
+          Install the prebuilt binary:
+
+          \`\`\`bash
+          curl -fL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/ltg-linux-x86_64 -o ltg
+          chmod +x ltg
+          sudo install -Dm755 ltg /usr/local/bin/ltg
+          \`\`\`
+
+          Source users can keep using:
+
+          \`\`\`bash
+          make bootstrap
+          make update
+          \`\`\`
+          EOF
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* \
+              --title "Linux Traffic Guard ${VERSION}" \
+              --notes-file release-notes.md
+          fi

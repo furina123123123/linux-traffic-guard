@@ -9,6 +9,18 @@ Linux Traffic Guard 是一个面向 Ubuntu 服务器的单头文件 C++17 运维
 
 ## 一条命令安装
 
+普通用户推荐直接下载 Release 里编译好的 Linux x86_64 二进制：
+
+```bash
+curl -fL https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64 -o ltg && chmod +x ltg && sudo install -Dm755 ltg /usr/local/bin/ltg
+```
+
+以后更新编译好的版本，重复执行同一条命令即可覆盖 `/usr/local/bin/ltg`：
+
+```bash
+curl -fL https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64 -o /tmp/ltg && sudo install -Dm755 /tmp/ltg /usr/local/bin/ltg
+```
+
 Ubuntu 服务器上可以直接克隆，并让 makefile 自动安装依赖、编译、安装到 `/usr/local/bin/ltg`：
 
 ```bash
@@ -112,7 +124,15 @@ sudo ./ltg --export-report
 
 ## 安装与卸载
 
-首次安装推荐：
+Release 二进制安装或更新：
+
+```bash
+curl -fL https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64 -o /tmp/ltg
+sudo install -Dm755 /tmp/ltg /usr/local/bin/ltg
+ltg --version
+```
+
+源码 checkout 首次安装：
 
 ```bash
 make bootstrap
@@ -152,7 +172,21 @@ sudo make PREFIX=/opt/ltg install
 
 ## 发布包
 
-生成源码发布包：
+维护者发布新版本时，先更新 `linux_traffic_guard.hpp` 中的版本号和 `CHANGELOG.md`，再推送 tag：
+
+```bash
+git tag v4.12.0
+git push origin v4.12.0
+```
+
+GitHub Actions 会自动编译并上传 Release 附件：
+
+- `ltg-linux-x86_64` / `linux-traffic-guard-<version>-linux-x86_64`
+- `ltg-linux-x86_64-nosqlite` / `linux-traffic-guard-<version>-linux-x86_64-nosqlite`
+- `linux-traffic-guard-<version>.tar.gz`
+- `SHA256SUMS`
+
+本地生成源码发布包：
 
 ```bash
 make release-check
