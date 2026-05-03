@@ -9,11 +9,13 @@ Linux Traffic Guard 是一个面向 Ubuntu 服务器的单头文件 C++17 运维
 
 ## 一条命令安装
 
-Ubuntu 服务器上可以直接克隆、编译并安装到 `/usr/local/bin/ltg`：
+Ubuntu 服务器上可以直接克隆，并让 makefile 自动安装依赖、编译、安装到 `/usr/local/bin/ltg`：
 
 ```bash
-git clone https://github.com/furina123123123/linux-traffic-guard.git && cd linux-traffic-guard && make && sudo make install
+git clone https://github.com/furina123123123/linux-traffic-guard.git && cd linux-traffic-guard && make bootstrap
 ```
+
+`make bootstrap` 会在 Ubuntu/Debian 上执行 `apt-get update`、安装构建和运行依赖、编译 `ltg`，然后安装到 `PREFIX` 指定的位置。默认 `PREFIX=/usr/local`；非 root 用户会自动使用 `sudo`。
 
 只想拉取单头文件时：
 
@@ -40,6 +42,12 @@ curl -fsSLO https://raw.githubusercontent.com/furina123123123/linux-traffic-guar
 ```bash
 sudo apt update
 sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep
+```
+
+也可以在仓库目录里运行：
+
+```bash
+make deps
 ```
 
 运行时会调用系统工具：`nft`、`ufw`、`fail2ban-client`、`journalctl`、`ss`、`conntrack`、`systemctl`。
@@ -104,9 +112,35 @@ sudo ./ltg --export-report
 
 ## 安装与卸载
 
+首次安装推荐：
+
 ```bash
+make bootstrap
+ltg --help
+```
+
+手动分步安装：
+
+```bash
+make deps
+make
 sudo make install
 ltg --help
+```
+
+以后更新到 GitHub 最新版：
+
+```bash
+cd linux-traffic-guard
+make update
+ltg --version
+```
+
+`make update` 使用 `git pull --ff-only`，然后重新编译并覆盖安装 `ltg`。这是源码型开源项目常见做法：首次安装负责补齐依赖，后续更新只在已有 checkout 中快进拉取、重新构建、重新安装；不会在普通 `make install` 里隐式联网或改系统包。
+
+卸载：
+
+```bash
 sudo make uninstall
 ```
 
