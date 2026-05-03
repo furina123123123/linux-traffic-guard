@@ -53,6 +53,7 @@
 #endif
 
 #ifndef _WIN32
+#include <arpa/inet.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -84,16 +85,17 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.3";
+inline const std::string kVersion = "4.12.4";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
+inline const std::string kUnknownUfwPort = "UNKNOWN";
 inline const std::string kRule1Jail = "sshd";
 inline const std::string kRule2Jail = "ufw-slowscan-global";
 inline const std::string kJailConf = "/etc/fail2ban/jail.local";
 inline const std::string kRule2FilterFile = "/etc/fail2ban/filter.d/ufw-slowscan-global.conf";
 inline const std::string kUfwDropActionFile = "/etc/fail2ban/action.d/ufw-drop.conf";
-inline const std::string kUfwCacheDir = "/var/tmp/linux_traffic_guard_ufw_cache_v1";
+inline const std::string kUfwCacheDir = "/var/tmp/linux_traffic_guard_ufw_cache_v2";
 inline const std::string kFail2banDb = "/var/lib/fail2ban/fail2ban.sqlite3";
 inline constexpr int kUfwCacheIdleDays = 14;
 
@@ -146,6 +148,7 @@ struct TrafficSummaryRow {
 struct UfwHit {
     std::string value;
     std::uint64_t count = 0;
+    std::uint64_t peak = 0;
     std::string topPort;
     std::uint64_t topPortCount = 0;
     std::string risk;
@@ -737,6 +740,92 @@ inline bool isValidIpv6OrCidr(const std::string &value) {
 inline bool isValidIpOrCidr(const std::string &value) {
     const std::string token = trim(value);
     return isValidIpv4OrCidr(token) || isValidIpv6OrCidr(token);
+}
+
+#ifndef _WIN32
+inline bool ipv4InCidr(std::uint32_t ip, std::uint32_t base, int bits) {
+    const std::uint32_t mask = bits == 0 ? 0 : (0xffffffffu << (32 - bits));
+    return (ip & mask) == (base & mask);
+}
+
+inline std::uint32_t ipv4Addr(unsigned a, unsigned b, unsigned c, unsigned d) {
+    return (a << 24) | (b << 16) | (c << 8) | d;
+}
+
+inline bool isGlobalIpv4(std::uint32_t ip) {
+    return !ipv4InCidr(ip, ipv4Addr(0, 0, 0, 0), 8) &&
+           !ipv4InCidr(ip, ipv4Addr(10, 0, 0, 0), 8) &&
+           !ipv4InCidr(ip, ipv4Addr(100, 64, 0, 0), 10) &&
+           !ipv4InCidr(ip, ipv4Addr(127, 0, 0, 0), 8) &&
+           !ipv4InCidr(ip, ipv4Addr(169, 254, 0, 0), 16) &&
+           !ipv4InCidr(ip, ipv4Addr(172, 16, 0, 0), 12) &&
+           !ipv4InCidr(ip, ipv4Addr(192, 0, 0, 0), 24) &&
+           !ipv4InCidr(ip, ipv4Addr(192, 0, 2, 0), 24) &&
+           !ipv4InCidr(ip, ipv4Addr(192, 168, 0, 0), 16) &&
+           !ipv4InCidr(ip, ipv4Addr(198, 18, 0, 0), 15) &&
+           !ipv4InCidr(ip, ipv4Addr(198, 51, 100, 0), 24) &&
+           !ipv4InCidr(ip, ipv4Addr(203, 0, 113, 0), 24) &&
+           !ipv4InCidr(ip, ipv4Addr(224, 0, 0, 0), 4) &&
+           !ipv4InCidr(ip, ipv4Addr(240, 0, 0, 0), 4);
+}
+
+inline bool isIpv6MappedIpv4(const unsigned char *bytes) {
+    for (int i = 0; i < 10; ++i) {
+        if (bytes[i] != 0) {
+            return false;
+        }
+    }
+    return bytes[10] == 0xff && bytes[11] == 0xff;
+}
+
+inline bool isGlobalIpv6(const unsigned char *bytes) {
+    bool allZero = true;
+    for (int i = 0; i < 16; ++i) {
+        allZero = allZero && bytes[i] == 0;
+    }
+    if (allZero || (bytes[15] == 1 && std::all_of(bytes, bytes + 15, [](unsigned char b) { return b == 0; }))) {
+        return false;
+    }
+    if (isIpv6MappedIpv4(bytes)) {
+        const std::uint32_t mapped = (static_cast<std::uint32_t>(bytes[12]) << 24) |
+                                     (static_cast<std::uint32_t>(bytes[13]) << 16) |
+                                     (static_cast<std::uint32_t>(bytes[14]) << 8) |
+                                     static_cast<std::uint32_t>(bytes[15]);
+        return isGlobalIpv4(mapped);
+    }
+    if ((bytes[0] & 0xfe) == 0xfc) return false;                 // fc00::/7
+    if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) return false; // fe80::/10
+    if (bytes[0] == 0xff) return false;                           // ff00::/8
+    if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false;
+    return true;
+}
+#endif
+
+inline bool normalizePublicIpAddress(const std::string &raw, std::string &normalized) {
+    const std::string token = trim(raw);
+#ifndef _WIN32
+    char buffer[INET6_ADDRSTRLEN] = {};
+    in_addr addr4{};
+    if (inet_pton(AF_INET, token.c_str(), &addr4) == 1) {
+        const std::uint32_t host = ntohl(addr4.s_addr);
+        if (!isGlobalIpv4(host) || !inet_ntop(AF_INET, &addr4, buffer, sizeof(buffer))) {
+            return false;
+        }
+        normalized = buffer;
+        return true;
+    }
+    in6_addr addr6{};
+    if (inet_pton(AF_INET6, token.c_str(), &addr6) == 1) {
+        if (!isGlobalIpv6(addr6.s6_addr) || !inet_ntop(AF_INET6, &addr6, buffer, sizeof(buffer))) {
+            return false;
+        }
+        normalized = buffer;
+        return true;
+    }
+#else
+    (void)normalized;
+#endif
+    return false;
 }
 
 inline bool isSafeIdentifier(const std::string &value) {
@@ -1428,6 +1517,9 @@ inline std::map<std::string, std::string> listeningProcesses() {
 }
 
 inline std::string serviceNameForPort(const std::string &port) {
+    if (port == kUnknownUfwPort) {
+        return "日志无DPT";
+    }
     static const std::map<std::string, std::string> common = {
         {"20", "FTP data"}, {"21", "FTP"}, {"22", "SSH"}, {"23", "Telnet"},
         {"25", "SMTP"}, {"53", "DNS"}, {"67", "DHCP"}, {"68", "DHCP"},
@@ -1523,12 +1615,13 @@ inline bool parseUfwLogEvent(const std::string &line, UfwLogEvent &event) {
     if (!std::regex_search(line, match, srcPattern)) {
         return false;
     }
-    event.src = match[1].str();
-    if (!isValidIpOrCidr(event.src) || event.src.find('/') != std::string::npos) {
+    if (!normalizePublicIpAddress(match[1].str(), event.src)) {
         return false;
     }
     if (std::regex_search(line, match, dptPattern)) {
         event.dpt = match[1].str();
+    } else {
+        event.dpt = kUnknownUfwPort;
     }
     return !event.src.empty();
 }
@@ -3268,10 +3361,11 @@ inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std
 }
 
 inline void enrichUfwHit(UfwHit &hit) {
-    if (hit.count >= 100) {
+    const std::uint64_t riskBase = hit.peak > 0 ? hit.peak : hit.count;
+    if (riskBase >= 100) {
         hit.risk = "高";
         hit.suggestion = "分析追查/处置";
-    } else if (hit.count >= 10) {
+    } else if (riskBase >= 10) {
         hit.risk = "中";
         hit.suggestion = "观察或追查";
     } else {
@@ -3290,6 +3384,7 @@ inline std::vector<UfwHit> parseTopHits(const std::string &output) {
         UfwHit hit;
         input >> hit.count >> hit.value;
         if (!hit.value.empty()) {
+            hit.peak = hit.count;
             enrichUfwHit(hit);
             hits.push_back(hit);
         }
@@ -3321,6 +3416,7 @@ inline bool collectUfwSourceTopSqlite(std::time_t start, std::time_t end, std::v
             UfwHit hit;
             hit.value = src ? src : "";
             hit.count = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 1));
+            hit.peak = hit.count;
             hits.push_back(hit);
         }
     }
@@ -3358,6 +3454,7 @@ inline std::vector<UfwHit> buildUfwSourceTopFromReport(const UfwAnalysisReport &
         hit.value = ipEntry.first;
         for (const auto &dayEntry : ipEntry.second) {
             hit.count += static_cast<std::uint64_t>(dayEntry.second);
+            hit.peak = std::max<std::uint64_t>(hit.peak, static_cast<std::uint64_t>(dayEntry.second));
         }
     }
     for (const auto &ipEntry : report.ipPortDaily) {
@@ -3387,6 +3484,9 @@ inline std::vector<UfwHit> buildUfwSourceTopFromReport(const UfwAnalysisReport &
         hits.push_back(entry.second);
     }
     std::sort(hits.begin(), hits.end(), [](const UfwHit &a, const UfwHit &b) {
+        if (a.peak != b.peak) {
+            return a.peak > b.peak;
+        }
         if (a.count != b.count) {
             return a.count > b.count;
         }
@@ -3401,17 +3501,28 @@ inline std::vector<UfwHit> buildUfwSourceTopFromReport(const UfwAnalysisReport &
 inline std::vector<UfwHit> collectUfwSourceTop() {
     const std::time_t end = std::time(nullptr);
     const std::time_t roundedEnd = end - (end % 60);
-    const UfwAnalysisReport report = analyzeUfwEvents("仪表盘近24小时", roundedEnd - 86400, roundedEnd, false);
+    const std::time_t rollingStart = roundedEnd - 86400;
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &rollingStart);
+#else
+    localtime_r(&rollingStart, &tm);
+#endif
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    const std::time_t legacyStart = makeLocalTime(tm);
+    const UfwAnalysisReport report = analyzeUfwEvents("仪表盘近24小时日期口径", legacyStart, roundedEnd, false);
     return buildUfwSourceTopFromReport(report, 10);
 }
 
 inline Table ufwHitsTable(const std::vector<UfwHit> &hits) {
-    Table table({"序号", "来源IP", "命中", "首要端口", "风险", "建议"}, {6, 34, 10, 12, 8, 18});
+    Table table({"序号", "来源IP", "单日峰值", "时段总计", "首要端口", "风险", "建议"}, {6, 34, 10, 10, 12, 8, 18});
     for (std::size_t i = 0; i < hits.size(); ++i) {
         const std::string port = hits[i].topPort == "-" || hits[i].topPort.empty()
                                      ? "-"
                                      : hits[i].topPort + "(" + std::to_string(hits[i].topPortCount) + ")";
-        table.add({std::to_string(i + 1), hits[i].value, std::to_string(hits[i].count),
+        table.add({std::to_string(i + 1), hits[i].value, std::to_string(hits[i].peak), std::to_string(hits[i].count),
                    port, hits[i].risk, hits[i].suggestion});
     }
     return table;
@@ -3480,7 +3591,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
         buffer.add(std::string("> 流量 / IP 概览  加载中 ") + spinner);
         buffer.add("  正在读取 nft、UFW、fail2ban 数据。你可以先用 ↑↓/滚轮查看页面，按 q 返回。");
         buffer.add("");
-        buffer.add("> UFW近24小时拦截来源Top  加载中");
+        buffer.add("> UFW拦截风险来源Top  加载中");
         buffer.add("");
         buffer.add("> 防护组件状态  加载中");
         return buffer;
@@ -3493,9 +3604,9 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     }
     buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, 8, false), snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用"));
     buffer.add("");
-    buffer.add("> UFW近24小时拦截来源Top");
-    buffer.add("统计口径: 最近24小时 UFW BLOCK/AUDIT 记录；不包含 ALLOW。命中=拦截/审计日志条数。");
-    buffer.addAll(tableLines(ufwHitsTable(snapshot->ufwHits), "近24小时暂无 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。"));
+    buffer.add("> UFW拦截风险来源Top");
+    buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
+    buffer.addAll(tableLines(ufwHitsTable(snapshot->ufwHits), "该窗口暂无公网 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。"));
     buffer.add("");
     buffer.add("> 防护组件状态");
     Table services({"组件", "状态", "含义", "建议"}, {18, 12, 30, 18});
@@ -3970,7 +4081,7 @@ private:
                 buffer.add("  仍在读取系统数据，可按 q 返回，或等待加载完成。");
             }
             buffer.add("");
-            buffer.add("> UFW近24小时拦截来源Top  加载中");
+            buffer.add("> UFW拦截风险来源Top  加载中");
             buffer.add("");
             buffer.add("> 防护组件状态  加载中");
             return buffer;
@@ -3988,9 +4099,9 @@ private:
         }
         addTrafficSummaryTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用", false);
         buffer.add("");
-        buffer.add("> UFW近24小时拦截来源Top");
-        buffer.add("统计口径: 最近24小时 UFW BLOCK/AUDIT 记录；不包含 ALLOW。命中=拦截/审计日志条数。");
-        addUfwTable(buffer, snapshot->ufwHits, "近24小时暂无 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。");
+        buffer.add("> UFW拦截风险来源Top");
+        buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
+        addUfwTable(buffer, snapshot->ufwHits, "该窗口暂无公网 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。");
         buffer.add("");
         buffer.add("> 防护组件状态");
         const std::vector<int> serviceWidths = {18, 14, 32, 22};
@@ -4475,9 +4586,9 @@ private:
         });
         buffer.add("");
 
-        buffer.add("> UFW近24小时拦截来源Top");
-        buffer.add("统计口径: 最近24小时 UFW BLOCK/AUDIT 记录；不包含 ALLOW。命中=拦截/审计日志条数。");
-        addUfwTable(buffer, ufwTopFuture.get(), "近24小时暂无 UFW BLOCK/AUDIT 记录。");
+        buffer.add("> UFW拦截风险来源Top");
+        buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
+        addUfwTable(buffer, ufwTopFuture.get(), "该窗口暂无公网 UFW BLOCK/AUDIT 记录。");
         buffer.add("");
 
         buffer.add("> 建议操作路径");
@@ -5831,9 +5942,9 @@ inline ScreenBuffer dashboardBufferForCli() {
     }
     addTableLines(buffer, trafficSummaryTable(totalRows, 8, false), tableEnabled ? "暂无匹配流量" : "统计表未启用");
 
-    addSection(buffer, "UFW近24小时拦截来源Top");
-    buffer.add("统计口径: 最近24小时 UFW BLOCK/AUDIT 记录；不包含 ALLOW。命中=拦截/审计日志条数。");
-    addTableLines(buffer, ufwHitsTable(collectUfwSourceTop()), "近24小时暂无 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。");
+    addSection(buffer, "UFW拦截风险来源Top");
+    buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
+    addTableLines(buffer, ufwHitsTable(collectUfwSourceTop()), "该窗口暂无公网 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。");
 
     addSection(buffer, "防护组件状态");
     Table services({"组件", "状态", "含义", "建议"}, {18, 12, 30, 18});
@@ -6029,15 +6140,25 @@ inline int selfTest() {
     const std::string ufwLine = "2026-05-03T20:01:02 host kernel: [UFW BLOCK] IN=eth0 OUT= SRC=1.2.3.4 DST=5.6.7.8 DPT=22";
     check("UFW 日志解析", parseUfwLogEvent(ufwLine, event) && event.action == "BLOCK" &&
                               event.src == "1.2.3.4" && event.dpt == "22");
+    const std::string privateUfwLine = "2026-05-03T20:01:02 host kernel: [UFW BLOCK] SRC=192.168.1.9 DST=5.6.7.8 DPT=22";
+    check("UFW 私网来源过滤", !parseUfwLogEvent(privateUfwLine, event));
+    const std::string unknownPortUfwLine = "2026-05-03T20:01:02 host kernel: [UFW AUDIT] SRC=8.8.8.8 DST=5.6.7.8";
+    check("UFW 无DPT端口兼容", parseUfwLogEvent(unknownPortUfwLine, event) && event.dpt == kUnknownUfwPort);
     const std::string badUfwLine = "2026-05-03T20:01:02 host kernel: [UFW BLOCK] SRC=:::: DST=5.6.7.8 DPT=22";
     check("UFW 无效来源过滤", !parseUfwLogEvent(badUfwLine, event));
     UfwAnalysisReport sourceTopReport;
     sourceTopReport.ipDaily["1.2.3.4"]["2026-05-03"] = 2;
+    sourceTopReport.ipDaily["1.2.3.4"]["2026-05-04"] = 5;
+    sourceTopReport.ipDaily["8.8.8.8"]["2026-05-03"] = 6;
     sourceTopReport.ipPortDaily["1.2.3.4"]["22"]["2026-05-03"] = 2;
+    sourceTopReport.ipPortDaily["1.2.3.4"]["22"]["2026-05-04"] = 5;
+    sourceTopReport.ipPortDaily["8.8.8.8"]["443"]["2026-05-03"] = 6;
     sourceTopReport.allowRecent.push_back({"1.2.3.4", std::time(nullptr)});
     const auto sourceTop = buildUfwSourceTopFromReport(sourceTopReport, 10);
-    check("UFW来源Top口径", sourceTop.size() == 1 && sourceTop[0].value == "1.2.3.4" &&
-                              sourceTop[0].count == 2 && sourceTop[0].topPort == "22");
+    check("UFW来源Top口径", sourceTop.size() == 2 && sourceTop[0].value == "8.8.8.8" &&
+                              sourceTop[0].peak == 6 && sourceTop[0].count == 6 &&
+                              sourceTop[1].value == "1.2.3.4" && sourceTop[1].peak == 5 &&
+                              sourceTop[1].count == 7 && sourceTop[1].topPort == "22");
 
     const auto traffic = parseTrafficSetOutput("elements = { 1.2.3.4 . 443 counter packets 7 bytes 2048 }", "下载", "IPv4");
     check("nft 统计解析", traffic.size() == 1 && traffic[0].ip == "1.2.3.4" &&
