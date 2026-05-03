@@ -71,7 +71,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.11.0";
+inline const std::string kVersion = "4.11.1";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
 inline const std::string kRule1Jail = "sshd";
@@ -466,6 +466,23 @@ inline bool isSafePortList(const std::string &value) {
     return true;
 }
 
+inline bool isSafeSinglePort(const std::string &value) {
+    if (value.empty()) {
+        return false;
+    }
+    int port = 0;
+    for (unsigned char ch : value) {
+        if (!std::isdigit(ch)) {
+            return false;
+        }
+        port = port * 10 + (ch - '0');
+        if (port > 65535) {
+            return false;
+        }
+    }
+    return port >= 1;
+}
+
 inline bool isSafePortOrEmpty(const std::string &value) {
     return value.empty() || isSafePortList(value);
 }
@@ -482,8 +499,20 @@ inline bool isValidPositiveInt(const std::string &value) {
     return value != "0";
 }
 
+inline bool isStrictPositiveNumber(const std::string &value) {
+    if (!std::regex_match(value, std::regex(R"(^[0-9]+(\.[0-9]+)?$)"))) {
+        return false;
+    }
+    for (unsigned char ch : value) {
+        if (std::isdigit(ch) && ch != '0') {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline bool isValidPositiveNumber(const std::string &value) {
-    return std::regex_match(value, std::regex(R"(^[0-9]+(\.[0-9]+)?$)")) && value != "0";
+    return isStrictPositiveNumber(value);
 }
 
 inline bool isValidTimeToken(const std::string &value) {
@@ -491,34 +520,125 @@ inline bool isValidTimeToken(const std::string &value) {
     return parseTimeToSeconds(value, seconds);
 }
 
-inline bool isValidIpOrCidr(const std::string &value) {
-    const std::string token = trim(value);
-    if (token.empty()) {
+inline bool parsePrefixLength(const std::string &prefix, int maxBits, int &bits) {
+    if (prefix.empty() || prefix.size() > 3) {
         return false;
     }
-    static const std::regex ipv4(R"(^(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(\.(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}(/([0-9]|[1-2][0-9]|3[0-2]))?$)");
-    static const std::regex ipv6(R"(^[0-9A-Fa-f:]+(/[0-9]{1,3})?$)");
-    if (std::regex_match(token, ipv4)) {
-        return true;
-    }
-    if (!std::regex_match(token, ipv6) || token.find(':') == std::string::npos) {
-        return false;
-    }
-    const std::size_t slash = token.find('/');
-    if (slash == std::string::npos) {
-        return true;
-    }
-    const std::string prefix = token.substr(slash + 1);
-    if (prefix.empty()) {
-        return false;
-    }
+    int value = 0;
     for (unsigned char ch : prefix) {
         if (!std::isdigit(ch)) {
             return false;
         }
+        value = value * 10 + (ch - '0');
     }
-    const int bits = std::stoi(prefix);
-    return bits >= 0 && bits <= 128;
+    if (value < 0 || value > maxBits) {
+        return false;
+    }
+    bits = value;
+    return true;
+}
+
+inline bool isValidIpv4Address(const std::string &address) {
+    static const std::regex ipv4(R"(^(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(\.(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}$)");
+    return std::regex_match(address, ipv4);
+}
+
+inline bool isValidIpv4OrCidr(const std::string &value) {
+    const std::string token = trim(value);
+    const std::size_t slash = token.find('/');
+    const std::string address = slash == std::string::npos ? token : token.substr(0, slash);
+    if (!isValidIpv4Address(address)) {
+        return false;
+    }
+    if (slash == std::string::npos) {
+        return true;
+    }
+    int bits = 0;
+    return token.find('/', slash + 1) == std::string::npos &&
+           parsePrefixLength(token.substr(slash + 1), 32, bits);
+}
+
+inline bool isHexHextet(const std::string &part) {
+    if (part.empty() || part.size() > 4) {
+        return false;
+    }
+    for (unsigned char ch : part) {
+        if (!std::isxdigit(ch)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool isValidIpv6Address(std::string address) {
+    if (address.empty() || address.find(':') == std::string::npos ||
+        address.find(":::") != std::string::npos) {
+        return false;
+    }
+
+    if (address.find('.') != std::string::npos) {
+        const std::size_t lastColon = address.find_last_of(':');
+        if (lastColon == std::string::npos || lastColon + 1 >= address.size()) {
+            return false;
+        }
+        const std::string ipv4Tail = address.substr(lastColon + 1);
+        if (!isValidIpv4Address(ipv4Tail)) {
+            return false;
+        }
+        address = address.substr(0, lastColon) + ":0:0";
+    }
+
+    const std::size_t compression = address.find("::");
+    const bool compressed = compression != std::string::npos;
+    if (compressed && address.find("::", compression + 2) != std::string::npos) {
+        return false;
+    }
+
+    std::vector<std::string> parts;
+    std::size_t start = 0;
+    while (start <= address.size()) {
+        const std::size_t colon = address.find(':', start);
+        parts.push_back(address.substr(start, colon == std::string::npos ? std::string::npos : colon - start));
+        if (colon == std::string::npos) {
+            break;
+        }
+        start = colon + 1;
+    }
+
+    int groups = 0;
+    for (const auto &part : parts) {
+        if (part.empty()) {
+            continue;
+        }
+        if (!isHexHextet(part)) {
+            return false;
+        }
+        ++groups;
+    }
+    if (compressed) {
+        return groups < 8;
+    }
+    return groups == 8 && std::none_of(parts.begin(), parts.end(), [](const std::string &part) { return part.empty(); });
+}
+
+inline bool isValidIpv6OrCidr(const std::string &value) {
+    const std::string token = trim(value);
+    const std::size_t slash = token.find('/');
+    const std::string address = slash == std::string::npos ? token : token.substr(0, slash);
+    if (!isValidIpv6Address(address)) {
+        return false;
+    }
+    if (slash == std::string::npos) {
+        return true;
+    }
+    int bits = 0;
+    return token.find('/', slash + 1) == std::string::npos &&
+           parsePrefixLength(token.substr(slash + 1), 128, bits);
+}
+
+inline bool isValidIpOrCidr(const std::string &value) {
+    const std::string token = trim(value);
+    return isValidIpv4OrCidr(token) || isValidIpv6OrCidr(token);
 }
 
 inline bool isSafeIdentifier(const std::string &value) {
@@ -589,6 +709,22 @@ inline std::time_t makeLocalTime(std::tm tm) {
     return std::mktime(&tm);
 }
 
+inline bool isLeapYear(int year) {
+    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+inline bool isValidCalendarDateParts(int year, int month, int day) {
+    if (year < 1970 || year > 9999 || month < 1 || month > 12 || day < 1) {
+        return false;
+    }
+    static const int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int limit = daysInMonth[month - 1];
+    if (month == 2 && isLeapYear(year)) {
+        limit = 29;
+    }
+    return day <= limit;
+}
+
 inline bool parseYmdDate(const std::string &text, bool endOfDay, std::time_t &out) {
     std::smatch match;
     const std::string value = trim(text);
@@ -599,21 +735,42 @@ inline bool parseYmdDate(const std::string &text, bool endOfDay, std::time_t &ou
 #else
     localtime_r(&now, &tm);
 #endif
+    int year = tm.tm_year + 1900;
+    int month = tm.tm_mon + 1;
+    int day = tm.tm_mday;
     if (std::regex_match(value, match, std::regex(R"((\d{4})[-/ ](\d{1,2})[-/ ](\d{1,2}))"))) {
-        tm.tm_year = std::stoi(match[1].str()) - 1900;
-        tm.tm_mon = std::stoi(match[2].str()) - 1;
-        tm.tm_mday = std::stoi(match[3].str());
+        year = std::stoi(match[1].str());
+        month = std::stoi(match[2].str());
+        day = std::stoi(match[3].str());
     } else if (std::regex_match(value, match, std::regex(R"((\d{1,2})[-/ ](\d{1,2}))"))) {
-        tm.tm_mon = std::stoi(match[1].str()) - 1;
-        tm.tm_mday = std::stoi(match[2].str());
+        month = std::stoi(match[1].str());
+        day = std::stoi(match[2].str());
     } else {
         return false;
     }
+    if (!isValidCalendarDateParts(year, month, day)) {
+        return false;
+    }
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
     tm.tm_hour = endOfDay ? 23 : 0;
     tm.tm_min = endOfDay ? 59 : 0;
     tm.tm_sec = endOfDay ? 59 : 0;
+    tm.tm_isdst = -1;
     out = makeLocalTime(tm);
-    return out != static_cast<std::time_t>(-1);
+    if (out == static_cast<std::time_t>(-1)) {
+        return false;
+    }
+    std::tm roundTrip{};
+#ifdef _WIN32
+    localtime_s(&roundTrip, &out);
+#else
+    localtime_r(&out, &roundTrip);
+#endif
+    return roundTrip.tm_year == year - 1900 &&
+           roundTrip.tm_mon == month - 1 &&
+           roundTrip.tm_mday == day;
 }
 
 inline bool parseTimeToSeconds(const std::string &text, long long &seconds) {
@@ -1264,6 +1421,9 @@ inline bool parseUfwLogEvent(const std::string &line, UfwLogEvent &event) {
         return false;
     }
     event.src = match[1].str();
+    if (!isValidIpOrCidr(event.src) || event.src.find('/') != std::string::npos) {
+        return false;
+    }
     if (std::regex_search(line, match, dptPattern)) {
         event.dpt = match[1].str();
     }
@@ -4486,7 +4646,7 @@ private:
         PromptAnswer port = promptLine("端口防火墙向导", {"请输入端口，示例: 443。"}, "端口号: ");
         if (!port.ok) return;
         const std::string portValue = removeSpaces(port.value);
-        if (!isSafePortList(portValue)) {
+        if (!isSafeSinglePort(portValue)) {
             ScreenBuffer buffer;
             buffer.add("端口不合法。示例: 443");
             pushResult("端口防火墙向导", buffer);
@@ -5119,7 +5279,7 @@ private:
         PromptAnswer port = promptLine("端口下钻", {"请输入单个端口，例如 443。"}, "端口号: ");
         if (!port.ok) return;
         const std::string value = removeSpaces(port.value);
-        if (!isSafePortList(value)) {
+        if (!isSafeSinglePort(value)) {
             ScreenBuffer buffer;
             buffer.add("端口不合法。请输入单个端口，例如 443。");
             pushResult("端口下钻", buffer);
@@ -5366,9 +5526,26 @@ inline int selfTest() {
         cases.push_back({name, ok, detail});
     };
 
-    check("端口列表校验", isSafePortList("22,80,443,10000-10010") && !isSafePortList("0,70000") && !isSafePortList("80,,443"));
+    check("端口列表校验", isSafePortList("22,80,443,10000-10010") &&
+                               !isSafePortList("0,70000") && !isSafePortList("80,,443"));
+    check("单端口校验", isSafeSinglePort("22") && isSafeSinglePort("65535") &&
+                            !isSafeSinglePort("0") && !isSafeSinglePort("80,443") &&
+                            !isSafeSinglePort("80-90") && !isSafeSinglePort("abc"));
     check("IP/CIDR 校验", isValidIpOrCidr("192.168.1.1") && isValidIpOrCidr("10.0.0.0/8") &&
-                              isValidIpOrCidr("2001:db8::1/64") && !isValidIpOrCidr("999.1.1.1"));
+                              isValidIpOrCidr("2001:db8::1/64") && isValidIpOrCidr("::1") &&
+                              isValidIpOrCidr("::ffff:192.0.2.128") &&
+                              !isValidIpOrCidr("999.1.1.1") && !isValidIpOrCidr("::::") &&
+                              !isValidIpOrCidr("2001:::1") && !isValidIpOrCidr("abcd") &&
+                              !isValidIpOrCidr("1.2.3.4/33") && !isValidIpOrCidr("2001:db8::1/999"));
+    check("严格正数校验", isStrictPositiveNumber("0.1") && isStrictPositiveNumber("2") &&
+                                !isStrictPositiveNumber("0") && !isStrictPositiveNumber("0.0") &&
+                                !isStrictPositiveNumber("00") && !isStrictPositiveNumber("abc"));
+    std::time_t parsedDate = 0;
+    check("日历日期校验", parseYmdDate("2026-02-28", false, parsedDate) &&
+                              parseYmdDate("2024-02-29", true, parsedDate) &&
+                              !parseYmdDate("2026-13-01", false, parsedDate) &&
+                              !parseYmdDate("2026-02-31", false, parsedDate) &&
+                              !parseYmdDate("2025-02-29", false, parsedDate));
     long long seconds = 0;
     check("时间 token 解析", parseTimeToSeconds("10m", seconds) && seconds == 600 &&
                                   parseTimeToSeconds("2h", seconds) && seconds == 7200 &&
@@ -5379,6 +5556,8 @@ inline int selfTest() {
     const std::string ufwLine = "2026-05-03T20:01:02 host kernel: [UFW BLOCK] IN=eth0 OUT= SRC=1.2.3.4 DST=5.6.7.8 DPT=22";
     check("UFW 日志解析", parseUfwLogEvent(ufwLine, event) && event.action == "BLOCK" &&
                               event.src == "1.2.3.4" && event.dpt == "22");
+    const std::string badUfwLine = "2026-05-03T20:01:02 host kernel: [UFW BLOCK] SRC=:::: DST=5.6.7.8 DPT=22";
+    check("UFW 无效来源过滤", !parseUfwLogEvent(badUfwLine, event));
 
     const auto traffic = parseTrafficSetOutput("elements = { 1.2.3.4 . 443 counter packets 7 bytes 2048 }", "下载", "IPv4");
     check("nft 统计解析", traffic.size() == 1 && traffic[0].ip == "1.2.3.4" &&
