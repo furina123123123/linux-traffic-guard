@@ -1,5 +1,10 @@
 # Linux Traffic Guard / Linux 流量守卫
 
+[![CI](https://github.com/furina123123123/linux-traffic-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/furina123123123/linux-traffic-guard/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
+![Ubuntu](https://img.shields.io/badge/Target-Ubuntu-orange.svg)
+
 Linux Traffic Guard 是一个面向 Ubuntu 服务器的单头文件 C++17 运维工具。它把流量统计、UFW 来源分析、fail2ban 策略管理、处置修复和诊断报告放在同一个纯 ANSI 全屏 TUI 中，不依赖外部 `.sh` 或 `.py` 脚本。
 
 ## 一条命令安装
@@ -99,7 +104,7 @@ sudo make PREFIX=/opt/ltg install
 生成源码发布包：
 
 ```bash
-make dist
+make release-check
 ```
 
 发布包只包含：
@@ -109,8 +114,19 @@ make dist
 - `README.md`
 - `LICENSE`
 - `CHANGELOG.md`
+- `CONTRIBUTING.md`
+- `SECURITY.md`
 
 旧迁移脚本和本地编译产物通过 `.gitignore` 排除，不属于 release。
+
+## 项目维护
+
+仓库包含基础开源维护文件：
+
+- CI：`.github/workflows/ci.yml` 会在 Ubuntu 上编译、检查 root guard、测试 SQLite fallback，并做 root 命令烟测。
+- 贡献指南：`CONTRIBUTING.md` 说明开发约束、检查命令和 PR 清单。
+- 安全策略：`SECURITY.md` 说明漏洞报告方式和安全期望。
+- Issue / PR 模板：帮助复现问题、说明环境和记录验证结果。
 
 ## 缓存说明
 

@@ -22,7 +22,7 @@ endif
 
 BINARY := $(TARGET)$(EXEEXT)
 
-.PHONY: all run status doctor check install uninstall dist clean help
+.PHONY: all run status doctor check check-nosqlite check-root-guard release-check install uninstall dist clean help
 
 all: $(BINARY)
 
@@ -42,6 +42,20 @@ check: $(BINARY)
 	./$(BINARY) --version
 	./$(BINARY) --help >/dev/null
 
+check-nosqlite:
+	$(CXX) $(CXXFLAGS) -DLTG_FORCE_NO_SQLITE=1 -x c++ $(SOURCE) -o $(TARGET)-nosqlite$(EXEEXT)
+	./$(TARGET)-nosqlite$(EXEEXT) --version
+
+check-root-guard: $(BINARY)
+	@if [ "$$(id -u)" = "0" ]; then \
+		echo "skip root guard check when running as root"; \
+	else \
+		./$(BINARY) --status >/tmp/ltg-root-guard.out 2>&1; code=$$?; \
+		test "$$code" = "77"; \
+	fi
+
+release-check: check check-nosqlite check-root-guard dist
+
 install: $(BINARY)
 	install -Dm755 $(BINARY) $(DESTDIR)$(BINDIR)/$(TARGET)
 
@@ -50,12 +64,12 @@ uninstall:
 
 dist: clean
 	mkdir -p $(DISTDIR)
-	cp $(SOURCE) makefile README.md LICENSE CHANGELOG.md $(DISTDIR)/
+	cp $(SOURCE) makefile README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md .gitattributes $(DISTDIR)/
 	tar -czf $(DISTDIR).tar.gz $(DISTDIR)
 	rm -rf $(DISTDIR)
 
 clean:
-	-$(RM) $(TARGET) $(TARGET).exe linux-traffic-guard-*.tar.gz $(NULL)
+	-$(RM) $(TARGET) $(TARGET).exe $(TARGET)-nosqlite $(TARGET)-nosqlite.exe linux-traffic-guard-*.tar.gz $(NULL)
 
 help:
 	@echo "Linux 流量守卫 makefile"
@@ -64,6 +78,7 @@ help:
 	@echo "  make status   编译并打印仪表盘"
 	@echo "  make doctor   编译并检查依赖"
 	@echo "  make check    编译并做基础自检"
+	@echo "  make release-check 运行发布前检查并生成源码包"
 	@echo "  make install  安装到 $(BINDIR)"
 	@echo "  make uninstall 删除 $(BINDIR)/$(TARGET)"
 	@echo "  make dist     生成源码发布包"
