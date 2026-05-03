@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.5 - 2026-05-03
+
+### Changed
+
+- Made traffic statistics port-first: the dashboard now groups traffic by port, and the traffic ranking page shows port totals before IP totals and IP+port details.
+- Added port-grouped upload/download aggregation so multiple IPs hitting the same port appear as one row with a combined total.
+
 ## 4.12.4 - 2026-05-03
 
 ### Changed
