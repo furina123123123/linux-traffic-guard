@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.12.6 - 2026-05-03
+
+### Changed
+
+- Added fail2ban runtime verification after policy repair: configuration test, service reload, ping, and explicit `sshd` / `ufw-slowscan-global` jail status checks.
+- Added a reversible fail2ban/UFW effect probe that temporarily bans `203.0.113.254`, verifies jail and UFW rule landing, then cleans up.
+- Stopped treating `UnknownJailException` or socket permission errors as empty ban lists in audit/status views.
+
 ## 4.12.5 - 2026-05-03
 
 ### Changed

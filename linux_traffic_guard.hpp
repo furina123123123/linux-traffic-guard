@@ -85,13 +85,14 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.5";
+inline const std::string kVersion = "4.12.6";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
 inline const std::string kUnknownUfwPort = "UNKNOWN";
 inline const std::string kRule1Jail = "sshd";
 inline const std::string kRule2Jail = "ufw-slowscan-global";
+inline const std::string kFail2banEffectProbeIp = "203.0.113.254";
 inline const std::string kJailConf = "/etc/fail2ban/jail.local";
 inline const std::string kRule2FilterFile = "/etc/fail2ban/filter.d/ufw-slowscan-global.conf";
 inline const std::string kUfwDropActionFile = "/etc/fail2ban/action.d/ufw-drop.conf";
@@ -177,7 +178,31 @@ struct F2bPolicyInfo {
     std::string port;
     std::string state;
     std::size_t bannedCount = 0;
+    bool configured = false;
+    bool jailLoaded = false;
+    std::string recentBan;
+    std::string runtimeDetail;
     bool managedDefault = false;
+};
+
+enum class F2bJailRuntimeState {
+    Loaded,
+    NotLoaded,
+    PermissionDenied,
+    Fail2banUnavailable,
+    Unknown
+};
+
+struct F2bJailRuntimeInfo {
+    std::string jail;
+    F2bJailRuntimeState state = F2bJailRuntimeState::Unknown;
+    std::string label;
+    std::string raw;
+    std::set<std::string> bannedIps;
+
+    bool loaded() const {
+        return state == F2bJailRuntimeState::Loaded;
+    }
 };
 
 struct UfwLogEvent {
@@ -207,6 +232,28 @@ struct DualAuditRow {
     bool rule2Banned = false;
     bool banLogged = false;
     std::string conclusion;
+};
+
+struct DualAuditReport {
+    F2bJailRuntimeInfo rule1;
+    F2bJailRuntimeInfo rule2;
+    std::vector<DualAuditRow> rows;
+};
+
+struct F2bEffectProbe {
+    bool serviceOk = false;
+    bool jailLoaded = false;
+    bool banListed = false;
+    bool ufwLanded = false;
+    bool unbanOk = false;
+    bool ufwCleanupOk = false;
+    CommandResult ping;
+    CommandResult ban;
+    CommandResult statusAfterBan;
+    CommandResult ufwStatus;
+    CommandResult unban;
+    CommandResult ufwCleanup;
+    F2bJailRuntimeInfo jailStatus;
 };
 
 struct DashboardSnapshot {
@@ -1322,27 +1369,99 @@ inline std::string ufwDeletePortRuleCommand(const std::string &verb, const std::
     return "ufw --force delete " + verb + " " + shellQuote(target);
 }
 
-inline std::string bannedListForJail(const std::string &jail) {
-    const std::string cmd =
-        "fail2ban-client status " + shellQuote(jail) +
-        " 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p' || true";
-    return trim(Shell::capture(cmd).output);
+inline std::string f2bRuntimeStateLabel(F2bJailRuntimeState state) {
+    switch (state) {
+    case F2bJailRuntimeState::Loaded:
+        return "已加载";
+    case F2bJailRuntimeState::NotLoaded:
+        return "未加载";
+    case F2bJailRuntimeState::PermissionDenied:
+        return "权限不足";
+    case F2bJailRuntimeState::Fail2banUnavailable:
+        return "fail2ban 不可用";
+    case F2bJailRuntimeState::Unknown:
+    default:
+        return "未知";
+    }
+}
+
+inline F2bJailRuntimeInfo parseFail2banJailStatus(const std::string &jail, const std::string &rawOutput, bool clientExists = true) {
+    F2bJailRuntimeInfo info;
+    info.jail = jail;
+    info.raw = trim(rawOutput);
+    const std::string lower = lowerCopy(info.raw);
+    if (!clientExists) {
+        info.state = F2bJailRuntimeState::Fail2banUnavailable;
+    } else if (lower.find("permission denied") != std::string::npos ||
+               lower.find("you must be root") != std::string::npos ||
+               lower.find("access denied") != std::string::npos) {
+        info.state = F2bJailRuntimeState::PermissionDenied;
+    } else if (info.raw.empty() || lower.find("unable to contact server") != std::string::npos ||
+               lower.find("connection refused") != std::string::npos ||
+               lower.find("failed to access socket") != std::string::npos) {
+        info.state = F2bJailRuntimeState::Fail2banUnavailable;
+    } else if (info.raw.find("UnknownJailException") != std::string::npos ||
+               lower.find("unknown jail") != std::string::npos ||
+               lower.find("does not exist") != std::string::npos) {
+        info.state = F2bJailRuntimeState::NotLoaded;
+    } else if (lower.find("status for the jail") != std::string::npos ||
+               lower.find("banned ip list") != std::string::npos ||
+               lower.find("currently banned") != std::string::npos) {
+        info.state = F2bJailRuntimeState::Loaded;
+    } else {
+        info.state = F2bJailRuntimeState::Unknown;
+    }
+    info.label = f2bRuntimeStateLabel(info.state);
+
+    for (const auto &line : splitLines(info.raw)) {
+        const std::size_t pos = line.find("Banned IP list:");
+        if (pos == std::string::npos) {
+            continue;
+        }
+        std::string list = line.substr(pos + std::string("Banned IP list:").size());
+        std::replace(list.begin(), list.end(), ',', ' ');
+        for (const auto &ip : splitWords(list)) {
+            if (isValidIpOrCidr(ip) && ip.find('/') == std::string::npos) {
+                info.bannedIps.insert(ip);
+            }
+        }
+    }
+    return info;
+}
+
+inline F2bJailRuntimeInfo fail2banJailRuntimeStatus(const std::string &jail) {
+    if (!Shell::exists("fail2ban-client")) {
+        return parseFail2banJailStatus(jail, "", false);
+    }
+    const CommandResult result = Shell::capture("fail2ban-client status " + shellQuote(jail) + " 2>&1");
+    return parseFail2banJailStatus(jail, result.output, true);
 }
 
 inline std::set<std::string> bannedSetForJail(const std::string &jail) {
-    std::set<std::string> out;
-    for (const auto &ip : splitWords(bannedListForJail(jail))) {
-        if (!ip.empty()) {
-            out.insert(ip);
-        }
-    }
-    return out;
+    return fail2banJailRuntimeStatus(jail).bannedIps;
 }
 
 inline std::string fail2banJailStatusLine(const std::string &jail) {
-    const CommandResult result = Shell::capture("fail2ban-client status " + shellQuote(jail) + " 2>/dev/null || true");
-    const std::string output = trim(result.output);
-    return output.empty() ? "不可用或未启用" : output;
+    const F2bJailRuntimeInfo info = fail2banJailRuntimeStatus(jail);
+    if (info.raw.empty()) {
+        return info.label;
+    }
+    std::string firstLine = splitLines(info.raw).empty() ? info.raw : splitLines(info.raw).front();
+    if (firstLine.size() > 160) {
+        firstLine = firstLine.substr(0, 157) + "...";
+    }
+    return info.label + ": " + firstLine;
+}
+
+inline std::string recentBanLineForJail(const std::string &jail) {
+    const std::string cmd =
+        "(grep -h '\\[" + jail + "\\].* Ban ' /var/log/fail2ban.log* 2>/dev/null || "
+        "journalctl -u fail2ban --no-pager 2>/dev/null | grep '\\[" + jail + "\\].* Ban ') | tail -1";
+    return trim(Shell::capture(cmd).output);
+}
+
+inline std::string fail2banSetIpCommandStrict(const std::string &jail, const std::string &verb, const std::string &ip) {
+    return "fail2ban-client set " + shellQuote(jail) + " " + verb + " " + shellQuote(ip);
 }
 
 inline std::time_t parseFail2banDbTime(const std::string &text) {
@@ -1464,6 +1583,10 @@ inline std::vector<F2bPolicyInfo> collectFail2banPolicies(bool includeRuntimeSta
     std::set<std::string> names = configuredFail2banJails();
     const std::set<std::string> running = runningFail2banJails();
     names.insert(running.begin(), running.end());
+    IniConfig ini;
+    ini.load(kJailConf);
+    const std::vector<std::string> sections = ini.sections();
+    const std::set<std::string> configuredSections(sections.begin(), sections.end());
 
     std::vector<F2bPolicyInfo> policies;
     for (const auto &name : names) {
@@ -1471,15 +1594,22 @@ inline std::vector<F2bPolicyInfo> collectFail2banPolicies(bool includeRuntimeSta
         info.name = name;
         info.role = policyRoleForJail(name);
         info.managedDefault = name == kRule1Jail || name == kRule2Jail;
+        info.configured = configuredSections.count(name) > 0;
         info.config = readJailConfig(name);
         info.filter = readJailValue(name, "filter");
         info.backend = readJailValue(name, "backend");
         info.logpath = readJailValue(name, "logpath");
         info.port = readJailValue(name, "port");
+        const F2bJailRuntimeInfo runtime = includeRuntimeStatus ? fail2banJailRuntimeStatus(name) : F2bJailRuntimeInfo{};
+        info.jailLoaded = includeRuntimeStatus ? runtime.loaded() : running.count(name) > 0;
+        info.runtimeDetail = includeRuntimeStatus ? runtime.label : (running.count(name) ? "已加载" : "-");
         const bool configuredEnabled = lowerCopy(configValueOr(info.config.enabled, running.count(name) ? "true" : "false")) == "true";
-        info.state = running.count(name) ? "运行中" : (configuredEnabled ? "已配置/待重载" : "未启用");
-        if (includeRuntimeStatus && running.count(name)) {
-            info.bannedCount = bannedSetForJail(name).size();
+        if (includeRuntimeStatus) {
+            info.state = runtime.label;
+            info.bannedCount = runtime.bannedIps.size();
+            info.recentBan = recentBanLineForJail(name).empty() ? "-" : "有";
+        } else {
+            info.state = running.count(name) ? "运行中" : (configuredEnabled ? "已配置/待重载" : "未启用");
         }
         policies.push_back(info);
     }
@@ -2236,7 +2366,10 @@ inline std::vector<std::pair<std::string, int>> sortedCounter(const std::map<std
     return rows;
 }
 
-inline std::vector<DualAuditRow> buildDualAuditRows(std::time_t start, std::time_t end, int limit = 30) {
+inline DualAuditReport buildDualAuditReport(std::time_t start, std::time_t end, int limit = 30) {
+    DualAuditReport report;
+    report.rule1 = fail2banJailRuntimeStatus(kRule1Jail);
+    report.rule2 = fail2banJailRuntimeStatus(kRule2Jail);
     std::string sourceNote;
     const auto events = loadLiveUfwEvents(start, end, sourceNote);
     std::map<std::string, int> hits;
@@ -2245,8 +2378,6 @@ inline std::vector<DualAuditRow> buildDualAuditRows(std::time_t start, std::time
             hits[event.src] += 1;
         }
     }
-    const std::set<std::string> rule1 = bannedSetForJail(kRule1Jail);
-    const std::set<std::string> rule2 = bannedSetForJail(kRule2Jail);
     const F2bJailConfig cfg = readJailConfig(kRule2Jail);
     int threshold = 50;
     if (isValidPositiveInt(configValueOr(cfg.maxretry, "50"))) {
@@ -2254,18 +2385,19 @@ inline std::vector<DualAuditRow> buildDualAuditRows(std::time_t start, std::time
     }
     std::string banLog = Shell::capture("journalctl -u fail2ban --no-pager --since " + shellQuote(dateTimeStamp(start)) +
                                         " 2>/dev/null | grep ' Ban ' || grep -h ' Ban ' /var/log/fail2ban.log* 2>/dev/null || true").output;
-    std::vector<DualAuditRow> rows;
     for (const auto &item : sortedCounter(hits)) {
-        if (static_cast<int>(rows.size()) >= limit) {
+        if (static_cast<int>(report.rows.size()) >= limit) {
             break;
         }
         DualAuditRow row;
         row.ip = item.first;
         row.ufwHits = item.second;
-        row.rule1Banned = rule1.count(item.first) > 0;
-        row.rule2Banned = rule2.count(item.first) > 0;
+        row.rule1Banned = report.rule1.bannedIps.count(item.first) > 0;
+        row.rule2Banned = report.rule2.bannedIps.count(item.first) > 0;
         row.banLogged = banLog.find(item.first) != std::string::npos;
-        if (row.rule2Banned) {
+        if (!report.rule2.loaded()) {
+            row.conclusion = "规则2未加载，无法自动封禁";
+        } else if (row.rule2Banned) {
             row.conclusion = "已升级全端口封禁";
         } else if (row.rule1Banned) {
             row.conclusion = "已被规则1封禁";
@@ -2276,9 +2408,13 @@ inline std::vector<DualAuditRow> buildDualAuditRows(std::time_t start, std::time
         } else {
             row.conclusion = "仅 UFW 拦截";
         }
-        rows.push_back(row);
+        report.rows.push_back(row);
     }
-    return rows;
+    return report;
+}
+
+inline std::vector<DualAuditRow> buildDualAuditRows(std::time_t start, std::time_t end, int limit = 30) {
+    return buildDualAuditReport(start, end, limit).rows;
 }
 
 inline std::vector<std::string> dualAuditCandidateIps(const std::vector<DualAuditRow> &rows) {
@@ -3827,8 +3963,8 @@ private:
     static void addF2bPolicyTable(ScreenBuffer &buffer,
                                   const std::vector<F2bPolicyInfo> &policies,
                                   const std::string &emptyMessage = "暂无策略") {
-        const std::vector<int> widths = {22, 18, 12, 8, 9, 9, 9, 15, 9};
-        buffer.add(tableRow({"策略", "定位", "状态", "阈值", "窗口", "封禁", "动作", "过滤器", "封禁IP"}, widths, true));
+        const std::vector<int> widths = {22, 16, 8, 10, 8, 8, 9, 12, 8, 8};
+        buffer.add(tableRow({"策略", "定位", "配置", "jail", "阈值", "窗口", "封禁", "动作", "封禁IP", "最近Ban"}, widths, true));
         buffer.add(tableRule(widths));
         if (policies.empty()) {
             buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
@@ -3838,13 +3974,14 @@ private:
             buffer.add(tableRow({
                 policy.name,
                 policy.role,
-                policy.state,
+                policy.configured ? "存在" : "缺失",
+                policy.runtimeDetail.empty() ? policy.state : policy.runtimeDetail,
                 configValueOr(policy.config.maxretry, policy.name == kRule2Jail ? "50" : "5"),
                 configValueOr(policy.config.findtime, "3600"),
                 configValueOr(policy.config.bantime, policy.name == kRule2Jail ? "1d" : "600"),
                 configValueOr(policy.config.banaction, policy.name == kRule2Jail ? "ufw-drop" : "默认"),
-                configValueOr(policy.filter, policy.name),
                 std::to_string(policy.bannedCount),
+                policy.recentBan.empty() ? "-" : policy.recentBan,
             }, widths));
         }
     }
@@ -3991,7 +4128,8 @@ private:
                      {"2", "当前封禁详情", "IP、封禁时间、预计剩余", false, [this] { actionCurrentBanDetails(); }},
                      {"3", "封禁日志", "查看 fail2ban Ban 记录", false, [this] { actionF2bBanLogs(); }},
                      {"4", "补封禁候选 IP", "预览达到规则2阈值但未封禁的 IP", true, [this] { actionBanDualAuditCandidates(); }},
-                     {"5", "导出防护诊断", "导出 fail2ban/UFW 配置与日志", false, [this] { actionExportF2bDiagnostic(); }},
+                     {"5", "实效自检", "临时 ban 测试 IP 并确认 UFW 落地", true, [this] { actionFail2banEffectProbe(); }},
+                     {"6", "导出防护诊断", "导出 fail2ban/UFW 配置与日志", false, [this] { actionExportF2bDiagnostic(); }},
                  });
     }
 
@@ -4158,19 +4296,13 @@ private:
                              serviceSuggestion("ufw", snapshot->ufwState)}, serviceWidths));
         buffer.add("");
         buffer.add("> Fail2ban 默认策略");
-        F2bPolicyInfo sshPolicy;
-        sshPolicy.name = kRule1Jail;
-        sshPolicy.role = "SSH 登录";
-        sshPolicy.config = readJailConfig(kRule1Jail);
-        sshPolicy.filter = readJailValue(kRule1Jail, "filter");
-        sshPolicy.state = normalizedServiceState(snapshot->fail2banState) == "运行" ? "随服务运行" : "待确认";
-        F2bPolicyInfo scanPolicy;
-        scanPolicy.name = kRule2Jail;
-        scanPolicy.role = "UFW 慢扫";
-        scanPolicy.config = readJailConfig(kRule2Jail);
-        scanPolicy.filter = readJailValue(kRule2Jail, "filter");
-        scanPolicy.state = lowerCopy(configValueOr(scanPolicy.config.enabled, "false")) == "true" ? "已配置" : "未启用";
-        addF2bPolicyTable(buffer, {sshPolicy, scanPolicy}, "jail.local 中未发现默认策略");
+        std::vector<F2bPolicyInfo> defaultPolicies;
+        for (const auto &policy : collectFail2banPolicies(true)) {
+            if (policy.name == kRule1Jail || policy.name == kRule2Jail) {
+                defaultPolicies.push_back(policy);
+            }
+        }
+        addF2bPolicyTable(buffer, defaultPolicies, "jail.local 中未发现默认策略");
         buffer.add("");
         buffer.add(ansi::gray + std::string("提示: “服务诊断”处理安装/启动/日志，“处置修复”处理封禁和规则一致性。") + ansi::plain);
         return buffer;
@@ -4451,6 +4583,19 @@ private:
         viewport_.render(title, buffer, 0, "正在执行，请稍候");
     }
 
+    CommandResult runDisplayedCommand(ScreenBuffer &buffer, const std::string &command) {
+        buffer.add(ansi::gray + "$ " + command + ansi::plain);
+        CommandResult result = Shell::capture(command + " 2>&1");
+        buffer.add(result.ok() ? ansi::green + std::string("exit 0") + ansi::plain
+                               : ansi::yellow + "exit " + std::to_string(result.exitCode) + ansi::plain);
+        const std::string output = trim(result.output);
+        if (!output.empty()) {
+            buffer.addAll(splitLines(output));
+        }
+        buffer.add("");
+        return result;
+    }
+
     ScreenBuffer runCommandList(const std::vector<std::string> &commands) {
         ScreenBuffer buffer;
         bool ok = true;
@@ -4583,13 +4728,19 @@ private:
         renderBusy("安全总览", "正在读取防护链路状态...");
         auto fail2banStateFuture = std::async(std::launch::async, [] { return serviceState("fail2ban"); });
         auto ufwStateFuture = std::async(std::launch::async, [] { return ufwState(); });
+        auto sshRuntimeFuture = std::async(std::launch::async, [] { return fail2banJailRuntimeStatus(kRule1Jail); });
+        auto scanRuntimeFuture = std::async(std::launch::async, [] { return fail2banJailRuntimeStatus(kRule2Jail); });
         auto sshBannedFuture = std::async(std::launch::async, [] { return bannedSetForJail(kRule1Jail); });
         auto scanBannedFuture = std::async(std::launch::async, [] { return bannedSetForJail(kRule2Jail); });
         auto ufwTopFuture = std::async(std::launch::async, [] { return collectUfwSourceTop(); });
+        const F2bJailRuntimeInfo sshRuntime = sshRuntimeFuture.get();
+        const F2bJailRuntimeInfo scanRuntime = scanRuntimeFuture.get();
         ScreenBuffer buffer;
         buffer.add("> 防护链路");
         addKeyValueTable(buffer, {
             {"fail2ban 服务", fail2banStateFuture.get()},
+            {"sshd jail", sshRuntime.label},
+            {"规则2 jail", scanRuntime.label},
             {"UFW 防火墙", ufwStateFuture.get()},
             {"规则落地一致性", "从“处置修复 -> 一致性核验”检查"},
             {"威胁分析缓存", kUfwCacheDir},
@@ -5499,7 +5650,60 @@ private:
             pushResult("安装/修复配置", result);
             return;
         }
-        buffer.addAll(runCommandList(ensureFail2banBaselineCommands()).lines());
+        buffer.add("> 配置检查与服务重载");
+        CommandResult check = runDisplayedCommand(buffer, "fail2ban-client -t");
+        if (!check.ok()) {
+            ScreenBuffer result;
+            result.add(ansi::yellow + std::string("fail2ban 配置检查失败，已停止重载。") + ansi::plain);
+            result.add("请先修复 fail2ban-client -t 输出中的配置错误。");
+            result.add("");
+            result.addAll(buffer.lines());
+            pushResult("安装/修复配置", result);
+            return;
+        }
+        CommandResult enable = runDisplayedCommand(buffer, "systemctl enable --now fail2ban");
+        if (!enable.ok()) {
+            ScreenBuffer result;
+            result.add(ansi::yellow + std::string("fail2ban 服务启动失败，配置尚未真正生效。") + ansi::plain);
+            result.add("");
+            result.addAll(buffer.lines());
+            pushResult("安装/修复配置", result);
+            return;
+        }
+        CommandResult reload = runDisplayedCommand(buffer, "fail2ban-client reload");
+        if (!reload.ok()) {
+            ScreenBuffer result;
+            result.add(ansi::yellow + std::string("fail2ban reload 失败，配置尚未真正生效。") + ansi::plain);
+            result.add("");
+            result.addAll(buffer.lines());
+            pushResult("安装/修复配置", result);
+            return;
+        }
+        runDisplayedCommand(buffer, "(ufw reload || true)");
+        buffer.add("> 生效状态验证");
+        CommandResult ping = runDisplayedCommand(buffer, "fail2ban-client ping");
+        CommandResult status = runDisplayedCommand(buffer, "fail2ban-client status");
+        (void)status;
+        CommandResult sshStatus = runDisplayedCommand(buffer, "fail2ban-client status " + shellQuote(kRule1Jail));
+        CommandResult scanStatus = runDisplayedCommand(buffer, "fail2ban-client status " + shellQuote(kRule2Jail));
+        const F2bJailRuntimeInfo sshRuntime = parseFail2banJailStatus(kRule1Jail, sshStatus.output, true);
+        const F2bJailRuntimeInfo scanRuntime = parseFail2banJailStatus(kRule2Jail, scanStatus.output, true);
+        addKeyValueTable(buffer, {
+            {"fail2ban ping", ping.ok() ? "正常" : "异常"},
+            {kRule1Jail, sshRuntime.label},
+            {kRule2Jail, scanRuntime.label},
+        });
+        if (!scanRuntime.loaded()) {
+            ScreenBuffer result;
+            result.add(ansi::yellow + std::string("规则2未加载，未真正生效。") + ansi::plain);
+            result.add("请查看下方 fail2ban-client status 输出和 /etc/fail2ban/jail.local 配置。");
+            result.add("");
+            result.addAll(buffer.lines());
+            pushResult("安装/修复配置", result);
+            return;
+        }
+        buffer.add("");
+        buffer.add(ansi::green + std::string("安装/修复完成，默认 jail 已加载。") + ansi::plain);
         pushResult("安装/修复配置", buffer);
     }
 
@@ -5512,12 +5716,26 @@ private:
         }
         const std::string ufw = Shell::capture("ufw status numbered 2>/dev/null || true").output;
         std::vector<std::string> commands;
+        ScreenBuffer issues;
+        bool blocked = false;
         for (const auto &jail : {kRule1Jail, kRule2Jail}) {
-            for (const auto &ip : bannedSetForJail(jail)) {
+            const F2bJailRuntimeInfo runtime = fail2banJailRuntimeStatus(jail);
+            if (!runtime.loaded()) {
+                blocked = true;
+                issues.add(ansi::yellow + jail + " 未能读取封禁列表: " + runtime.label + ansi::plain);
+                continue;
+            }
+            for (const auto &ip : runtime.bannedIps) {
                 if (ufw.find(ip) == std::string::npos) {
                     commands.push_back(ufwDenyFromCommand(ip, "f2b:" + jail + " ip:" + ip));
                 }
             }
+        }
+        if (blocked) {
+            issues.add("");
+            issues.add("请先确认 fail2ban jail 已加载且当前用户有权限读取 fail2ban socket。");
+            pushResult("防护链路同步", issues);
+            return;
         }
         if (commands.empty()) {
             ScreenBuffer buffer;
@@ -5537,23 +5755,27 @@ private:
         const std::time_t end = std::time(nullptr);
         const std::time_t start = end - static_cast<std::time_t>(seconds);
         renderBusy("双日志核验", "正在读取 UFW 与 fail2ban 日志...");
-        const auto rows = buildDualAuditRows(start, end, 40);
+        const DualAuditReport report = buildDualAuditReport(start, end, 40);
         ScreenBuffer buffer;
         buffer.add("窗口: " + dateTimeStamp(start) + " ~ " + dateTimeStamp(end));
         buffer.add("规则2阈值: " + configValueOr(cfg.maxretry, "50") + " 次 / " + configValueOr(cfg.findtime, "3600"));
+        buffer.add("规则1状态: " + report.rule1.label + "  规则2状态: " + report.rule2.label);
+        if (!report.rule2.loaded()) {
+            buffer.add(ansi::yellow + std::string("规则2未加载，无法自动封禁；请先执行“策略安装/修复”。") + ansi::plain);
+        }
         buffer.add("");
         const std::vector<int> widths = {34, 10, 8, 8, 10, 28};
         buffer.add(bufferTableRow({"IP", "UFW命中", "规则1", "规则2", "窗口Ban", "结论"}, widths, true));
         buffer.add(bufferTableRule(widths));
         std::vector<std::string> fixIps;
-        for (const auto &row : rows) {
+        for (const auto &row : report.rows) {
             const bool needsFix = row.conclusion == "达到规则2阈值但未封禁";
             if (needsFix) fixIps.push_back(row.ip);
             buffer.add(bufferTableRow({row.ip, std::to_string(row.ufwHits), row.rule1Banned ? "是" : "否",
                                        row.rule2Banned ? "是" : "否", row.banLogged ? "是" : "否",
                                        needsFix ? ansi::yellow + row.conclusion + ansi::plain : row.conclusion}, widths));
         }
-        if (rows.empty()) {
+        if (report.rows.empty()) {
             buffer.add("  " + ansi::gray + "- 当前窗口无 UFW BLOCK/AUDIT 命中" + ansi::plain);
         }
         if (!fixIps.empty()) {
@@ -5574,12 +5796,18 @@ private:
         const std::time_t end = std::time(nullptr);
         const std::time_t start = end - static_cast<std::time_t>(seconds);
         renderBusy("补封禁候选 IP", "正在重新核验候选 IP...");
-        const auto rows = buildDualAuditRows(start, end, 40);
-        const auto fixIps = dualAuditCandidateIps(rows);
+        const DualAuditReport report = buildDualAuditReport(start, end, 40);
+        const auto fixIps = dualAuditCandidateIps(report.rows);
         ScreenBuffer preview;
         preview.add("窗口: " + dateTimeStamp(start) + " ~ " + dateTimeStamp(end));
         preview.add("规则2阈值: " + configValueOr(cfg.maxretry, "50") + " 次 / " + configValueOr(cfg.findtime, "3600"));
+        preview.add("规则2状态: " + report.rule2.label);
         preview.add("");
+        if (!report.rule2.loaded()) {
+            preview.add(ansi::yellow + std::string("规则2未加载，无法执行补封禁。请先运行“策略安装/修复”。") + ansi::plain);
+            pushResult("补封禁候选 IP", preview);
+            return;
+        }
         if (fixIps.empty()) {
             preview.add("没有发现需要补封禁的候选 IP。");
             pushResult("补封禁候选 IP", preview);
@@ -5607,6 +5835,76 @@ private:
         pushResult("补封禁候选 IP", runCommandList(commands));
     }
 
+    void actionFail2banEffectProbe() {
+        ScreenBuffer preview;
+        preview.add(ansi::yellow + std::string("实效自检会临时封禁测试 IP: ") + kFail2banEffectProbeIp + ansi::plain);
+        preview.add("流程: fail2ban banip -> 检查 jail 封禁列表 -> 检查 UFW deny -> unbanip -> 删除 UFW 残留规则。");
+        preview.add("测试 IP 属于文档保留网段，不应是真实用户来源。");
+        preview.add("");
+        preview.add("执行期间会短暂写入 fail2ban 运行状态和 UFW 规则。");
+        if (!confirmYesNoWithBody("防护链路实效自检", preview.lines(), false)) {
+            ScreenBuffer cancel;
+            cancel.add("操作已取消。");
+            pushResult("防护链路实效自检", cancel);
+            return;
+        }
+
+        renderBusy("防护链路实效自检", "正在执行可回滚链路自检...");
+        ScreenBuffer buffer;
+        buffer.add("测试 IP: " + kFail2banEffectProbeIp);
+        buffer.add("");
+        F2bEffectProbe probe;
+        probe.ping = runDisplayedCommand(buffer, "fail2ban-client ping");
+        probe.serviceOk = probe.ping.ok() && lowerCopy(probe.ping.output).find("pong") != std::string::npos;
+        CommandResult before = runDisplayedCommand(buffer, "fail2ban-client status " + shellQuote(kRule2Jail));
+        probe.jailStatus = parseFail2banJailStatus(kRule2Jail, before.output, true);
+        probe.jailLoaded = probe.jailStatus.loaded();
+
+        if (probe.jailLoaded) {
+            probe.ban = runDisplayedCommand(buffer, fail2banSetIpCommandStrict(kRule2Jail, "banip", kFail2banEffectProbeIp));
+            Shell::capture("sleep 1");
+            probe.statusAfterBan = runDisplayedCommand(buffer, "fail2ban-client status " + shellQuote(kRule2Jail));
+            const F2bJailRuntimeInfo afterBan = parseFail2banJailStatus(kRule2Jail, probe.statusAfterBan.output, true);
+            probe.banListed = afterBan.bannedIps.count(kFail2banEffectProbeIp) > 0;
+            probe.ufwStatus = runDisplayedCommand(buffer, "ufw status numbered");
+            probe.ufwLanded = probe.ufwStatus.output.find(kFail2banEffectProbeIp) != std::string::npos;
+        }
+
+        buffer.add("> 清理测试痕迹");
+        probe.unban = runDisplayedCommand(buffer, fail2banSetIpCommandStrict(kRule2Jail, "unbanip", kFail2banEffectProbeIp));
+        probe.unbanOk = probe.unban.ok();
+        probe.ufwCleanup = runDisplayedCommand(buffer, "(ufw --force delete deny from " + shellQuote(kFail2banEffectProbeIp) + " || true)");
+        probe.ufwCleanupOk = probe.ufwCleanup.ok();
+
+        ScreenBuffer result;
+        result.add("> 实效结论");
+        addKeyValueTable(result, {
+            {"fail2ban 服务", probe.serviceOk ? "正常" : "异常"},
+            {"规则2 jail", probe.jailLoaded ? "已加载" : probe.jailStatus.label},
+            {"banip 进入列表", probe.banListed ? "是" : "否"},
+            {"UFW deny 落地", probe.ufwLanded ? "是" : "否"},
+            {"unban 清理", probe.unbanOk ? "完成" : "失败"},
+            {"UFW 残留清理", probe.ufwCleanupOk ? "已尝试清理" : "失败"},
+        });
+        result.add("");
+        if (probe.serviceOk && probe.jailLoaded && probe.banListed && probe.ufwLanded) {
+            result.add(ansi::green + std::string("防护链路自检通过：fail2ban 规则2可以封禁并落地到 UFW。") + ansi::plain);
+        } else {
+            result.add(ansi::yellow + std::string("防护链路自检未通过。") + ansi::plain);
+            if (!probe.jailLoaded) {
+                result.add("- 规则2 jail 未加载：先执行“策略安装/修复”，并查看 fail2ban-client -t 输出。");
+            } else if (!probe.banListed) {
+                result.add("- banip 未进入 fail2ban 列表：检查 fail2ban-client set 输出和 jail 状态。");
+            } else if (!probe.ufwLanded) {
+                result.add("- fail2ban 已记录封禁，但 UFW 未出现 deny：检查 ufw-drop action 和 UFW 状态。");
+            }
+        }
+        result.add("");
+        result.add("> 命令明细");
+        result.addAll(buffer.lines());
+        pushResult("防护链路实效自检", result);
+    }
+
     void actionF2bBanLogs() {
         renderBusy("查看封禁日志", "正在读取 fail2ban 日志...");
         pushResult("查看封禁日志", runCommandList({
@@ -5621,7 +5919,13 @@ private:
         buffer.add(bufferTableRule(widths));
         bool empty = true;
         for (const auto &jail : {kRule1Jail, kRule2Jail}) {
-            for (const auto &ip : bannedSetForJail(jail)) {
+            const F2bJailRuntimeInfo runtime = fail2banJailRuntimeStatus(jail);
+            if (!runtime.loaded()) {
+                empty = false;
+                buffer.add(bufferTableRow({jail, runtime.label, "-", "-"}, widths));
+                continue;
+            }
+            for (const auto &ip : runtime.bannedIps) {
                 empty = false;
                 const std::time_t last = lastBanTimestamp(jail, ip);
                 buffer.add(bufferTableRow({jail, ip, last > 0 ? dateTimeStamp(last) : "未知", remainingBanTime(jail, ip)}, widths));
@@ -5875,7 +6179,7 @@ private:
         cmd << "{ "
             << "echo '### time'; date; "
             << "echo; echo '### services'; systemctl status fail2ban --no-pager -l 2>/dev/null | sed -n '1,60p'; "
-            << "echo; echo '### fail2ban'; fail2ban-client status 2>/dev/null; fail2ban-client status " << kRule1Jail << " 2>/dev/null; fail2ban-client status " << kRule2Jail << " 2>/dev/null; "
+            << "echo; echo '### fail2ban'; fail2ban-client status 2>&1; fail2ban-client status " << kRule1Jail << " 2>&1; fail2ban-client status " << kRule2Jail << " 2>&1; "
             << "echo; echo '### ufw'; ufw status verbose 2>/dev/null; "
             << "echo; echo '### listeners'; ss -tulpen 2>/dev/null | head -160; "
             << "echo; echo '### accounting'; nft list table inet " << kIpTrafficTable << " 2>/dev/null; "
@@ -6001,14 +6305,18 @@ inline ScreenBuffer dashboardBufferForCli() {
     addSection(buffer, "Fail2ban 默认策略");
     const F2bJailConfig ssh = readJailConfig(kRule1Jail);
     const F2bJailConfig scan = readJailConfig(kRule2Jail);
-    Table policies({"策略", "定位", "启用", "阈值", "窗口", "封禁", "动作"}, {24, 16, 10, 8, 9, 9, 16});
+    const F2bJailRuntimeInfo sshRuntime = fail2banJailRuntimeStatus(kRule1Jail);
+    const F2bJailRuntimeInfo scanRuntime = fail2banJailRuntimeStatus(kRule2Jail);
+    Table policies({"策略", "定位", "jail", "启用", "阈值", "窗口", "封禁", "动作"}, {24, 16, 10, 10, 8, 9, 9, 16});
     policies.add({kRule1Jail, "SSH 登录",
+                  sshRuntime.label,
                   configValueOr(ssh.enabled, normalizedServiceState(f2b) == "运行" ? "随服务" : "待确认"),
                   configValueOr(ssh.maxretry, "5"),
                   configValueOr(ssh.findtime, "3600"),
                   configValueOr(ssh.bantime, "600"),
                   configValueOr(ssh.banaction, "默认")});
     policies.add({kRule2Jail, "UFW 慢扫",
+                  scanRuntime.label,
                   configValueOr(scan.enabled, "false"),
                   configValueOr(scan.maxretry, "50"),
                   configValueOr(scan.findtime, "3600"),
@@ -6057,7 +6365,7 @@ inline void exportDiagnosticReport() {
     cmd << "{ "
         << "echo '### time'; date; "
         << "echo; echo '### services'; systemctl status fail2ban --no-pager -l 2>/dev/null | sed -n '1,60p'; "
-        << "echo; echo '### fail2ban'; fail2ban-client status 2>/dev/null; fail2ban-client status " << kRule1Jail << " 2>/dev/null; fail2ban-client status " << kRule2Jail << " 2>/dev/null; "
+        << "echo; echo '### fail2ban'; fail2ban-client status 2>&1; fail2ban-client status " << kRule1Jail << " 2>&1; fail2ban-client status " << kRule2Jail << " 2>&1; "
         << "echo; echo '### ufw'; ufw status verbose 2>/dev/null; "
         << "echo; echo '### listeners'; ss -tulpen 2>/dev/null | head -160; "
         << "echo; echo '### accounting'; nft list table inet " << kIpTrafficTable << " 2>/dev/null; "
@@ -6250,6 +6558,30 @@ inline int selfTest() {
     check("IniConfig 内存读写", ini.get("sshd", "maxretry") == "5" &&
                                   rendered.find("bantime = 10m") != std::string::npos &&
                                   rendered.find("[ufw-slowscan-global]") != std::string::npos);
+    const F2bJailRuntimeInfo parsedLoaded = parseFail2banJailStatus(
+        "sshd",
+        "Status for the jail: sshd\n|- Filter\n`- Actions\n   |- Currently banned:\t1\n   `- Banned IP list:\t1.2.3.4\n",
+        true);
+    check("fail2ban jail 状态解析", parsedLoaded.loaded() && parsedLoaded.bannedIps.count("1.2.3.4") == 1);
+    const F2bJailRuntimeInfo parsedUnknown = parseFail2banJailStatus(
+        kRule2Jail,
+        "ERROR Command ['status', 'ufw-slowscan-global'] has failed. Received UnknownJailException('ufw-slowscan-global')",
+        true);
+    check("fail2ban UnknownJail 解析", parsedUnknown.state == F2bJailRuntimeState::NotLoaded);
+    const F2bJailRuntimeInfo parsedDenied = parseFail2banJailStatus(
+        "sshd",
+        "ERROR Permission denied to socket: /var/run/fail2ban/fail2ban.sock, (you must be root)",
+        true);
+    check("fail2ban 权限不足解析", parsedDenied.state == F2bJailRuntimeState::PermissionDenied);
+    F2bEffectProbe probeTest;
+    probeTest.serviceOk = true;
+    probeTest.jailLoaded = true;
+    probeTest.banListed = true;
+    probeTest.ufwLanded = false;
+    probeTest.unbanOk = true;
+    probeTest.ufwCleanupOk = true;
+    check("fail2ban 实效自检聚合", probeTest.serviceOk && probeTest.jailLoaded && probeTest.banListed &&
+                                      !probeTest.ufwLanded && probeTest.unbanOk && probeTest.ufwCleanupOk);
     check("危险命令 helper", fail2banSetIpCommand("sshd", "banip", "1.2.3.4").find("fail2ban-client set 'sshd' banip '1.2.3.4'") != std::string::npos &&
                                ufwDenyFromCommand("1.2.3.4", "case").find("comment 'case'") != std::string::npos &&
                                ufwDeleteDenyFromCommand("1.2.3.4").find("--force delete deny") != std::string::npos);
@@ -6306,11 +6638,15 @@ inline int cliF2bAudit() {
     parseTimeToSeconds(configValueOr(cfg.findtime, "3600"), seconds);
     const std::time_t end = std::time(nullptr);
     const std::time_t start = end - static_cast<std::time_t>(seconds);
-    const auto rows = buildDualAuditRows(start, end, 40);
+    const DualAuditReport report = buildDualAuditReport(start, end, 40);
     std::cout << "双日志核验: " << dateTimeStamp(start) << " ~ " << dateTimeStamp(end) << "\n";
     std::cout << "规则2阈值: " << configValueOr(cfg.maxretry, "50") << " / " << configValueOr(cfg.findtime, "3600") << "\n";
+    std::cout << "规则1状态: " << report.rule1.label << "  规则2状态: " << report.rule2.label << "\n";
+    if (!report.rule2.loaded()) {
+        std::cout << "规则2未加载，无法自动封禁；请先执行策略安装/修复。\n";
+    }
     Table table({"IP", "UFW命中", "规则1", "规则2", "窗口Ban", "结论"}, {34, 10, 8, 8, 10, 28});
-    for (const auto &row : rows) {
+    for (const auto &row : report.rows) {
         table.add({row.ip, std::to_string(row.ufwHits), row.rule1Banned ? "是" : "否",
                    row.rule2Banned ? "是" : "否", row.banLogged ? "是" : "否", row.conclusion});
     }
