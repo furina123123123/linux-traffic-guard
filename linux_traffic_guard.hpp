@@ -84,7 +84,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.0";
+inline const std::string kVersion = "4.12.1";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
 inline const std::string kRule1Jail = "sshd";
@@ -123,6 +123,23 @@ struct TrafficRow {
     std::string family;
     std::uint64_t bytes = 0;
     std::uint64_t packets = 0;
+};
+
+struct TrafficSummaryRow {
+    std::string ip;
+    std::string port;
+    std::uint64_t downloadBytes = 0;
+    std::uint64_t uploadBytes = 0;
+    std::uint64_t downloadPackets = 0;
+    std::uint64_t uploadPackets = 0;
+
+    std::uint64_t totalBytes() const {
+        return downloadBytes + uploadBytes;
+    }
+
+    std::uint64_t totalPackets() const {
+        return downloadPackets + uploadPackets;
+    }
 };
 
 struct UfwHit {
@@ -191,7 +208,7 @@ struct DualAuditRow {
 struct DashboardSnapshot {
     bool tableEnabled = false;
     std::vector<TrafficRow> trafficRows;
-    std::vector<TrafficRow> totalRows;
+    std::vector<TrafficSummaryRow> totalRows;
     std::vector<UfwHit> ufwHits;
     std::string fail2banState = "未知";
     std::string ufwState = "未知";
@@ -3177,36 +3194,60 @@ inline std::vector<TrafficRow> collectTrafficRows() {
     return rows;
 }
 
-inline std::vector<TrafficRow> aggregateTrafficByIp(const std::vector<TrafficRow> &rows) {
-    std::map<std::string, TrafficRow> grouped;
+inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<TrafficRow> &rows, bool includePort) {
+    std::map<std::string, TrafficSummaryRow> grouped;
     for (const auto &row : rows) {
-        auto &slot = grouped[row.ip];
+        const std::string key = includePort ? row.ip + "\n" + row.port : row.ip;
+        auto &slot = grouped[key];
         slot.ip = row.ip;
-        slot.port = "*";
-        slot.direction = "总计";
-        slot.family = row.family;
-        slot.bytes += row.bytes;
-        slot.packets += row.packets;
+        slot.port = includePort ? row.port : "*";
+        if (row.direction == "上传") {
+            slot.uploadBytes += row.bytes;
+            slot.uploadPackets += row.packets;
+        } else {
+            slot.downloadBytes += row.bytes;
+            slot.downloadPackets += row.packets;
+        }
     }
-    std::vector<TrafficRow> out;
+    std::vector<TrafficSummaryRow> out;
     for (const auto &entry : grouped) {
         out.push_back(entry.second);
     }
-    std::sort(out.begin(), out.end(), [](const TrafficRow &a, const TrafficRow &b) {
-        return a.bytes > b.bytes;
+    std::sort(out.begin(), out.end(), [](const TrafficSummaryRow &a, const TrafficSummaryRow &b) {
+        if (a.totalBytes() != b.totalBytes()) {
+            return a.totalBytes() > b.totalBytes();
+        }
+        if (a.ip != b.ip) {
+            return a.ip < b.ip;
+        }
+        return a.port < b.port;
     });
     return out;
 }
 
-inline Table trafficTable(const std::vector<TrafficRow> &rows, std::size_t limit) {
-    Table table({"序号", "IP", "端口", "方向", "流量", "包数"}, {6, 28, 8, 8, 12, 10});
+inline std::vector<TrafficSummaryRow> aggregateTrafficByIp(const std::vector<TrafficRow> &rows) {
+    return aggregateTraffic(rows, false);
+}
+
+inline std::vector<TrafficSummaryRow> aggregateTrafficByIpPort(const std::vector<TrafficRow> &rows) {
+    return aggregateTraffic(rows, true);
+}
+
+inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, bool includePort) {
+    Table table(includePort ? std::vector<std::string>{"序号", "IP", "端口", "下载", "上传", "合计", "包数"}
+                            : std::vector<std::string>{"序号", "IP", "下载", "上传", "合计", "包数"},
+                includePort ? std::vector<std::size_t>{6, 28, 8, 12, 12, 12, 10}
+                            : std::vector<std::size_t>{6, 28, 12, 12, 12, 10});
     for (std::size_t i = 0; i < rows.size() && i < limit; ++i) {
-        table.add({std::to_string(i + 1),
-                   rows[i].ip,
-                   rows[i].port,
-                   rows[i].direction,
-                   humanBytes(rows[i].bytes),
-                   std::to_string(rows[i].packets)});
+        std::vector<std::string> cells = {std::to_string(i + 1), rows[i].ip};
+        if (includePort) {
+            cells.push_back(rows[i].port);
+        }
+        cells.push_back(humanBytes(rows[i].downloadBytes));
+        cells.push_back(humanBytes(rows[i].uploadBytes));
+        cells.push_back(humanBytes(rows[i].totalBytes()));
+        cells.push_back(std::to_string(rows[i].totalPackets()));
+        table.add(std::move(cells));
     }
     return table;
 }
@@ -3439,7 +3480,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     if (!snapshot->tableEnabled) {
         buffer.add("IP 精细流量统计未启用。进入“流量统计 -> 开启统计”启用。");
     }
-    buffer.addAll(tableLines(trafficTable(snapshot->totalRows, 8), snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用"));
+    buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, 8, false), snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用"));
     buffer.add("");
     buffer.add("> 近期来源态势");
     buffer.addAll(tableLines(ufwHitsTable(snapshot->ufwHits), "暂无来源日志。可进入“安全中心 -> 分析追查”读取更长时间段。"));
@@ -3555,17 +3596,30 @@ private:
         return out.str();
     }
 
-    static void addTrafficTable(ScreenBuffer &buffer, const std::vector<TrafficRow> &rows, std::size_t limit, const std::string &emptyMessage) {
-        const std::vector<int> widths = {6, 30, 8, 8, 14, 10};
-        buffer.add(tableRow({"序号", "IP", "端口", "方向", "流量", "包数"}, widths, true));
+    static void addTrafficSummaryTable(ScreenBuffer &buffer,
+                                       const std::vector<TrafficSummaryRow> &rows,
+                                       std::size_t limit,
+                                       const std::string &emptyMessage,
+                                       bool includePort) {
+        const std::vector<int> widths = includePort ? std::vector<int>{6, 30, 8, 14, 14, 14, 10}
+                                                    : std::vector<int>{6, 30, 14, 14, 14, 10};
+        buffer.add(includePort ? tableRow({"序号", "IP", "端口", "下载", "上传", "合计", "包数"}, widths, true)
+                               : tableRow({"序号", "IP", "下载", "上传", "合计", "包数"}, widths, true));
         buffer.add(tableRule(widths));
         if (rows.empty()) {
             buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
             return;
         }
         for (std::size_t i = 0; i < rows.size() && i < limit; ++i) {
-            buffer.add(tableRow({std::to_string(i + 1), rows[i].ip, rows[i].port, rows[i].direction,
-                                 humanBytes(rows[i].bytes), std::to_string(rows[i].packets)}, widths));
+            std::vector<std::string> cells = {std::to_string(i + 1), rows[i].ip};
+            if (includePort) {
+                cells.push_back(rows[i].port);
+            }
+            cells.push_back(humanBytes(rows[i].downloadBytes));
+            cells.push_back(humanBytes(rows[i].uploadBytes));
+            cells.push_back(humanBytes(rows[i].totalBytes()));
+            cells.push_back(std::to_string(rows[i].totalPackets()));
+            buffer.add(tableRow(cells, widths));
         }
     }
 
@@ -3689,7 +3743,7 @@ private:
         pushMenu("流量统计", "结构化 IP 与端口流量统计",
                  {
                      {"1", "开启统计", "向导创建 nft 动态计数集合", true, [this] { actionInstallTraffic(false); }},
-                     {"2", "查看排行", "IP 总量与端口/方向明细", false, [this] { actionShowTrafficRanking(); }},
+                     {"2", "查看排行", "IP 总量与 IP+端口明细", false, [this] { actionShowTrafficRanking(); }},
                      {"3", "重置统计", "按选择端口重建统计表", true, [this] { actionInstallTraffic(true); }},
                      {"4", "删除统计", "删除 nft 表与计数", true, [this] { actionRemoveTrafficAccounting(); }},
                      {"5", "原始 nft 表", "查看底层统计表", false, [this] { actionRawNftTable(); }},
@@ -3920,7 +3974,7 @@ private:
         if (!snapshot->tableEnabled) {
             buffer.add(ansi::yellow + std::string("IP 精细流量统计未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
         }
-        addTrafficTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用");
+        addTrafficSummaryTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用", false);
         buffer.add("");
         buffer.add("> 近期来源态势");
         addUfwTable(buffer, snapshot->ufwHits, "暂无来源日志。可进入“安全中心 -> 分析追查”读取更长时间段。");
@@ -4260,10 +4314,10 @@ private:
         }
         const auto rows = collectTrafficRows();
         buffer.add("> IP 总量");
-        addTrafficTable(buffer, aggregateTrafficByIp(rows), 30, "暂无匹配流量");
+        addTrafficSummaryTable(buffer, aggregateTrafficByIp(rows), 30, "暂无匹配流量", false);
         buffer.add("");
-        buffer.add("> 端口 / 方向明细");
-        addTrafficTable(buffer, rows, 80, "暂无匹配流量");
+        buffer.add("> IP + 端口明细");
+        addTrafficSummaryTable(buffer, aggregateTrafficByIpPort(rows), 80, "暂无匹配流量", true);
         pushResult("流量排行", buffer);
     }
 
@@ -5761,7 +5815,7 @@ inline ScreenBuffer dashboardBufferForCli() {
     if (!tableEnabled) {
         buffer.add(ansi::yellow + std::string("IP 精细流量统计未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
     }
-    addTableLines(buffer, trafficTable(totalRows, 8), tableEnabled ? "暂无匹配流量" : "统计表未启用");
+    addTableLines(buffer, trafficSummaryTable(totalRows, 8, false), tableEnabled ? "暂无匹配流量" : "统计表未启用");
 
     addSection(buffer, "近期来源态势");
     addTableLines(buffer, ufwHitsTable(collectUfwSourceTop()), "暂无来源日志。可进入“安全中心 -> 分析追查”读取更长时间段。");
@@ -5806,9 +5860,9 @@ inline void showTrafficRanking() {
     }
     const auto rows = collectTrafficRows();
     addSection(buffer, "IP 总量");
-    addTableLines(buffer, trafficTable(aggregateTrafficByIp(rows), 30), "暂无匹配流量");
-    addSection(buffer, "端口 / 方向明细");
-    addTableLines(buffer, trafficTable(rows, 50), "暂无匹配流量");
+    addTableLines(buffer, trafficSummaryTable(aggregateTrafficByIp(rows), 30, false), "暂无匹配流量");
+    addSection(buffer, "IP + 端口明细");
+    addTableLines(buffer, trafficSummaryTable(aggregateTrafficByIpPort(rows), 50, true), "暂无匹配流量");
     printScreenBuffer(buffer);
 }
 
@@ -5889,6 +5943,20 @@ inline int selfTest() {
     const auto traffic = parseTrafficSetOutput("elements = { 1.2.3.4 . 443 counter packets 7 bytes 2048 }", "下载", "IPv4");
     check("nft 统计解析", traffic.size() == 1 && traffic[0].ip == "1.2.3.4" &&
                               traffic[0].port == "443" && traffic[0].packets == 7 && traffic[0].bytes == 2048);
+    std::vector<TrafficRow> bidirectionalTraffic = traffic;
+    TrafficRow upload;
+    upload.ip = "1.2.3.4";
+    upload.port = "443";
+    upload.direction = "上传";
+    upload.family = "IPv4";
+    upload.packets = 3;
+    upload.bytes = 1024;
+    bidirectionalTraffic.push_back(upload);
+    const auto byIp = aggregateTrafficByIp(bidirectionalTraffic);
+    const auto byIpPort = aggregateTrafficByIpPort(bidirectionalTraffic);
+    check("上下行流量同排聚合", byIp.size() == 1 && byIp[0].downloadBytes == 2048 &&
+                                  byIp[0].uploadBytes == 1024 && byIp[0].totalBytes() == 3072 &&
+                                  byIpPort.size() == 1 && byIpPort[0].port == "443");
 
     const auto merged = mergeRanges({{10, 20}, {1, 5}, {6, 9}, {30, 40}});
     check("range 合并", merged.size() == 2 && merged[0].first == 1 && merged[0].second == 20 &&

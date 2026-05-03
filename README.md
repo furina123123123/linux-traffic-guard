@@ -175,8 +175,8 @@ sudo make PREFIX=/opt/ltg install
 维护者发布新版本时，先更新 `linux_traffic_guard.hpp` 中的版本号和 `CHANGELOG.md`，再推送 tag：
 
 ```bash
-git tag v4.12.0
-git push origin v4.12.0
+git tag v4.12.1
+git push origin v4.12.1
 ```
 
 GitHub Actions 会自动编译并上传 Release 附件：
