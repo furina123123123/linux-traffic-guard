@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    name: Ubuntu build and smoke tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep
+
+      - name: Build
+        run: make clean all
+
+      - name: Basic checks
+        run: make check
+
+      - name: Root guard check
+        run: make check-root-guard
+
+      - name: SQLite fallback compile
+        run: make check-nosqlite
+
+      - name: Root command smoke tests
+        run: |
+          sudo ./ltg --status >/tmp/ltg-status.txt
+          sudo ./ltg --doctor >/tmp/ltg-doctor.txt
+          sudo ./ltg --f2b-audit >/tmp/ltg-f2b-audit.txt
+
+      - name: Release package check
+        run: |
+          make dist
+          test -s linux-traffic-guard-*.tar.gz

@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.10.1 - 2026-05-03
+
+### Added
+
+- GitHub Actions CI for Ubuntu build, basic checks, root guard, SQLite fallback compile, root smoke tests, and release package generation.
+- `CONTRIBUTING.md`, `SECURITY.md`, issue templates, and pull request template.
+- `make check-nosqlite`, `make check-root-guard`, and `make release-check`.
+
+### Changed
+
+- Added `LTG_FORCE_NO_SQLITE=1` compile mode to keep the text-cache fallback testable.
+- README now includes CI/license/platform badges and project-maintenance notes.
+
 ## 4.10.0 - 2026-05-03
 
 ### Added

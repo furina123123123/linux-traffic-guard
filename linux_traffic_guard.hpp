@@ -46,7 +46,11 @@
 #include <unistd.h>
 #endif
 
-#if __has_include(<sqlite3.h>)
+#ifndef LTG_FORCE_NO_SQLITE
+#define LTG_FORCE_NO_SQLITE 0
+#endif
+
+#if !LTG_FORCE_NO_SQLITE && __has_include(<sqlite3.h>)
 #include <sqlite3.h>
 #define LTG_HAS_SQLITE 1
 #else
@@ -67,7 +71,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.10.0";
+inline const std::string kVersion = "4.10.1";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
 inline const std::string kRule1Jail = "sshd";

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/furina123123123/linux-traffic-guard/security/advisories/new
+    about: Please report exploitable vulnerabilities privately when possible.
