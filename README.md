@@ -43,7 +43,7 @@ curl -fsSLO https://raw.githubusercontent.com/furina123123123/linux-traffic-guar
 
 ## 功能概览
 
-- 仪表盘：展示 IP/端口流量、近期来源态势、防护组件状态和建议动作。
+- 仪表盘：展示 IP/端口流量、UFW 近24小时拦截来源 Top、防护组件状态和建议动作。
 - 流量统计：基于 nftables `inet usp_ip_traffic` 记录 IPv4/IPv6、TCP/UDP、上传/下载、IP+端口细粒度流量。
 - 安全中心：按 `安全总览 -> 分析追查 -> 策略配置 -> 处置修复 -> 服务诊断` 组织日常运维路径。
 - 威胁分析：解析 UFW BLOCK/AUDIT/ALLOW 日志，按 IP、端口、时间段聚合，并支持指定 IP 下钻。
@@ -187,8 +187,8 @@ sudo make PREFIX=/opt/ltg install
 维护者发布新版本时，先更新 `linux_traffic_guard.hpp` 中的版本号和 `CHANGELOG.md`，再推送 tag：
 
 ```bash
-git tag v4.12.2
-git push origin v4.12.2
+git tag v4.12.3
+git push origin v4.12.3
 ```
 
 GitHub Actions 会自动编译并上传 Release 附件：
