@@ -85,7 +85,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.4";
+inline const std::string kVersion = "4.12.5";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
@@ -217,6 +217,12 @@ struct DashboardSnapshot {
     std::string fail2banState = "未知";
     std::string ufwState = "未知";
     std::chrono::steady_clock::time_point loadedAt{};
+};
+
+enum class TrafficGroupMode {
+    Ip,
+    Port,
+    IpPort
 };
 
 struct UfwDeleteCandidate {
@@ -3302,13 +3308,18 @@ inline std::vector<TrafficRow> collectTrafficRows() {
     return rows;
 }
 
-inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<TrafficRow> &rows, bool includePort) {
+inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<TrafficRow> &rows, TrafficGroupMode mode) {
     std::map<std::string, TrafficSummaryRow> grouped;
     for (const auto &row : rows) {
-        const std::string key = includePort ? row.ip + "\n" + row.port : row.ip;
+        std::string key = row.ip;
+        if (mode == TrafficGroupMode::Port) {
+            key = row.port;
+        } else if (mode == TrafficGroupMode::IpPort) {
+            key = row.ip + "\n" + row.port;
+        }
         auto &slot = grouped[key];
-        slot.ip = row.ip;
-        slot.port = includePort ? row.port : "*";
+        slot.ip = mode == TrafficGroupMode::Port ? "*" : row.ip;
+        slot.port = mode == TrafficGroupMode::Ip ? "*" : row.port;
         if (row.direction == "上传") {
             slot.uploadBytes += row.bytes;
             slot.uploadPackets += row.packets;
@@ -3334,22 +3345,34 @@ inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<Traffic
 }
 
 inline std::vector<TrafficSummaryRow> aggregateTrafficByIp(const std::vector<TrafficRow> &rows) {
-    return aggregateTraffic(rows, false);
+    return aggregateTraffic(rows, TrafficGroupMode::Ip);
+}
+
+inline std::vector<TrafficSummaryRow> aggregateTrafficByPort(const std::vector<TrafficRow> &rows) {
+    return aggregateTraffic(rows, TrafficGroupMode::Port);
 }
 
 inline std::vector<TrafficSummaryRow> aggregateTrafficByIpPort(const std::vector<TrafficRow> &rows) {
-    return aggregateTraffic(rows, true);
+    return aggregateTraffic(rows, TrafficGroupMode::IpPort);
 }
 
-inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, bool includePort) {
-    Table table(includePort ? std::vector<std::string>{"序号", "IP", "端口", "下载", "上传", "合计", "包数"}
-                            : std::vector<std::string>{"序号", "IP", "下载", "上传", "合计", "包数"},
-                includePort ? std::vector<std::size_t>{6, 28, 8, 12, 12, 12, 10}
-                            : std::vector<std::size_t>{6, 28, 12, 12, 12, 10});
+inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, TrafficGroupMode mode) {
+    Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "端口", "下载", "上传", "合计", "包数"}
+                : mode == TrafficGroupMode::Port ? std::vector<std::string>{"序号", "端口", "服务", "下载", "上传", "合计", "包数"}
+                                                  : std::vector<std::string>{"序号", "IP", "下载", "上传", "合计", "包数"},
+                mode == TrafficGroupMode::IpPort ? std::vector<std::size_t>{6, 28, 8, 12, 12, 12, 10}
+                : mode == TrafficGroupMode::Port ? std::vector<std::size_t>{6, 8, 18, 12, 12, 12, 10}
+                                                  : std::vector<std::size_t>{6, 28, 12, 12, 12, 10});
     for (std::size_t i = 0; i < rows.size() && i < limit; ++i) {
-        std::vector<std::string> cells = {std::to_string(i + 1), rows[i].ip};
-        if (includePort) {
+        std::vector<std::string> cells = {std::to_string(i + 1)};
+        if (mode == TrafficGroupMode::Port) {
             cells.push_back(rows[i].port);
+            cells.push_back(serviceNameForPort(rows[i].port));
+        } else {
+            cells.push_back(rows[i].ip);
+            if (mode == TrafficGroupMode::IpPort) {
+                cells.push_back(rows[i].port);
+            }
         }
         cells.push_back(humanBytes(rows[i].downloadBytes));
         cells.push_back(humanBytes(rows[i].uploadBytes));
@@ -3358,6 +3381,10 @@ inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std
         table.add(std::move(cells));
     }
     return table;
+}
+
+inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, bool includePort) {
+    return trafficSummaryTable(rows, limit, includePort ? TrafficGroupMode::IpPort : TrafficGroupMode::Ip);
 }
 
 inline void enrichUfwHit(UfwHit &hit) {
@@ -3538,7 +3565,7 @@ inline DashboardSnapshot loadDashboardSnapshot() {
     snapshot.tableEnabled = tableFuture.get();
     if (snapshot.tableEnabled) {
         snapshot.trafficRows = collectTrafficRows();
-        snapshot.totalRows = aggregateTrafficByIp(snapshot.trafficRows);
+        snapshot.totalRows = aggregateTrafficByPort(snapshot.trafficRows);
     }
     snapshot.ufwHits = ufwHitsFuture.get();
     snapshot.fail2banState = fail2banStateFuture.get();
@@ -3577,7 +3604,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
                                          bool loading,
                                          char spinner) {
     ScreenBuffer buffer;
-    buffer.add("  流量/IP 优先的服务器防护仪表盘");
+    buffer.add("  流量/端口优先的服务器防护仪表盘");
     buffer.add("");
     std::ostringstream deps;
     deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow)) << "  ";
@@ -3588,7 +3615,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     buffer.add(deps.str());
     buffer.add("");
     if (loading || snapshot == nullptr) {
-        buffer.add(std::string("> 流量 / IP 概览  加载中 ") + spinner);
+        buffer.add(std::string("> 流量 / 端口概览  加载中 ") + spinner);
         buffer.add("  正在读取 nft、UFW、fail2ban 数据。你可以先用 ↑↓/滚轮查看页面，按 q 返回。");
         buffer.add("");
         buffer.add("> UFW拦截风险来源Top  加载中");
@@ -3597,12 +3624,12 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
         return buffer;
     }
 
-    buffer.add("> 流量 / IP 概览");
+    buffer.add("> 流量 / 端口概览");
     buffer.add(std::string("统计表: ") + (snapshot->tableEnabled ? "[已启用]" : "[未启用]") + "  nft=inet " + kIpTrafficTable);
     if (!snapshot->tableEnabled) {
-        buffer.add("IP 精细流量统计未启用。进入“流量统计 -> 开启统计”启用。");
+        buffer.add("端口流量统计未启用。进入“流量统计 -> 开启统计”启用。");
     }
-    buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, 8, false), snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用"));
+    buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, 8, TrafficGroupMode::Port), snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用"));
     buffer.add("");
     buffer.add("> UFW拦截风险来源Top");
     buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
@@ -3723,20 +3750,28 @@ private:
                                        const std::vector<TrafficSummaryRow> &rows,
                                        std::size_t limit,
                                        const std::string &emptyMessage,
-                                       bool includePort) {
-        const std::vector<int> widths = includePort ? std::vector<int>{6, 30, 8, 14, 14, 14, 10}
-                                                    : std::vector<int>{6, 30, 14, 14, 14, 10};
-        buffer.add(includePort ? tableRow({"序号", "IP", "端口", "下载", "上传", "合计", "包数"}, widths, true)
-                               : tableRow({"序号", "IP", "下载", "上传", "合计", "包数"}, widths, true));
+                                       TrafficGroupMode mode) {
+        const std::vector<int> widths = mode == TrafficGroupMode::IpPort ? std::vector<int>{6, 30, 8, 14, 14, 14, 10}
+                                      : mode == TrafficGroupMode::Port ? std::vector<int>{6, 8, 20, 14, 14, 14, 10}
+                                                                       : std::vector<int>{6, 30, 14, 14, 14, 10};
+        buffer.add(mode == TrafficGroupMode::IpPort ? tableRow({"序号", "IP", "端口", "下载", "上传", "合计", "包数"}, widths, true)
+                   : mode == TrafficGroupMode::Port ? tableRow({"序号", "端口", "服务", "下载", "上传", "合计", "包数"}, widths, true)
+                                                     : tableRow({"序号", "IP", "下载", "上传", "合计", "包数"}, widths, true));
         buffer.add(tableRule(widths));
         if (rows.empty()) {
             buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
             return;
         }
         for (std::size_t i = 0; i < rows.size() && i < limit; ++i) {
-            std::vector<std::string> cells = {std::to_string(i + 1), rows[i].ip};
-            if (includePort) {
+            std::vector<std::string> cells = {std::to_string(i + 1)};
+            if (mode == TrafficGroupMode::Port) {
                 cells.push_back(rows[i].port);
+                cells.push_back(serviceNameForPort(rows[i].port));
+            } else {
+                cells.push_back(rows[i].ip);
+                if (mode == TrafficGroupMode::IpPort) {
+                    cells.push_back(rows[i].port);
+                }
             }
             cells.push_back(humanBytes(rows[i].downloadBytes));
             cells.push_back(humanBytes(rows[i].uploadBytes));
@@ -3744,6 +3779,14 @@ private:
             cells.push_back(std::to_string(rows[i].totalPackets()));
             buffer.add(tableRow(cells, widths));
         }
+    }
+
+    static void addTrafficSummaryTable(ScreenBuffer &buffer,
+                                       const std::vector<TrafficSummaryRow> &rows,
+                                       std::size_t limit,
+                                       const std::string &emptyMessage,
+                                       bool includePort) {
+        addTrafficSummaryTable(buffer, rows, limit, emptyMessage, includePort ? TrafficGroupMode::IpPort : TrafficGroupMode::Ip);
     }
 
     static void addUfwTable(ScreenBuffer &buffer, const std::vector<UfwHit> &hits, const std::string &emptyMessage) {
@@ -3814,7 +3857,7 @@ private:
         page.root = true;
         page.items = {
             {"1", "仪表盘", "刷新当前概览", false, [this] { pushDashboard(); }},
-            {"2", "流量统计", "IP/端口流量统计", false, [this] { pushTrafficMenu(); }},
+            {"2", "流量统计", "按端口汇总，保留 IP 下钻", false, [this] { pushTrafficMenu(); }},
             {"3", "安全中心", "威胁分析、策略、处置、核验", false, [this] { pushSecurityMenu(); }},
             {"4", "下钻检查", "端口/IP 下钻和原始详情", false, [this] { pushInspectMenu(); }},
             {"5", "诊断", "依赖、日志、报告", false, [this] { pushDiagnoseMenu(); }},
@@ -3826,7 +3869,7 @@ private:
         Page page;
         page.kind = PageKind::Dashboard;
         page.title = kName + " v" + kVersion;
-        page.subtitle = "流量/IP 优先的服务器防护仪表盘";
+        page.subtitle = "流量/端口优先的服务器防护仪表盘";
         page.started = std::chrono::steady_clock::now();
         if (forceRefresh) {
             cachedDashboardValid() = false;
@@ -3863,10 +3906,10 @@ private:
     }
 
     void pushTrafficMenu() {
-        pushMenu("流量统计", "结构化 IP 与端口流量统计",
+        pushMenu("流量统计", "端口优先的结构化流量统计",
                  {
                      {"1", "开启统计", "向导创建 nft 动态计数集合", true, [this] { actionInstallTraffic(false); }},
-                     {"2", "查看排行", "IP 总量与 IP+端口明细", false, [this] { actionShowTrafficRanking(); }},
+                     {"2", "查看排行", "端口总量、IP 总量与 IP+端口明细", false, [this] { actionShowTrafficRanking(); }},
                      {"3", "重置统计", "按选择端口重建统计表", true, [this] { actionInstallTraffic(true); }},
                      {"4", "删除统计", "删除 nft 表与计数", true, [this] { actionRemoveTrafficAccounting(); }},
                      {"5", "原始 nft 表", "查看底层统计表", false, [this] { actionRawNftTable(); }},
@@ -4075,7 +4118,7 @@ private:
         buffer.add(deps.str());
         buffer.add("");
         if (snapshot == nullptr) {
-            buffer.add(std::string("> 流量 / IP 概览  加载中 ") + spinner);
+            buffer.add(std::string("> 流量 / 端口概览  加载中 ") + spinner);
             buffer.add("  正在读取 nft、UFW、fail2ban 数据。");
             if (std::chrono::steady_clock::now() - page.started > std::chrono::seconds(2)) {
                 buffer.add("  仍在读取系统数据，可按 q 返回，或等待加载完成。");
@@ -4087,7 +4130,7 @@ private:
             return buffer;
         }
 
-        buffer.add("> 流量 / IP 概览");
+        buffer.add("> 流量 / 端口概览");
         if (page.loading) {
             buffer.add(std::string("后台刷新中 ") + spinner + "  先显示上一份快照，刷新完成后自动更新。");
         }
@@ -4095,9 +4138,9 @@ private:
                    (snapshot->tableEnabled ? Ui::badge("已启用", ansi::green) : Ui::badge("未启用", ansi::yellow)) +
                    "  nft=inet " + kIpTrafficTable);
         if (!snapshot->tableEnabled) {
-            buffer.add(ansi::yellow + std::string("IP 精细流量统计未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
+            buffer.add(ansi::yellow + std::string("端口流量统计未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
         }
-        addTrafficSummaryTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用", false);
+        addTrafficSummaryTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用", TrafficGroupMode::Port);
         buffer.add("");
         buffer.add("> UFW拦截风险来源Top");
         buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
@@ -4437,11 +4480,14 @@ private:
             return;
         }
         const auto rows = collectTrafficRows();
+        buffer.add("> 端口总量");
+        addTrafficSummaryTable(buffer, aggregateTrafficByPort(rows), 30, "暂无匹配流量", TrafficGroupMode::Port);
+        buffer.add("");
         buffer.add("> IP 总量");
         addTrafficSummaryTable(buffer, aggregateTrafficByIp(rows), 30, "暂无匹配流量", false);
         buffer.add("");
         buffer.add("> IP + 端口明细");
-        addTrafficSummaryTable(buffer, aggregateTrafficByIpPort(rows), 80, "暂无匹配流量", true);
+        addTrafficSummaryTable(buffer, aggregateTrafficByIpPort(rows), 80, "暂无匹配流量", TrafficGroupMode::IpPort);
         pushResult("流量排行", buffer);
     }
 
@@ -5916,7 +5962,7 @@ inline ScreenBuffer dependencyDoctorBuffer() {
 inline ScreenBuffer dashboardBufferForCli() {
     ScreenBuffer buffer;
     buffer.add(ansi::bold + kName + " v" + kVersion + ansi::plain);
-    buffer.add(ansi::gray + std::string("流量/IP 优先的服务器防护仪表盘") + ansi::plain);
+    buffer.add(ansi::gray + std::string("流量/端口优先的服务器防护仪表盘") + ansi::plain);
     buffer.add(ansi::gray + std::string(72, '-') + ansi::plain);
 
     std::ostringstream deps;
@@ -5929,18 +5975,18 @@ inline ScreenBuffer dashboardBufferForCli() {
 
     const bool tableEnabled = trafficTableEnabled();
     const auto trafficRows = tableEnabled ? collectTrafficRows() : std::vector<TrafficRow>{};
-    const auto totalRows = aggregateTrafficByIp(trafficRows);
+    const auto totalRows = aggregateTrafficByPort(trafficRows);
     const std::string f2b = serviceState("fail2ban");
     const std::string ufw = ufwState();
 
-    addSection(buffer, "流量 / IP 概览");
+    addSection(buffer, "流量 / 端口概览");
     buffer.add(std::string("统计表: ") +
                (tableEnabled ? Ui::badge("已启用", ansi::green) : Ui::badge("未启用", ansi::yellow)) +
                "  nft=inet " + kIpTrafficTable);
     if (!tableEnabled) {
-        buffer.add(ansi::yellow + std::string("IP 精细流量统计未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
+        buffer.add(ansi::yellow + std::string("端口流量统计未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
     }
-    addTableLines(buffer, trafficSummaryTable(totalRows, 8, false), tableEnabled ? "暂无匹配流量" : "统计表未启用");
+    addTableLines(buffer, trafficSummaryTable(totalRows, 8, TrafficGroupMode::Port), tableEnabled ? "暂无匹配流量" : "统计表未启用");
 
     addSection(buffer, "UFW拦截风险来源Top");
     buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
@@ -5985,10 +6031,12 @@ inline void showTrafficRanking() {
         return;
     }
     const auto rows = collectTrafficRows();
+    addSection(buffer, "端口总量");
+    addTableLines(buffer, trafficSummaryTable(aggregateTrafficByPort(rows), 30, TrafficGroupMode::Port), "暂无匹配流量");
     addSection(buffer, "IP 总量");
     addTableLines(buffer, trafficSummaryTable(aggregateTrafficByIp(rows), 30, false), "暂无匹配流量");
     addSection(buffer, "IP + 端口明细");
-    addTableLines(buffer, trafficSummaryTable(aggregateTrafficByIpPort(rows), 50, true), "暂无匹配流量");
+    addTableLines(buffer, trafficSummaryTable(aggregateTrafficByIpPort(rows), 50, TrafficGroupMode::IpPort), "暂无匹配流量");
     printScreenBuffer(buffer);
 }
 
@@ -6172,11 +6220,23 @@ inline int selfTest() {
     upload.packets = 3;
     upload.bytes = 1024;
     bidirectionalTraffic.push_back(upload);
+    TrafficRow samePortOtherIp;
+    samePortOtherIp.ip = "5.6.7.8";
+    samePortOtherIp.port = "443";
+    samePortOtherIp.direction = "下载";
+    samePortOtherIp.family = "IPv4";
+    samePortOtherIp.packets = 4;
+    samePortOtherIp.bytes = 4096;
+    bidirectionalTraffic.push_back(samePortOtherIp);
     const auto byIp = aggregateTrafficByIp(bidirectionalTraffic);
+    const auto byPort = aggregateTrafficByPort(bidirectionalTraffic);
     const auto byIpPort = aggregateTrafficByIpPort(bidirectionalTraffic);
-    check("上下行流量同排聚合", byIp.size() == 1 && byIp[0].downloadBytes == 2048 &&
-                                  byIp[0].uploadBytes == 1024 && byIp[0].totalBytes() == 3072 &&
-                                  byIpPort.size() == 1 && byIpPort[0].port == "443");
+    check("上下行流量同排聚合", byIp.size() == 2 && byIp[0].downloadBytes == 4096 &&
+                                  byIp[1].uploadBytes == 1024 && byIp[1].totalBytes() == 3072 &&
+                                  byIpPort.size() == 2 && byIpPort[0].port == "443");
+    check("端口流量分组", byPort.size() == 1 && byPort[0].port == "443" &&
+                              byPort[0].downloadBytes == 6144 && byPort[0].uploadBytes == 1024 &&
+                              byPort[0].totalBytes() == 7168);
 
     const auto merged = mergeRanges({{10, 20}, {1, 5}, {6, 9}, {30, 40}});
     check("range 合并", merged.size() == 2 && merged[0].first == 1 && merged[0].second == 20 &&
@@ -6268,7 +6328,7 @@ inline void usage(const char *argv0) {
     std::cout << "  会调用系统工具 nft/ufw/fail2ban-client/journalctl/ss/conntrack，不依赖 .sh/.py。\n\n";
     std::cout << "选项:\n";
     std::cout << "  --status          打印仪表盘\n";
-    std::cout << "  --ip-traffic      查看 IP 精细流量排行\n";
+    std::cout << "  --ip-traffic      查看端口优先的流量排行\n";
     std::cout << "  --doctor          检查依赖\n";
     std::cout << "  --audit           查看日志摘要\n";
     std::cout << "  --f2b-audit       防护链路双日志核验\n";
