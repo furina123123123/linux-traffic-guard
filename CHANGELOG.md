@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.10.0 - 2026-05-03
+
+### Added
+
+- Unified fail2ban policy overview for the two built-in policies and user-defined jails.
+- Custom fail2ban policy wizard for creating jail sections, reusing or generating filters, and setting log path, threshold, window, ban time, and action.
+- Generic policy editing and custom-policy disable flow inside the TUI.
+
+### Changed
+
+- Dashboard now shows an existing snapshot immediately while refreshing in the background.
+- Dashboard loading now reads traffic, UFW source posture, and service state in parallel.
+- UFW source posture no longer falls back to live journal scanning when the SQLite cache covers the range but has no matching events.
+
 ## 4.9.0 - 2026-05-03
 
 ### Added
