@@ -67,7 +67,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.9.0";
+inline const std::string kVersion = "4.10.0";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
 inline const std::string kRule1Jail = "sshd";
@@ -127,6 +127,19 @@ struct F2bJailConfig {
     std::string increment;
     std::string factor;
     std::string maxtime;
+};
+
+struct F2bPolicyInfo {
+    std::string name;
+    std::string role;
+    F2bJailConfig config;
+    std::string filter;
+    std::string backend;
+    std::string logpath;
+    std::string port;
+    std::string state;
+    std::size_t bannedCount = 0;
+    bool managedDefault = false;
 };
 
 struct UfwLogEvent {
@@ -201,6 +214,11 @@ inline bool &alternateScreenActive() {
 inline std::map<std::string, bool> &toolExistsCache() {
     static std::map<std::string, bool> cache;
     return cache;
+}
+
+inline std::mutex &toolExistsCacheMutex() {
+    static std::mutex mutex;
+    return mutex;
 }
 
 #ifndef _WIN32
@@ -499,6 +517,31 @@ inline bool isValidIpOrCidr(const std::string &value) {
     return bits >= 0 && bits <= 128;
 }
 
+inline bool isSafeIdentifier(const std::string &value) {
+    if (value.empty() || value.size() > 64) {
+        return false;
+    }
+    for (unsigned char ch : value) {
+        if (!std::isalnum(ch) && ch != '_' && ch != '-') {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool isSafeLogPath(const std::string &value) {
+    if (value.empty() || value.size() > 240 || value[0] != '/') {
+        return false;
+    }
+    for (unsigned char ch : value) {
+        if (std::isalnum(ch) || ch == '/' || ch == '.' || ch == '_' || ch == '-' || ch == '*' || ch == '?') {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
 inline std::string nowStamp() {
     const auto now = std::chrono::system_clock::now();
     const auto sec = std::chrono::system_clock::to_time_t(now);
@@ -680,17 +723,23 @@ public:
     }
 
     static bool exists(const std::string &name) {
-        auto &cache = toolExistsCache();
-        const auto found = cache.find(name);
-        if (found != cache.end()) {
-            return found->second;
+        {
+            std::lock_guard<std::mutex> lock(toolExistsCacheMutex());
+            auto &cache = toolExistsCache();
+            const auto found = cache.find(name);
+            if (found != cache.end()) {
+                return found->second;
+            }
         }
 #ifdef _WIN32
         const bool ok = std::system(("where " + name + " >NUL 2>NUL").c_str()) == 0;
 #else
         const bool ok = std::system(("command -v " + shellQuote(name) + " >/dev/null 2>&1").c_str()) == 0;
 #endif
-        cache[name] = ok;
+        {
+            std::lock_guard<std::mutex> lock(toolExistsCacheMutex());
+            toolExistsCache()[name] = ok;
+        }
         return ok;
     }
 };
@@ -726,6 +775,18 @@ public:
             }
         }
         return "";
+    }
+
+    std::vector<std::string> sections() const {
+        std::vector<std::string> out;
+        const std::regex sectionPattern(R"(^\s*\[([^\]]+)\]\s*$)");
+        for (const auto &line : lines_) {
+            std::smatch match;
+            if (std::regex_match(line, match, sectionPattern)) {
+                out.push_back(trim(match[1].str()));
+            }
+        }
+        return out;
     }
 
     void set(const std::string &section, const std::string &key, const std::string &value) {
@@ -791,6 +852,12 @@ inline F2bJailConfig readJailConfig(const std::string &jail) {
     cfg.factor = ini.get(jail, "bantime.factor");
     cfg.maxtime = ini.get(jail, "bantime.maxtime");
     return cfg;
+}
+
+inline std::string readJailValue(const std::string &jail, const std::string &key) {
+    IniConfig ini;
+    ini.load(kJailConf);
+    return ini.get(jail, key);
 }
 
 inline std::string configValueOr(const std::string &value, const std::string &fallback) {
@@ -949,6 +1016,94 @@ inline std::string remainingBanTime(const std::string &jail, const std::string &
     if (hours > 0) out << hours << "h ";
     out << mins << "m";
     return out.str();
+}
+
+inline std::string policyRoleForJail(const std::string &jail) {
+    if (jail == kRule1Jail) {
+        return "默认策略: SSH 登录防护";
+    }
+    if (jail == kRule2Jail) {
+        return "默认策略: UFW 慢扫升级";
+    }
+    return "自定义策略";
+}
+
+inline std::set<std::string> configuredFail2banJails() {
+    std::set<std::string> out;
+    out.insert(kRule1Jail);
+    out.insert(kRule2Jail);
+    IniConfig ini;
+    ini.load(kJailConf);
+    for (const auto &section : ini.sections()) {
+        if (section != "DEFAULT" && !section.empty()) {
+            out.insert(section);
+        }
+    }
+    return out;
+}
+
+inline std::set<std::string> runningFail2banJails() {
+    std::set<std::string> out;
+    if (!Shell::exists("fail2ban-client")) {
+        return out;
+    }
+    const std::string output = Shell::capture("fail2ban-client status 2>/dev/null || true").output;
+    for (const auto &line : splitLines(output)) {
+        const std::size_t pos = line.find("Jail list:");
+        if (pos == std::string::npos) {
+            continue;
+        }
+        std::string list = line.substr(pos + std::string("Jail list:").size());
+        std::replace(list.begin(), list.end(), ',', ' ');
+        for (const auto &name : splitWords(list)) {
+            if (isSafeIdentifier(name)) {
+                out.insert(name);
+            }
+        }
+    }
+    return out;
+}
+
+inline std::vector<F2bPolicyInfo> collectFail2banPolicies(bool includeRuntimeStatus) {
+    std::set<std::string> names = configuredFail2banJails();
+    const std::set<std::string> running = runningFail2banJails();
+    names.insert(running.begin(), running.end());
+
+    std::vector<F2bPolicyInfo> policies;
+    for (const auto &name : names) {
+        F2bPolicyInfo info;
+        info.name = name;
+        info.role = policyRoleForJail(name);
+        info.managedDefault = name == kRule1Jail || name == kRule2Jail;
+        info.config = readJailConfig(name);
+        info.filter = readJailValue(name, "filter");
+        info.backend = readJailValue(name, "backend");
+        info.logpath = readJailValue(name, "logpath");
+        info.port = readJailValue(name, "port");
+        const bool configuredEnabled = lowerCopy(configValueOr(info.config.enabled, running.count(name) ? "true" : "false")) == "true";
+        info.state = running.count(name) ? "运行中" : (configuredEnabled ? "已配置/待重载" : "未启用");
+        if (includeRuntimeStatus && running.count(name)) {
+            info.bannedCount = bannedSetForJail(name).size();
+        }
+        policies.push_back(info);
+    }
+    std::sort(policies.begin(), policies.end(), [](const F2bPolicyInfo &a, const F2bPolicyInfo &b) {
+        if (a.managedDefault != b.managedDefault) {
+            return a.managedDefault > b.managedDefault;
+        }
+        return a.name < b.name;
+    });
+    return policies;
+}
+
+inline std::vector<std::string> customFail2banJailNames() {
+    std::vector<std::string> out;
+    for (const auto &policy : collectFail2banPolicies(false)) {
+        if (!policy.managedDefault && policy.name != "DEFAULT") {
+            out.push_back(policy.name);
+        }
+    }
+    return out;
 }
 
 inline std::map<std::string, std::string> listeningProcesses() {
@@ -2728,10 +2883,14 @@ inline std::vector<TrafficRow> parseTrafficSet(const std::string &setName,
 
 inline std::vector<TrafficRow> collectTrafficRows() {
     std::vector<TrafficRow> rows;
-    const std::vector<TrafficRow> ipv4Down = parseTrafficSet("ipv4_download", "下载", "IPv4");
-    const std::vector<TrafficRow> ipv4Up = parseTrafficSet("ipv4_upload", "上传", "IPv4");
-    const std::vector<TrafficRow> ipv6Down = parseTrafficSet("ipv6_download", "下载", "IPv6");
-    const std::vector<TrafficRow> ipv6Up = parseTrafficSet("ipv6_upload", "上传", "IPv6");
+    auto ipv4DownFuture = std::async(std::launch::async, [] { return parseTrafficSet("ipv4_download", "下载", "IPv4"); });
+    auto ipv4UpFuture = std::async(std::launch::async, [] { return parseTrafficSet("ipv4_upload", "上传", "IPv4"); });
+    auto ipv6DownFuture = std::async(std::launch::async, [] { return parseTrafficSet("ipv6_download", "下载", "IPv6"); });
+    auto ipv6UpFuture = std::async(std::launch::async, [] { return parseTrafficSet("ipv6_upload", "上传", "IPv6"); });
+    const std::vector<TrafficRow> ipv4Down = ipv4DownFuture.get();
+    const std::vector<TrafficRow> ipv4Up = ipv4UpFuture.get();
+    const std::vector<TrafficRow> ipv6Down = ipv6DownFuture.get();
+    const std::vector<TrafficRow> ipv6Up = ipv6UpFuture.get();
     rows.insert(rows.end(), ipv4Down.begin(), ipv4Down.end());
     rows.insert(rows.end(), ipv4Up.begin(), ipv4Up.end());
     rows.insert(rows.end(), ipv6Down.begin(), ipv6Down.end());
@@ -2807,17 +2966,16 @@ inline std::vector<UfwHit> parseTopHits(const std::string &output) {
 }
 
 #if LTG_HAS_SQLITE
-inline std::vector<UfwHit> collectUfwSourceTopSqlite(std::time_t start, std::time_t end) {
+inline bool collectUfwSourceTopSqlite(std::time_t start, std::time_t end, std::vector<UfwHit> &hits) {
     sqlite3 *db = openUfwCacheDb();
     if (!db) {
-        return {};
+        return false;
     }
     const auto ranges = sqliteReadUfwRanges(db);
     if (!rangeCovered(start, end, ranges)) {
         sqlite3_close(db);
-        return {};
+        return false;
     }
-    std::vector<UfwHit> hits;
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2(db,
                            "SELECT src, count(*) AS c FROM events "
@@ -2856,7 +3014,7 @@ inline std::vector<UfwHit> collectUfwSourceTopSqlite(std::time_t start, std::tim
     }
     sqlite3_finalize(stmt);
     sqlite3_close(db);
-    return hits;
+    return true;
 }
 #endif
 
@@ -2864,18 +3022,59 @@ inline std::vector<UfwHit> collectUfwSourceTop() {
 #if LTG_HAS_SQLITE
     const std::time_t end = std::time(nullptr);
     const std::time_t roundedEnd = end - (end % 60);
-    const auto cached = collectUfwSourceTopSqlite(roundedEnd - 86400, roundedEnd);
-    if (!cached.empty()) {
+    std::vector<UfwHit> cached;
+    if (collectUfwSourceTopSqlite(roundedEnd - 86400, roundedEnd, cached)) {
         return cached;
     }
 #endif
     if (!Shell::exists("journalctl")) {
         return {};
     }
-    const std::string command =
-        "journalctl -k --no-pager -n 1200 2>/dev/null | "
-        "awk '{for(i=1;i<=NF;i++) if($i ~ /^SRC=/){sub(/^SRC=/,\"\",$i); c[$i]++}} END{for(ip in c) print c[ip], ip}' | sort -nr | head -10";
-    return parseTopHits(Shell::capture(command).output);
+    const std::string prefix = Shell::exists("timeout") ? "timeout 1s " : "";
+    const std::string command = prefix + "journalctl -k --no-pager -n 360 -o short-iso 2>/dev/null || true";
+    std::map<std::string, UfwHit> grouped;
+    std::map<std::string, std::map<std::string, std::uint64_t>> portsByIp;
+    for (const auto &line : splitLines(Shell::capture(command).output)) {
+        UfwLogEvent event;
+        if (!parseUfwLogEvent(line, event) || (event.action != "BLOCK" && event.action != "AUDIT")) {
+            continue;
+        }
+        auto &hit = grouped[event.src];
+        hit.value = event.src;
+        hit.count += 1;
+        if (!event.dpt.empty()) {
+            portsByIp[event.src][event.dpt] += 1;
+        }
+    }
+    std::vector<UfwHit> hits;
+    for (auto &entry : grouped) {
+        const auto portFound = portsByIp.find(entry.first);
+        if (portFound != portsByIp.end()) {
+            auto best = std::max_element(portFound->second.begin(), portFound->second.end(),
+                                         [](const auto &a, const auto &b) {
+                                             if (a.second != b.second) {
+                                                 return a.second < b.second;
+                                             }
+                                             return a.first > b.first;
+                                         });
+            if (best != portFound->second.end()) {
+                entry.second.topPort = best->first;
+                entry.second.topPortCount = best->second;
+            }
+        }
+        enrichUfwHit(entry.second);
+        hits.push_back(entry.second);
+    }
+    std::sort(hits.begin(), hits.end(), [](const UfwHit &a, const UfwHit &b) {
+        if (a.count != b.count) {
+            return a.count > b.count;
+        }
+        return a.value < b.value;
+    });
+    if (hits.size() > 10) {
+        hits.resize(10);
+    }
+    return hits;
 }
 
 inline Table ufwHitsTable(const std::vector<UfwHit> &hits) {
@@ -2892,12 +3091,19 @@ inline Table ufwHitsTable(const std::vector<UfwHit> &hits) {
 
 inline DashboardSnapshot loadDashboardSnapshot() {
     DashboardSnapshot snapshot;
-    snapshot.tableEnabled = trafficTableEnabled();
-    snapshot.trafficRows = collectTrafficRows();
-    snapshot.totalRows = aggregateTrafficByIp(snapshot.trafficRows);
-    snapshot.ufwHits = collectUfwSourceTop();
-    snapshot.fail2banState = serviceState("fail2ban");
-    snapshot.ufwState = ufwState();
+    auto tableFuture = std::async(std::launch::async, [] { return trafficTableEnabled(); });
+    auto ufwHitsFuture = std::async(std::launch::async, [] { return collectUfwSourceTop(); });
+    auto fail2banStateFuture = std::async(std::launch::async, [] { return serviceState("fail2ban"); });
+    auto ufwStateFuture = std::async(std::launch::async, [] { return ufwState(); });
+
+    snapshot.tableEnabled = tableFuture.get();
+    if (snapshot.tableEnabled) {
+        snapshot.trafficRows = collectTrafficRows();
+        snapshot.totalRows = aggregateTrafficByIp(snapshot.trafficRows);
+    }
+    snapshot.ufwHits = ufwHitsFuture.get();
+    snapshot.fail2banState = fail2banStateFuture.get();
+    snapshot.ufwState = ufwStateFuture.get();
     snapshot.loadedAt = std::chrono::steady_clock::now();
     return snapshot;
 }
@@ -3122,6 +3328,31 @@ private:
         }
     }
 
+    static void addF2bPolicyTable(ScreenBuffer &buffer,
+                                  const std::vector<F2bPolicyInfo> &policies,
+                                  const std::string &emptyMessage = "暂无策略") {
+        const std::vector<int> widths = {22, 18, 12, 8, 9, 9, 9, 15, 9};
+        buffer.add(tableRow({"策略", "定位", "状态", "阈值", "窗口", "封禁", "动作", "过滤器", "封禁IP"}, widths, true));
+        buffer.add(tableRule(widths));
+        if (policies.empty()) {
+            buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
+            return;
+        }
+        for (const auto &policy : policies) {
+            buffer.add(tableRow({
+                policy.name,
+                policy.role,
+                policy.state,
+                configValueOr(policy.config.maxretry, policy.name == kRule2Jail ? "50" : "5"),
+                configValueOr(policy.config.findtime, "3600"),
+                configValueOr(policy.config.bantime, policy.name == kRule2Jail ? "1d" : "600"),
+                configValueOr(policy.config.banaction, policy.name == kRule2Jail ? "ufw-drop" : "默认"),
+                configValueOr(policy.filter, policy.name),
+                std::to_string(policy.bannedCount),
+            }, widths));
+        }
+    }
+
     void pushMainMenu() {
         Page page;
         page.kind = PageKind::Menu;
@@ -3203,11 +3434,23 @@ private:
     void pushFail2banPanel() {
         pushMenu("防护策略", "把 fail2ban 规则和 UFW 落地动作作为一套策略维护",
                  {
-                     {"1", "SSH 防护规则", "登录失败阈值、封禁时间、指数惩罚", true, [this] { pushRule1Menu(); }},
-                     {"2", "扫描升级规则", "UFW 慢扫阈值、窗口、全端口封禁", true, [this] { pushRule2Menu(); }},
-                     {"3", "白名单策略", "规则白名单与 DEFAULT 全局白名单", true, [this] { pushF2bIpMenu(); }},
-                     {"4", "全局同步", "双规则同步 bantime/findtime/maxretry", true, [this] { pushF2bGlobalMenu(); }},
-                     {"5", "策略安装/修复", "创建 jail/filter/action 并重载服务", true, [this] { actionEnsureFail2banStack(); }},
+                     {"1", "策略总览", "默认两策略 + 自定义 jail 一屏看清", false, [this] { actionF2bPolicyOverview(); }},
+                     {"2", "SSH 防护规则", "登录失败阈值、封禁时间、指数惩罚", true, [this] { pushRule1Menu(); }},
+                     {"3", "扫描升级规则", "UFW 慢扫阈值、窗口、全端口封禁", true, [this] { pushRule2Menu(); }},
+                     {"4", "自定义策略", "新增、编辑、停用用户 jail", true, [this] { pushCustomF2bMenu(); }},
+                     {"5", "白名单策略", "规则白名单与 DEFAULT 全局白名单", true, [this] { pushF2bIpMenu(); }},
+                     {"6", "全局同步", "双规则同步 bantime/findtime/maxretry", true, [this] { pushF2bGlobalMenu(); }},
+                     {"7", "策略安装/修复", "创建 jail/filter/action 并重载服务", true, [this] { actionEnsureFail2banStack(); }},
+                 });
+    }
+
+    void pushCustomF2bMenu() {
+        pushMenu("自定义策略", "把用户新增 jail 纳入统一策略模型，而不是散落在配置文件里",
+                 {
+                     {"1", "新增策略", "向导创建 jail.local section，可选生成 filter", true, [this] { actionCreateCustomJail(); }},
+                     {"2", "编辑策略参数", "选择任意 jail 修改 enabled/maxretry/findtime/bantime/action 等", true, [this] { actionEditAnyJailParam(); }},
+                     {"3", "停用自定义策略", "把自定义 jail enabled=false，保留配置备份", true, [this] { actionDisableCustomJail(); }},
+                     {"4", "策略总览", "查看所有默认与自定义策略", false, [this] { actionF2bPolicyOverview(); }},
                  });
     }
 
@@ -3377,7 +3620,7 @@ private:
         }
         buffer.add(deps.str());
         buffer.add("");
-        if (page.loading || snapshot == nullptr) {
+        if (snapshot == nullptr) {
             buffer.add(std::string("> 流量 / IP 概览  加载中 ") + spinner);
             buffer.add("  正在读取 nft、UFW、fail2ban 数据。");
             if (std::chrono::steady_clock::now() - page.started > std::chrono::seconds(2)) {
@@ -3391,6 +3634,9 @@ private:
         }
 
         buffer.add("> 流量 / IP 概览");
+        if (page.loading) {
+            buffer.add(std::string("后台刷新中 ") + spinner + "  先显示上一份快照，刷新完成后自动更新。");
+        }
         buffer.add(std::string("统计表: ") +
                    (snapshot->tableEnabled ? Ui::badge("已启用", ansi::green) : Ui::badge("未启用", ansi::yellow)) +
                    "  nft=inet " + kIpTrafficTable);
@@ -3412,6 +3658,21 @@ private:
         buffer.add(tableRow({"ufw", normalizedServiceState(snapshot->ufwState),
                              serviceMeaning("ufw", snapshot->ufwState),
                              serviceSuggestion("ufw", snapshot->ufwState)}, serviceWidths));
+        buffer.add("");
+        buffer.add("> Fail2ban 默认策略");
+        F2bPolicyInfo sshPolicy;
+        sshPolicy.name = kRule1Jail;
+        sshPolicy.role = "SSH 登录";
+        sshPolicy.config = readJailConfig(kRule1Jail);
+        sshPolicy.filter = readJailValue(kRule1Jail, "filter");
+        sshPolicy.state = normalizedServiceState(snapshot->fail2banState) == "运行" ? "随服务运行" : "待确认";
+        F2bPolicyInfo scanPolicy;
+        scanPolicy.name = kRule2Jail;
+        scanPolicy.role = "UFW 慢扫";
+        scanPolicy.config = readJailConfig(kRule2Jail);
+        scanPolicy.filter = readJailValue(kRule2Jail, "filter");
+        scanPolicy.state = lowerCopy(configValueOr(scanPolicy.config.enabled, "false")) == "true" ? "已配置" : "未启用";
+        addF2bPolicyTable(buffer, {sshPolicy, scanPolicy}, "jail.local 中未发现默认策略");
         buffer.add("");
         buffer.add(ansi::gray + std::string("提示: “服务诊断”处理安装/启动/日志，“处置修复”处理封禁和规则一致性。") + ansi::plain);
         return buffer;
@@ -3856,6 +4117,271 @@ private:
         buffer.add("  改防护规则: 策略配置 -> SSH防护 / 扫描升级 / 白名单");
         buffer.add("  处理异常IP: 处置修复 -> 来源IP处置 / 一致性核验 / 补齐UFW deny");
         pushResult("安全总览", buffer);
+    }
+
+    std::string promptPolicyName(const std::string &title, bool customOnly = false) {
+        const auto policies = collectFail2banPolicies(false);
+        std::vector<F2bPolicyInfo> filtered;
+        for (const auto &policy : policies) {
+            if (!customOnly || !policy.managedDefault) {
+                filtered.push_back(policy);
+            }
+        }
+        if (filtered.empty()) {
+            ScreenBuffer buffer;
+            buffer.add(customOnly ? "当前没有自定义策略。" : "没有可选策略。");
+            pushResult(title, buffer);
+            return "";
+        }
+        std::vector<std::string> body;
+        body.push_back("选择要操作的 fail2ban 策略:");
+        for (std::size_t i = 0; i < filtered.size(); ++i) {
+            body.push_back(std::to_string(i + 1) + " = " + filtered[i].name + "  (" + filtered[i].role + ")");
+        }
+        PromptAnswer answer = promptLine(title, body, "序号或策略名: ");
+        if (!answer.ok || answer.value.empty()) {
+            return "";
+        }
+        if (isValidPositiveInt(answer.value)) {
+            const std::size_t index = static_cast<std::size_t>(std::stoul(answer.value));
+            if (index >= 1 && index <= filtered.size()) {
+                return filtered[index - 1].name;
+            }
+        }
+        if (isSafeIdentifier(answer.value)) {
+            for (const auto &policy : filtered) {
+                if (policy.name == answer.value) {
+                    return policy.name;
+                }
+            }
+        }
+        ScreenBuffer buffer;
+        buffer.add("无效策略选择。");
+        pushResult(title, buffer);
+        return "";
+    }
+
+    void actionF2bPolicyOverview() {
+        renderBusy("策略总览", "正在读取 fail2ban 策略...");
+        ScreenBuffer buffer;
+        const auto policies = collectFail2banPolicies(true);
+        buffer.add("> 策略清单");
+        addF2bPolicyTable(buffer, policies, "未发现 fail2ban 策略");
+        buffer.add("");
+        buffer.add("> 说明");
+        buffer.add("  " + kRule1Jail + " 是默认 SSH 登录防护策略，适合处理登录爆破。");
+        buffer.add("  " + kRule2Jail + " 是默认 UFW 慢扫升级策略，适合把跨端口扫描升级为全端口封禁。");
+        buffer.add("  自定义策略会作为普通 fail2ban jail 写入 jail.local，并可复用已有 filter 或生成新的 filter。");
+        buffer.add("");
+        buffer.add("> 操作入口");
+        buffer.add("  新增/编辑: 防护策略 -> 自定义策略");
+        buffer.add("  默认策略: 防护策略 -> SSH 防护规则 / 扫描升级规则");
+        buffer.add("  封禁核验: 处置修复 -> 一致性核验");
+        pushResult("策略总览", buffer);
+    }
+
+    void actionCreateCustomJail() {
+        PromptAnswer name = promptLine("新增自定义策略",
+                                       {"策略名会成为 fail2ban jail section，允许字母、数字、-、_。",
+                                        "示例: nginx-404, app-login, sshd-extra"},
+                                       "策略名: ");
+        if (!name.ok || name.value.empty()) return;
+        if (!isSafeIdentifier(name.value) || name.value == "DEFAULT") {
+            ScreenBuffer buffer;
+            buffer.add("策略名不合法。只能使用字母、数字、-、_，且不能是 DEFAULT。");
+            pushResult("新增自定义策略", buffer);
+            return;
+        }
+        PromptAnswer filter = promptLine("新增自定义策略",
+                                         {"filter 名称通常与 /etc/fail2ban/filter.d/<name>.conf 对应。",
+                                          "如果输入已有 filter 名称并跳过 failregex，就只引用已有 filter。"},
+                                         "filter [" + name.value + "]: ",
+                                         name.value);
+        if (!filter.ok) return;
+        if (!isSafeIdentifier(filter.value)) {
+            ScreenBuffer buffer;
+            buffer.add("filter 名称不合法。只能使用字母、数字、-、_。");
+            pushResult("新增自定义策略", buffer);
+            return;
+        }
+        PromptAnswer logpath = promptLine("新增自定义策略",
+                                          {"日志路径支持普通路径和通配符，例如 /var/log/nginx/access.log*。"},
+                                          "logpath [/var/log/auth.log]: ",
+                                          "/var/log/auth.log");
+        if (!logpath.ok) return;
+        if (!isSafeLogPath(logpath.value)) {
+            ScreenBuffer buffer;
+            buffer.add("日志路径不合法。必须是 / 开头的安全路径，可包含 * 或 ?。");
+            pushResult("新增自定义策略", buffer);
+            return;
+        }
+        PromptAnswer maxretry = promptLine("新增自定义策略", {"触发阈值必须是正整数。"}, "maxretry [5]: ", "5");
+        if (!maxretry.ok) return;
+        PromptAnswer findtime = promptLine("新增自定义策略", {"检测窗口支持 600、10m、2h、1d、1w。"}, "findtime [10m]: ", "10m");
+        if (!findtime.ok) return;
+        PromptAnswer bantime = promptLine("新增自定义策略", {"封禁时长支持 600、10m、2h、1d、1w。"}, "bantime [1h]: ", "1h");
+        if (!bantime.ok) return;
+        PromptAnswer action = promptLine("新增自定义策略",
+                                         {"banaction 留空表示使用 fail2ban 默认动作；输入 ufw-drop 可全端口封禁。"},
+                                         "banaction [默认]: ");
+        if (!action.ok) return;
+        PromptAnswer failregex = promptLine("新增自定义策略",
+                                            {"可选。输入 failregex 会生成 filter 文件；留空表示复用已有 filter。",
+                                             "failregex 中用 <HOST> 标记来源 IP。"},
+                                            "failregex [留空]: ");
+        if (!failregex.ok) return;
+        std::string message;
+        if (!validateConfigValue("int", maxretry.value, message) ||
+            !validateConfigValue("time", findtime.value, message) ||
+            !validateConfigValue("time", bantime.value, message)) {
+            ScreenBuffer buffer;
+            buffer.add(ansi::yellow + message + ansi::plain);
+            pushResult("新增自定义策略", buffer);
+            return;
+        }
+        if (!action.value.empty() && !isSafeIdentifier(action.value)) {
+            ScreenBuffer buffer;
+            buffer.add("banaction 不合法。只允许字母、数字、-、_，或留空。");
+            pushResult("新增自定义策略", buffer);
+            return;
+        }
+        std::ostringstream summary;
+        summary << "将创建策略 " << name.value
+                << "，filter=" << filter.value
+                << "，logpath=" << logpath.value
+                << "，maxretry=" << maxretry.value
+                << "，findtime=" << findtime.value
+                << "，bantime=" << bantime.value;
+        if (!action.value.empty()) {
+            summary << "，banaction=" << action.value;
+        }
+        if (!failregex.value.empty()) {
+            summary << "，并生成 filter 文件";
+        }
+        if (!confirmYesNo(summary.str(), false)) {
+            ScreenBuffer buffer;
+            buffer.add("操作已取消。");
+            pushResult("新增自定义策略", buffer);
+            return;
+        }
+
+        ScreenBuffer buffer;
+        std::string backup;
+        std::string error;
+        if (!failregex.value.empty()) {
+            const std::string path = "/etc/fail2ban/filter.d/" + filter.value + ".conf";
+            const std::string content = "[Definition]\nfailregex = " + failregex.value + "\nignoreregex =\n";
+            const bool ok = writeManagedFileWithBackup(path, content, backup, error);
+            buffer.add(std::string(ok ? "[OK] " : "[WARN] ") + "filter: " + path);
+            if (!backup.empty()) buffer.add("  备份: " + backup);
+            if (!error.empty()) buffer.add("  原因: " + error);
+        }
+        if (action.value == "ufw-drop") {
+            backup.clear();
+            error.clear();
+            const bool ok = writeManagedFileWithBackup(kUfwDropActionFile, renderUfwDropActionFile(), backup, error);
+            buffer.add(std::string(ok ? "[OK] " : "[WARN] ") + "action: " + kUfwDropActionFile);
+            if (!backup.empty()) buffer.add("  备份: " + backup);
+            if (!error.empty()) buffer.add("  原因: " + error);
+        }
+
+        IniConfig ini;
+        ini.load(kJailConf);
+        ini.set(name.value, "enabled", "true");
+        ini.set(name.value, "filter", filter.value);
+        ini.set(name.value, "logpath", logpath.value);
+        ini.set(name.value, "backend", "auto");
+        ini.set(name.value, "maxretry", maxretry.value);
+        ini.set(name.value, "findtime", findtime.value);
+        ini.set(name.value, "bantime", bantime.value);
+        if (!action.value.empty()) {
+            ini.set(name.value, "banaction", action.value);
+        }
+        backup.clear();
+        const bool ok = ini.save(backup);
+        buffer.add(std::string(ok ? "[OK] " : "[WARN] ") + kJailConf + " 已写入");
+        if (!backup.empty()) buffer.add("  备份: " + backup);
+        buffer.add("");
+        buffer.add("建议执行: systemctl restart fail2ban");
+        pushResult("新增自定义策略", buffer);
+    }
+
+    void actionEditAnyJailParam() {
+        const std::string jail = promptPolicyName("编辑策略参数", false);
+        if (jail.empty()) return;
+        PromptAnswer key = promptLine("编辑策略参数",
+                                      {"1 = enabled", "2 = maxretry", "3 = findtime", "4 = bantime",
+                                       "5 = banaction", "6 = filter", "7 = logpath", "8 = backend", "9 = port"},
+                                      "字段 [1-9] 或字段名: ");
+        if (!key.ok || key.value.empty()) return;
+        std::string field = key.value;
+        if (field == "1") field = "enabled";
+        else if (field == "2") field = "maxretry";
+        else if (field == "3") field = "findtime";
+        else if (field == "4") field = "bantime";
+        else if (field == "5") field = "banaction";
+        else if (field == "6") field = "filter";
+        else if (field == "7") field = "logpath";
+        else if (field == "8") field = "backend";
+        else if (field == "9") field = "port";
+        const std::set<std::string> allowed = {"enabled", "maxretry", "findtime", "bantime", "banaction", "filter", "logpath", "backend", "port"};
+        if (!allowed.count(field)) {
+            ScreenBuffer buffer;
+            buffer.add("字段不支持。");
+            pushResult("编辑策略参数", buffer);
+            return;
+        }
+        PromptAnswer value = promptLine("编辑策略参数",
+                                        {"目标策略: " + jail,
+                                         "当前 " + field + ": " + configValueOr(readJailValue(jail, field), "未设置")},
+                                        "新值: ");
+        if (!value.ok || value.value.empty()) return;
+        std::string message;
+        if ((field == "maxretry" && !validateConfigValue("int", value.value, message)) ||
+            ((field == "findtime" || field == "bantime") && !validateConfigValue("time", value.value, message)) ||
+            ((field == "filter" || field == "backend" || field == "banaction") && !isSafeIdentifier(value.value)) ||
+            (field == "logpath" && !isSafeLogPath(value.value)) ||
+            (field == "port" && !isSafePortOrEmpty(removeSpaces(value.value)))) {
+            ScreenBuffer buffer;
+            buffer.add(ansi::yellow + (message.empty() ? "字段值不合法。" : message) + ansi::plain);
+            pushResult("编辑策略参数", buffer);
+            return;
+        }
+        if (field == "enabled") {
+            const std::string lower = lowerCopy(value.value);
+            if (lower != "true" && lower != "false") {
+                ScreenBuffer buffer;
+                buffer.add("enabled 只能是 true 或 false。");
+                pushResult("编辑策略参数", buffer);
+                return;
+            }
+            value.value = lower;
+        }
+        if (!confirmYesNo("将设置 " + jail + " 的 " + field + " = " + value.value, false)) {
+            ScreenBuffer buffer;
+            buffer.add("操作已取消。");
+            pushResult("编辑策略参数", buffer);
+            return;
+        }
+        std::string backup;
+        std::string error;
+        const bool ok = applyJailConfigValue(jail, field, value.value, backup, error);
+        pushConfigResult("编辑策略参数", ok, backup, error);
+    }
+
+    void actionDisableCustomJail() {
+        const std::string jail = promptPolicyName("停用自定义策略", true);
+        if (jail.empty()) return;
+        if (!confirmYesNo("将设置 " + jail + " enabled=false，并保留其它配置。", false)) {
+            ScreenBuffer buffer;
+            buffer.add("操作已取消。");
+            pushResult("停用自定义策略", buffer);
+            return;
+        }
+        std::string backup;
+        std::string error;
+        const bool ok = applyJailConfigValue(jail, "enabled", "false", backup, error);
+        pushConfigResult("停用自定义策略", ok, backup, error);
     }
 
     void actionUfwCacheStatus() {
@@ -4735,8 +5261,10 @@ inline void renderDashboard(bool waitForInput) {
     renderDependencyStrip();
 
     const bool tableEnabled = trafficTableEnabled();
-    const auto trafficRows = collectTrafficRows();
+    const auto trafficRows = tableEnabled ? collectTrafficRows() : std::vector<TrafficRow>{};
     const auto totalRows = aggregateTrafficByIp(trafficRows);
+    const std::string f2b = serviceState("fail2ban");
+    const std::string ufw = ufwState();
 
     Ui::panel("流量 / IP 概览", [&] {
         std::cout << "统计表: "
@@ -4753,12 +5281,29 @@ inline void renderDashboard(bool waitForInput) {
     });
 
     Ui::panel("防护组件状态", [&] {
-        const std::string f2b = serviceState("fail2ban");
-        const std::string ufw = ufwState();
         Table services({"组件", "状态", "含义", "建议"}, {18, 12, 30, 18});
         services.add({"fail2ban", normalizedServiceState(f2b), serviceMeaning("fail2ban", f2b), serviceSuggestion("fail2ban", f2b)});
         services.add({"ufw", normalizedServiceState(ufw), serviceMeaning("ufw", ufw), serviceSuggestion("ufw", ufw)});
         services.print();
+    });
+
+    Ui::panel("Fail2ban 默认策略", [&] {
+        const F2bJailConfig ssh = readJailConfig(kRule1Jail);
+        const F2bJailConfig scan = readJailConfig(kRule2Jail);
+        Table policies({"策略", "定位", "启用", "阈值", "窗口", "封禁", "动作"}, {24, 16, 10, 8, 9, 9, 16});
+        policies.add({kRule1Jail, "SSH 登录",
+                      configValueOr(ssh.enabled, normalizedServiceState(f2b) == "运行" ? "随服务" : "待确认"),
+                      configValueOr(ssh.maxretry, "5"),
+                      configValueOr(ssh.findtime, "3600"),
+                      configValueOr(ssh.bantime, "600"),
+                      configValueOr(ssh.banaction, "默认")});
+        policies.add({kRule2Jail, "UFW 慢扫",
+                      configValueOr(scan.enabled, "false"),
+                      configValueOr(scan.maxretry, "50"),
+                      configValueOr(scan.findtime, "3600"),
+                      configValueOr(scan.bantime, "1d"),
+                      configValueOr(scan.banaction, "ufw-drop")});
+        policies.print();
     });
 
     if (waitForInput) {
