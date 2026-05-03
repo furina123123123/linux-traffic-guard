@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.12.0 - 2026-05-03
+
+### Added
+
+- GitHub Release workflow for tagged versions, publishing prebuilt Ubuntu/Linux x86_64 binaries, a no-SQLite fallback binary, source tarball, and SHA256 checksums.
+- `make deps`, `make bootstrap`, and `make update` for explicit dependency installation, first-time setup, and future source-checkout updates.
+
+### Changed
+
+- README now documents two normal installation paths: download the prebuilt Release binary, or build from source with `make bootstrap`.
+- Help output now points users to `make deps`, `make bootstrap`, and `make update`.
+
+### Fixed
+
+- Added safer UFW enablement prompts, UFW cleanup previews, explicit dual-audit remediation flow, cleaner non-TTY output, and more conservative diagnostic export confirmation.
+
 ## 4.11.1 - 2026-05-03
 
 ### Fixed
