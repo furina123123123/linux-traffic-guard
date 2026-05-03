@@ -21,6 +21,12 @@ curl -fL https://github.com/furina123123123/linux-traffic-guard/releases/latest/
 curl -fL https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64 -o /tmp/ltg && sudo install -Dm755 /tmp/ltg /usr/local/bin/ltg
 ```
 
+安装后也可以直接使用内置更新命令：
+
+```bash
+sudo ltg update
+```
+
 Ubuntu 服务器上可以直接克隆，并让 makefile 自动安装依赖、编译、安装到 `/usr/local/bin/ltg`：
 
 ```bash
@@ -53,7 +59,7 @@ curl -fsSLO https://raw.githubusercontent.com/furina123123123/linux-traffic-guar
 
 ```bash
 sudo apt update
-sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep
+sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep curl
 ```
 
 也可以在仓库目录里运行：
@@ -132,6 +138,12 @@ sudo install -Dm755 /tmp/ltg /usr/local/bin/ltg
 ltg --version
 ```
 
+安装后更新到最新 Release：
+
+```bash
+sudo ltg update
+```
+
 源码 checkout 首次安装：
 
 ```bash
@@ -175,8 +187,8 @@ sudo make PREFIX=/opt/ltg install
 维护者发布新版本时，先更新 `linux_traffic_guard.hpp` 中的版本号和 `CHANGELOG.md`，再推送 tag：
 
 ```bash
-git tag v4.12.1
-git push origin v4.12.1
+git tag v4.12.2
+git push origin v4.12.2
 ```
 
 GitHub Actions 会自动编译并上传 Release 附件：

@@ -8,7 +8,7 @@ PREFIX ?= /usr/local
 BINDIR := $(PREFIX)/bin
 VERSION := $(shell sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' $(SOURCE) | head -n 1)
 DISTDIR := linux-traffic-guard-$(VERSION)
-DEPS := g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep
+DEPS := g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep curl
 APT_GET ?= apt-get
 
 ifeq ($(OS),Windows_NT)
