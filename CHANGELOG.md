@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.12.2 - 2026-05-03
+
+### Added
+
+- `ltg update` / `ltg --update` command for Release binary users. It downloads the latest `ltg-linux-x86_64` asset and installs it over the currently running executable.
+- Automatic curl bootstrap for `ltg update` on Ubuntu/Debian when neither `curl` nor `wget` is available.
+
+### Changed
+
+- Ubuntu dependency lists now include `curl` so source installs are ready for the built-in updater.
+
 ## 4.12.1 - 2026-05-03
 
 ### Changed

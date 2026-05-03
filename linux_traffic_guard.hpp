@@ -84,8 +84,9 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.1";
+inline const std::string kVersion = "4.12.2";
 inline const std::string kName = "Linux 流量守卫";
+inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
 inline const std::string kRule1Jail = "sshd";
 inline const std::string kRule2Jail = "ufw-slowscan-global";
@@ -433,6 +434,20 @@ inline bool isRoot() {
     return false;
 #else
     return geteuid() == 0;
+#endif
+}
+
+inline std::string currentExecutablePath(const char *argv0) {
+#ifdef _WIN32
+    return argv0 ? argv0 : "ltg";
+#else
+    std::array<char, 4096> path{};
+    const ssize_t len = readlink("/proc/self/exe", path.data(), path.size() - 1);
+    if (len > 0) {
+        path[static_cast<std::size_t>(len)] = '\0';
+        return path.data();
+    }
+    return argv0 ? argv0 : "/usr/local/bin/ltg";
 #endif
 }
 
@@ -5679,7 +5694,7 @@ private:
         addKeyValueTable(buffer, rows);
         buffer.add("");
         buffer.add("Debian/Ubuntu 安装命令:");
-        buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev");
+        buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl");
         pushResult("依赖检查", buffer);
     }
 
@@ -5719,14 +5734,14 @@ private:
     }
 
     void actionInstallDependencies() {
-        if (!confirmYesNo("将通过 apt 安装 fail2ban/ufw/nftables/iproute2/conntrack。", false)) {
+        if (!confirmYesNo("将通过 apt 安装 fail2ban/ufw/nftables/iproute2/conntrack/curl。", false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
             pushResult("安装常见依赖", buffer);
             return;
         }
         renderBusy("安装常见依赖", "正在执行 apt 命令...");
-        ScreenBuffer buffer = runCommandList({"apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev"});
+        ScreenBuffer buffer = runCommandList({"apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl"});
         Shell::clearExistsCache();
         cachedDashboardValid() = false;
         buffer.add("");
@@ -5784,7 +5799,7 @@ inline ScreenBuffer dependencyDoctorBuffer() {
     addTableLines(buffer, table);
     buffer.add("");
     buffer.add("Debian/Ubuntu 安装命令:");
-    buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev");
+    buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl");
     return buffer;
 }
 
@@ -5894,6 +5909,83 @@ inline void exportDiagnosticReport() {
     ScreenBuffer buffer = commandListBuffer({cmd.str()});
     buffer.add("报告路径: " + out);
     printScreenBuffer(buffer);
+}
+
+inline int updateFromRelease(const char *argv0) {
+#ifdef _WIN32
+    std::cerr << "ltg update 只支持 Ubuntu/Linux 发布二进制。\n";
+    return 1;
+#else
+    if (!isRoot()) {
+        std::cerr << colorIf("更新需要写入当前 ltg 可执行文件。请使用: sudo ltg update", ansi::yellow, STDERR_FILENO) << "\n";
+        return 77;
+    }
+    const std::string target = currentExecutablePath(argv0);
+    const std::string temp = "/tmp/ltg-update-" + nowStamp();
+    ScreenBuffer buffer;
+    addSection(buffer, "更新 Linux Traffic Guard");
+    buffer.add("目标文件: " + target);
+    buffer.add("下载来源: " + kLatestBinaryUrl);
+    buffer.add("");
+
+    if (!Shell::exists("curl") && !Shell::exists("wget")) {
+        if (Shell::exists("apt-get")) {
+            buffer.add("未发现 curl/wget，正在通过 apt-get 安装 curl。");
+            ScreenBuffer deps = commandListBuffer({"apt-get update && apt-get install -y curl"});
+            buffer.addAll(deps.lines());
+            Shell::clearExistsCache();
+        } else {
+            buffer.add(ansi::yellow + std::string("未发现 curl 或 wget，且无法自动使用 apt-get 安装。") + ansi::plain);
+            buffer.add("请先安装 curl 或 wget 后重试。");
+            printScreenBuffer(buffer);
+            return 1;
+        }
+    }
+
+    std::string downloadCommand;
+    if (Shell::exists("curl")) {
+        downloadCommand = "curl -fL " + shellQuote(kLatestBinaryUrl) + " -o " + shellQuote(temp);
+    } else if (Shell::exists("wget")) {
+        downloadCommand = "wget -O " + shellQuote(temp) + " " + shellQuote(kLatestBinaryUrl);
+    } else {
+        buffer.add(ansi::yellow + std::string("curl 安装后仍不可用，更新已停止。") + ansi::plain);
+        printScreenBuffer(buffer);
+        return 1;
+    }
+
+    const auto runStep = [&](const std::string &command) {
+        buffer.add(ansi::gray + "$ " + command + ansi::plain);
+        const CommandResult result = Shell::capture(command);
+        buffer.add(result.ok() ? ansi::green + std::string("exit 0") + ansi::plain
+                               : ansi::yellow + "exit " + std::to_string(result.exitCode) + ansi::plain);
+        const std::string output = trim(result.output);
+        if (!output.empty()) {
+            buffer.addAll(splitLines(output));
+        }
+        buffer.add("");
+        return result.ok();
+    };
+
+    const std::vector<std::string> commands = {
+        downloadCommand,
+        "chmod +x " + shellQuote(temp),
+        shellQuote(temp) + " --version",
+        "install -Dm755 " + shellQuote(temp) + " " + shellQuote(target),
+    };
+    for (const auto &command : commands) {
+        if (!runStep(command)) {
+            runStep("rm -f " + shellQuote(temp));
+            buffer.add(ansi::yellow + std::string("更新失败，请查看上方输出。") + ansi::plain);
+            printScreenBuffer(buffer);
+            return 1;
+        }
+    }
+    runStep("rm -f " + shellQuote(temp));
+    buffer.add("");
+    buffer.add("更新完成后可执行: ltg --version");
+    printScreenBuffer(buffer);
+    return 0;
+#endif
 }
 
 inline int selfTest() {
@@ -6054,12 +6146,13 @@ inline void usage(const char *argv0) {
     std::cout << "  --f2b-audit       防护链路双日志核验\n";
     std::cout << "  --ufw-analyze P   分析 UFW 日志，P=24h|7d|28d\n";
     std::cout << "  --export-report   导出诊断报告\n";
+    std::cout << "  update, --update  从 GitHub Release 下载最新版并覆盖当前 ltg\n";
     std::cout << "  --self-test       运行非 root 纯逻辑自测\n";
     std::cout << "  --version         显示版本\n";
     std::cout << "  --help            显示帮助\n";
     std::cout << "\nUbuntu 依赖:\n";
     std::cout << "  sudo apt update\n";
-    std::cout << "  sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep\n";
+    std::cout << "  sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep curl\n";
     std::cout << "  # 仓库目录中也可执行: make deps\n";
     std::cout << "\n编译:\n";
     std::cout << "  make\n";
@@ -6095,6 +6188,9 @@ inline int appMain(int argc, char **argv) {
         }
         if (arg == "--self-test") {
             return selfTest();
+        }
+        if (arg == "update" || arg == "--update") {
+            return updateFromRelease(argv[0]);
         }
         const int rootCheck = requireRootOrExit();
         if (rootCheck != 0) {
