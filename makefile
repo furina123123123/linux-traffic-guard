@@ -41,10 +41,12 @@ doctor: $(BINARY)
 check: $(BINARY)
 	./$(BINARY) --version
 	./$(BINARY) --help >/dev/null
+	./$(BINARY) --self-test
 
 check-nosqlite:
 	$(CXX) $(CXXFLAGS) -DLTG_FORCE_NO_SQLITE=1 -x c++ $(SOURCE) -o $(TARGET)-nosqlite$(EXEEXT)
 	./$(TARGET)-nosqlite$(EXEEXT) --version
+	./$(TARGET)-nosqlite$(EXEEXT) --self-test
 
 check-root-guard: $(BINARY)
 	@if [ "$$(id -u)" = "0" ]; then \

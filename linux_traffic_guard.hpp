@@ -71,7 +71,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.10.1";
+inline const std::string kVersion = "4.11.0";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
 inline const std::string kRule1Jail = "sshd";
@@ -761,6 +761,15 @@ public:
         return true;
     }
 
+    void loadString(const std::string &content, const std::string &virtualPath = "") {
+        path_ = virtualPath;
+        lines_ = splitLines(content);
+    }
+
+    std::string toString() const {
+        return joinWords(lines_, "\n") + (lines_.empty() ? "" : "\n");
+    }
+
     std::string get(const std::string &section, const std::string &key) const {
         bool inSection = false;
         const std::regex sectionPattern(R"(^\s*\[([^\]]+)\]\s*$)");
@@ -834,7 +843,7 @@ public:
         if (!backupFileIfExists(path_, backupPath)) {
             return false;
         }
-        return writeTextFile(path_, joinWords(lines_, "\n") + "\n");
+        return writeTextFile(path_, toString());
     }
 
 private:
@@ -928,6 +937,34 @@ inline std::vector<std::string> ensureFail2banBaselineCommands() {
     commands.push_back("fail2ban-client reload || systemctl restart fail2ban");
     commands.push_back("ufw reload || true");
     return commands;
+}
+
+inline std::string fail2banSetIpCommand(const std::string &jail, const std::string &verb, const std::string &ip) {
+    return "fail2ban-client set " + shellQuote(jail) + " " + verb + " " + shellQuote(ip) + " || true";
+}
+
+inline std::string ufwDenyFromCommand(const std::string &source, const std::string &comment = "") {
+    std::string command = "ufw deny from " + shellQuote(source);
+    if (!comment.empty()) {
+        command += " to any comment " + shellQuote(comment);
+    }
+    return command;
+}
+
+inline std::string ufwAllowFromCommand(const std::string &source) {
+    return "ufw allow from " + shellQuote(source);
+}
+
+inline std::string ufwDeleteDenyFromCommand(const std::string &source) {
+    return "ufw --force delete deny from " + shellQuote(source) + " 2>/dev/null || true";
+}
+
+inline std::string ufwPortRuleCommand(const std::string &verb, const std::string &target) {
+    return "ufw " + verb + " " + shellQuote(target);
+}
+
+inline std::string ufwDeletePortRuleCommand(const std::string &verb, const std::string &target) {
+    return "ufw --force delete " + verb + " " + shellQuote(target);
 }
 
 inline std::string bannedListForJail(const std::string &jail) {
@@ -1277,6 +1314,25 @@ inline bool rangeCovered(std::time_t start, std::time_t end, const std::vector<s
     return cursor >= end;
 }
 
+inline std::vector<std::pair<std::time_t, std::time_t>> mergeRanges(std::vector<std::pair<std::time_t, std::time_t>> ranges) {
+    if (ranges.empty()) {
+        return {};
+    }
+    std::sort(ranges.begin(), ranges.end());
+    std::vector<std::pair<std::time_t, std::time_t>> merged;
+    for (const auto &range : ranges) {
+        if (range.first >= range.second) {
+            continue;
+        }
+        if (merged.empty() || range.first > merged.back().second + 1) {
+            merged.push_back(range);
+        } else {
+            merged.back().second = std::max(merged.back().second, range.second);
+        }
+    }
+    return merged;
+}
+
 inline std::vector<std::pair<std::time_t, std::time_t>> missingRanges(std::time_t start,
                                                                        std::time_t end,
                                                                        std::vector<std::pair<std::time_t, std::time_t>> ranges) {
@@ -1308,15 +1364,7 @@ inline void writeUfwCacheRanges(std::vector<std::pair<std::time_t, std::time_t>>
     if (ranges.empty()) {
         return;
     }
-    std::sort(ranges.begin(), ranges.end());
-    std::vector<std::pair<std::time_t, std::time_t>> merged;
-    for (const auto &range : ranges) {
-        if (merged.empty() || range.first > merged.back().second + 1) {
-            merged.push_back(range);
-        } else {
-            merged.back().second = std::max(merged.back().second, range.second);
-        }
-    }
+    const auto merged = mergeRanges(std::move(ranges));
     std::ostringstream out;
     for (const auto &range : merged) {
         out << static_cast<long long>(range.first) << "\t" << static_cast<long long>(range.second) << "\n";
@@ -1512,15 +1560,7 @@ inline void sqliteWriteUfwRanges(sqlite3 *db, std::vector<std::pair<std::time_t,
     if (ranges.empty()) {
         return;
     }
-    std::sort(ranges.begin(), ranges.end());
-    std::vector<std::pair<std::time_t, std::time_t>> merged;
-    for (const auto &range : ranges) {
-        if (merged.empty() || range.first > merged.back().second + 1) {
-            merged.push_back(range);
-        } else {
-            merged.back().second = std::max(merged.back().second, range.second);
-        }
-    }
+    const auto merged = mergeRanges(std::move(ranges));
     sqliteExec(db, "BEGIN IMMEDIATE;");
     sqliteExec(db, "DELETE FROM loaded_ranges;");
     sqlite3_stmt *stmt = nullptr;
@@ -1941,114 +1981,14 @@ private:
     }
 };
 
-inline std::string stripAnsiInput(std::string value) {
-    std::string out;
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        if (value[i] != '\033') {
-            out.push_back(value[i]);
-            continue;
-        }
-        ++i;
-        if (i < value.size() && value[i] == '[') {
-            while (i < value.size()) {
-                const unsigned char ch = static_cast<unsigned char>(value[i]);
-                if (ch >= 0x40 && ch <= 0x7e) {
-                    break;
-                }
-                ++i;
-            }
-        }
-    }
-    return out;
-}
-
-inline std::string readFilteredLine() {
-    std::string value;
-    std::getline(std::cin, value);
-    return stripAnsiInput(value);
-}
-
 class Ui {
 public:
-    static void clear() {
-        if (!pauseEnabled()) {
-            return;
-        }
-        std::cout << "\033[H\033[J";
-    }
-
     static std::string badge(const std::string &label, const std::string &color) {
         return color + "[" + label + "]" + ansi::plain;
     }
 
     static std::string statusBadge(bool ok, const std::string &okText = "可用", const std::string &badText = "缺失") {
         return ok ? badge(okText, ansi::green) : badge(badText, ansi::yellow);
-    }
-
-    static void header(const std::string &title, const std::string &subtitle = "") {
-        clear();
-        std::cout << "\n" << ansi::bold << title << ansi::plain << "\n";
-        if (!subtitle.empty()) {
-            std::cout << "  " << ansi::gray << subtitle << ansi::plain << "\n";
-        }
-        std::cout << ansi::gray << std::string(72, '-') << ansi::plain << "\n";
-    }
-
-    static void panel(const std::string &title, const std::function<void()> &body) {
-        std::cout << "\n" << ansi::cyan << "> " << title << ansi::plain << "\n";
-        body();
-    }
-
-    static void note(const std::string &message) {
-        std::cout << ansi::yellow << message << ansi::plain << "\n";
-    }
-
-    static std::string ask(const std::string &label) {
-        std::cout << ansi::blue << label << ansi::plain;
-        std::string value;
-        std::getline(std::cin, value);
-        value = stripAnsiInput(value);
-        return trim(value);
-    }
-
-    static bool confirmYesNo(const std::string &summary, bool defaultYes = false) {
-        std::cout << "\n" << ansi::yellow << summary << ansi::plain << "\n";
-        const std::string hint = defaultYes ? " [Y/n]: " : " [y/N]: ";
-        const std::string input = ask("确认执行?" + hint);
-        if (input.empty()) {
-            return defaultYes;
-        }
-        if (input == "y" || input == "Y" || input == "yes" || input == "YES") {
-            return true;
-        }
-        if (input == "n" || input == "N" || input == "no" || input == "NO") {
-            return false;
-        }
-        note("请输入 y 或 n，操作已取消。");
-        return false;
-    }
-
-    static void pause() {
-        if (!pauseEnabled()) {
-            return;
-        }
-        std::cout << "\n按 Enter 返回...";
-        std::string ignored;
-        std::getline(std::cin, ignored);
-    }
-
-    static void rawBlock(const std::string &title, const std::string &command) {
-        std::cout << ansi::yellow << "\n[" << title << "]" << ansi::plain << "\n";
-        const CommandResult result = Shell::capture(command);
-        const std::string output = trim(result.output);
-        if (output.empty()) {
-            std::cout << "(无输出)\n";
-        } else {
-            std::cout << result.output;
-            if (!result.output.empty() && result.output.back() != '\n') {
-                std::cout << "\n";
-            }
-        }
     }
 };
 
@@ -2851,20 +2791,11 @@ inline bool parseU64(const std::string &text, std::uint64_t &value) {
     return true;
 }
 
-inline std::vector<TrafficRow> parseTrafficSet(const std::string &setName,
-                                               const std::string &direction,
-                                               const std::string &family) {
+inline std::vector<TrafficRow> parseTrafficSetOutput(const std::string &output,
+                                                     const std::string &direction,
+                                                     const std::string &family) {
     std::vector<TrafficRow> rows;
-    if (!Shell::exists("nft")) {
-        return rows;
-    }
-
-    CommandResult result = Shell::capture("nft list set inet " + kIpTrafficTable + " " + setName);
-    if (!result.ok()) {
-        return rows;
-    }
-
-    std::string normalized = result.output;
+    std::string normalized = output;
     std::replace(normalized.begin(), normalized.end(), ',', '\n');
     const std::regex pattern(R"(([0-9A-Fa-f:.]+)\s*\.\s*([0-9]+).*?packets\s+([0-9]+)\s+bytes\s+([0-9]+))");
     for (const auto &line : splitLines(normalized)) {
@@ -2883,6 +2814,20 @@ inline std::vector<TrafficRow> parseTrafficSet(const std::string &setName,
         rows.push_back(row);
     }
     return rows;
+}
+
+inline std::vector<TrafficRow> parseTrafficSet(const std::string &setName,
+                                               const std::string &direction,
+                                               const std::string &family) {
+    if (!Shell::exists("nft")) {
+        return {};
+    }
+
+    CommandResult result = Shell::capture("nft list set inet " + kIpTrafficTable + " " + setName);
+    if (!result.ok()) {
+        return {};
+    }
+    return parseTrafficSetOutput(result.output, direction, family);
 }
 
 inline std::vector<TrafficRow> collectTrafficRows() {
@@ -4505,7 +4450,7 @@ private:
         }
         std::vector<std::string> commands;
         auto addJail = [&](const std::string &jail, const std::string &verb) {
-            commands.push_back("fail2ban-client set " + shellQuote(jail) + " " + verb + " " + shellQuote(ip.value) + " || true");
+            commands.push_back(fail2banSetIpCommand(jail, verb, ip.value));
         };
         auto forScope = [&](const std::string &verb) {
             if (scope == "both") {
@@ -4518,10 +4463,10 @@ private:
         if (op.value == "1") forScope("banip");
         else if (op.value == "2") {
             forScope("unbanip");
-            commands.push_back("ufw --force delete deny from " + shellQuote(ip.value) + " 2>/dev/null || true");
+            commands.push_back(ufwDeleteDenyFromCommand(ip.value));
         } else if (op.value == "3") forScope("addignoreip");
-        else if (op.value == "4") commands.push_back("ufw deny from " + shellQuote(ip.value));
-        else if (op.value == "5") commands.push_back("ufw allow from " + shellQuote(ip.value));
+        else if (op.value == "4") commands.push_back(ufwDenyFromCommand(ip.value));
+        else if (op.value == "5") commands.push_back(ufwAllowFromCommand(ip.value));
         else {
             ScreenBuffer buffer;
             buffer.add("无效操作。");
@@ -4564,10 +4509,10 @@ private:
             return;
         }
         std::vector<std::string> commands;
-        if (op.value == "1") commands.push_back("ufw allow " + shellQuote(target));
-        else if (op.value == "2") commands.push_back("ufw deny " + shellQuote(target));
-        else if (op.value == "3") commands.push_back("ufw --force delete allow " + shellQuote(target));
-        else if (op.value == "4") commands.push_back("ufw --force delete deny " + shellQuote(target));
+        if (op.value == "1") commands.push_back(ufwPortRuleCommand("allow", target));
+        else if (op.value == "2") commands.push_back(ufwPortRuleCommand("deny", target));
+        else if (op.value == "3") commands.push_back(ufwDeletePortRuleCommand("allow", target));
+        else if (op.value == "4") commands.push_back(ufwDeletePortRuleCommand("deny", target));
         else {
             ScreenBuffer buffer;
             buffer.add("无效操作。");
@@ -4806,7 +4751,7 @@ private:
         }
         std::vector<std::string> commands;
         auto add = [&](const std::string &jail) {
-            commands.push_back("fail2ban-client set " + shellQuote(jail) + " unbanip " + shellQuote(ip.value) + " || true");
+            commands.push_back(fail2banSetIpCommand(jail, "unbanip", ip.value));
         };
         if (scope == "both") {
             add(kRule1Jail);
@@ -4814,7 +4759,7 @@ private:
         } else {
             add(scope);
         }
-        commands.push_back("ufw --force delete deny from " + shellQuote(ip.value) + " 2>/dev/null || true");
+        commands.push_back(ufwDeleteDenyFromCommand(ip.value));
         renderBusy("Fail2ban 解封", "正在解封...");
         pushResult("Fail2ban 解封", runCommandList(commands));
     }
@@ -4910,8 +4855,7 @@ private:
         for (const auto &jail : {kRule1Jail, kRule2Jail}) {
             for (const auto &ip : bannedSetForJail(jail)) {
                 if (ufw.find(ip) == std::string::npos) {
-                    commands.push_back("ufw deny from " + shellQuote(ip) + " to any comment " +
-                                       shellQuote("f2b:" + jail + " ip:" + ip));
+                    commands.push_back(ufwDenyFromCommand(ip, "f2b:" + jail + " ip:" + ip));
                 }
             }
         }
@@ -4956,7 +4900,7 @@ private:
         if (!fixIps.empty() && confirmYesNo("发现 " + std::to_string(fixIps.size()) + " 个达到规则2阈值但未封禁的 IP，是否补封禁?", false)) {
             std::vector<std::string> commands;
             for (const auto &ip : fixIps) {
-                commands.push_back("fail2ban-client set " + shellQuote(kRule2Jail) + " banip " + shellQuote(ip) + " || true");
+                commands.push_back(fail2banSetIpCommand(kRule2Jail, "banip", ip));
             }
             commands.push_back("ufw reload || true");
             pushResult("双日志补封禁", runCommandList(commands));
@@ -5251,18 +5195,71 @@ private:
     }
 };
 
-inline void renderDependencyStrip() {
-    const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl"};
-    std::cout << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow)) << "  ";
-    for (const auto &tool : tools) {
-        std::cout << tool << " " << Ui::statusBadge(Shell::exists(tool), "可用", "缺失") << "  ";
+inline void printScreenBuffer(const ScreenBuffer &buffer) {
+    for (const auto &line : buffer.lines()) {
+        std::cout << line << "\n";
     }
-    std::cout << "\n";
 }
 
-inline void renderDashboard(bool waitForInput) {
-    Ui::header(kName + " v" + kVersion, "流量/IP 优先的服务器防护仪表盘");
-    renderDependencyStrip();
+inline void addSection(ScreenBuffer &buffer, const std::string &title) {
+    if (!buffer.lines().empty()) {
+        buffer.add("");
+    }
+    buffer.add(ansi::cyan + "> " + title + ansi::plain);
+}
+
+inline void addTableLines(ScreenBuffer &buffer, const Table &table, const std::string &emptyMessage = "暂无数据") {
+    buffer.addAll(tableLines(table, emptyMessage));
+}
+
+inline ScreenBuffer commandListBuffer(const std::vector<std::string> &commands) {
+    ScreenBuffer buffer;
+    bool ok = true;
+    for (const auto &command : commands) {
+        buffer.add(ansi::gray + "$ " + command + ansi::plain);
+        const CommandResult result = Shell::capture(command);
+        ok = ok && result.ok();
+        buffer.add(result.ok() ? ansi::green + std::string("exit 0") + ansi::plain
+                               : ansi::yellow + "exit " + std::to_string(result.exitCode) + ansi::plain);
+        const std::string output = trim(result.output);
+        if (!output.empty()) {
+            buffer.addAll(splitLines(output));
+        }
+        buffer.add("");
+    }
+    buffer.add(ok ? ansi::green + std::string("操作完成。") + ansi::plain
+                  : ansi::yellow + std::string("部分命令失败，请查看上方输出。") + ansi::plain);
+    return buffer;
+}
+
+inline ScreenBuffer dependencyDoctorBuffer() {
+    ScreenBuffer buffer;
+    const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl", "systemctl", "awk", "grep"};
+    Table table({"工具", "状态"}, {24, 14});
+    for (const auto &tool : tools) {
+        table.add({tool, Shell::exists(tool) ? "可用" : "缺失"});
+    }
+    addSection(buffer, "依赖检查");
+    addTableLines(buffer, table);
+    buffer.add("");
+    buffer.add("Debian/Ubuntu 安装命令:");
+    buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev");
+    return buffer;
+}
+
+inline ScreenBuffer dashboardBufferForCli() {
+    ScreenBuffer buffer;
+    buffer.add(ansi::bold + kName + " v" + kVersion + ansi::plain);
+    buffer.add(ansi::gray + std::string("流量/IP 优先的服务器防护仪表盘") + ansi::plain);
+    buffer.add(ansi::gray + std::string(72, '-') + ansi::plain);
+
+    std::ostringstream deps;
+    deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow)) << "  ";
+    const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl"};
+    for (const auto &tool : tools) {
+        deps << tool << " " << Ui::statusBadge(Shell::exists(tool), "可用", "缺失") << "  ";
+    }
+    buffer.add(deps.str());
 
     const bool tableEnabled = trafficTableEnabled();
     const auto trafficRows = tableEnabled ? collectTrafficRows() : std::vector<TrafficRow>{};
@@ -5270,387 +5267,76 @@ inline void renderDashboard(bool waitForInput) {
     const std::string f2b = serviceState("fail2ban");
     const std::string ufw = ufwState();
 
-    Ui::panel("流量 / IP 概览", [&] {
-        std::cout << "统计表: "
-                  << (tableEnabled ? Ui::badge("已启用", ansi::green) : Ui::badge("未启用", ansi::yellow))
-                  << "  nft=inet " << kIpTrafficTable << "\n";
-        if (!tableEnabled) {
-            Ui::note("IP 精细流量统计未启用。进入“流量统计 -> 开启统计”启用。");
-        }
-        trafficTable(totalRows, 8).print(tableEnabled ? "暂无匹配流量" : "统计表未启用");
-    });
-
-    Ui::panel("近期来源态势", [&] {
-        ufwHitsTable(collectUfwSourceTop()).print("暂无来源日志。可进入“安全中心 -> 分析追查”读取更长时间段。");
-    });
-
-    Ui::panel("防护组件状态", [&] {
-        Table services({"组件", "状态", "含义", "建议"}, {18, 12, 30, 18});
-        services.add({"fail2ban", normalizedServiceState(f2b), serviceMeaning("fail2ban", f2b), serviceSuggestion("fail2ban", f2b)});
-        services.add({"ufw", normalizedServiceState(ufw), serviceMeaning("ufw", ufw), serviceSuggestion("ufw", ufw)});
-        services.print();
-    });
-
-    Ui::panel("Fail2ban 默认策略", [&] {
-        const F2bJailConfig ssh = readJailConfig(kRule1Jail);
-        const F2bJailConfig scan = readJailConfig(kRule2Jail);
-        Table policies({"策略", "定位", "启用", "阈值", "窗口", "封禁", "动作"}, {24, 16, 10, 8, 9, 9, 16});
-        policies.add({kRule1Jail, "SSH 登录",
-                      configValueOr(ssh.enabled, normalizedServiceState(f2b) == "运行" ? "随服务" : "待确认"),
-                      configValueOr(ssh.maxretry, "5"),
-                      configValueOr(ssh.findtime, "3600"),
-                      configValueOr(ssh.bantime, "600"),
-                      configValueOr(ssh.banaction, "默认")});
-        policies.add({kRule2Jail, "UFW 慢扫",
-                      configValueOr(scan.enabled, "false"),
-                      configValueOr(scan.maxretry, "50"),
-                      configValueOr(scan.findtime, "3600"),
-                      configValueOr(scan.bantime, "1d"),
-                      configValueOr(scan.banaction, "ufw-drop")});
-        policies.print();
-    });
-
-    if (waitForInput) {
-        Ui::pause();
+    addSection(buffer, "流量 / IP 概览");
+    buffer.add(std::string("统计表: ") +
+               (tableEnabled ? Ui::badge("已启用", ansi::green) : Ui::badge("未启用", ansi::yellow)) +
+               "  nft=inet " + kIpTrafficTable);
+    if (!tableEnabled) {
+        buffer.add(ansi::yellow + std::string("IP 精细流量统计未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
     }
+    addTableLines(buffer, trafficTable(totalRows, 8), tableEnabled ? "暂无匹配流量" : "统计表未启用");
+
+    addSection(buffer, "近期来源态势");
+    addTableLines(buffer, ufwHitsTable(collectUfwSourceTop()), "暂无来源日志。可进入“安全中心 -> 分析追查”读取更长时间段。");
+
+    addSection(buffer, "防护组件状态");
+    Table services({"组件", "状态", "含义", "建议"}, {18, 12, 30, 18});
+    services.add({"fail2ban", normalizedServiceState(f2b), serviceMeaning("fail2ban", f2b), serviceSuggestion("fail2ban", f2b)});
+    services.add({"ufw", normalizedServiceState(ufw), serviceMeaning("ufw", ufw), serviceSuggestion("ufw", ufw)});
+    addTableLines(buffer, services);
+
+    addSection(buffer, "Fail2ban 默认策略");
+    const F2bJailConfig ssh = readJailConfig(kRule1Jail);
+    const F2bJailConfig scan = readJailConfig(kRule2Jail);
+    Table policies({"策略", "定位", "启用", "阈值", "窗口", "封禁", "动作"}, {24, 16, 10, 8, 9, 9, 16});
+    policies.add({kRule1Jail, "SSH 登录",
+                  configValueOr(ssh.enabled, normalizedServiceState(f2b) == "运行" ? "随服务" : "待确认"),
+                  configValueOr(ssh.maxretry, "5"),
+                  configValueOr(ssh.findtime, "3600"),
+                  configValueOr(ssh.bantime, "600"),
+                  configValueOr(ssh.banaction, "默认")});
+    policies.add({kRule2Jail, "UFW 慢扫",
+                  configValueOr(scan.enabled, "false"),
+                  configValueOr(scan.maxretry, "50"),
+                  configValueOr(scan.findtime, "3600"),
+                  configValueOr(scan.bantime, "1d"),
+                  configValueOr(scan.banaction, "ufw-drop")});
+    addTableLines(buffer, policies);
+    return buffer;
+}
+
+inline void renderDashboard(bool) {
+    printScreenBuffer(dashboardBufferForCli());
 }
 
 inline void showTrafficRanking() {
-    Ui::header("流量排行", "按 IP、端口和方向整理 nftables 计数");
+    ScreenBuffer buffer;
+    addSection(buffer, "流量排行");
     if (!trafficTableEnabled()) {
-        Ui::note("统计表未启用。进入“流量统计 -> 开启统计”启用。");
-        Ui::pause();
+        buffer.add(ansi::yellow + std::string("统计表未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
+        printScreenBuffer(buffer);
         return;
     }
     const auto rows = collectTrafficRows();
-    Ui::panel("IP 总量", [&] {
-        trafficTable(aggregateTrafficByIp(rows), 30).print("暂无匹配流量");
-    });
-    Ui::panel("端口 / 方向明细", [&] {
-        trafficTable(rows, 50).print("暂无匹配流量");
-    });
-    Ui::pause();
-}
-
-inline void installIpTrafficAccounting() {
-    Ui::header("开启流量统计", "输入端口 -> 查看摘要 -> y/n 确认生效");
-    const std::string ports = removeSpaces(Ui::ask("端口列表，支持 80,443,10000-10100: "));
-    if (!isSafePortList(ports)) {
-        Ui::note("端口列表不合法。示例: 80,443,10000-10100");
-        Ui::pause();
-        return;
-    }
-
-    Ui::panel("即将应用", [&] {
-        Table summary({"项目", "值"}, {22, 54});
-        summary.add({"nft 表", "inet " + kIpTrafficTable});
-        summary.add({"端口", ports});
-        summary.add({"统计集合", "IPv4/IPv6 下载/上传动态计数集合"});
-        summary.add({"挂载点", "input/output/forward priority -150"});
-        summary.print();
-    });
-
-    if (!Ui::confirmYesNo("将重建统计表，旧统计数据会清空。", false)) {
-        Ui::pause();
-        return;
-    }
-
-    const std::string table = "inet " + kIpTrafficTable;
-    const std::string portSet = "{ " + ports + " }";
-    std::vector<std::string> commands = {
-        "nft delete table " + table + " 2>/dev/null || true",
-        nftCommand("add table " + table),
-        nftCommand("add chain " + table + " input_account { type filter hook input priority -150; policy accept; }"),
-        nftCommand("add chain " + table + " output_account { type filter hook output priority -150; policy accept; }"),
-        nftCommand("add chain " + table + " forward_account { type filter hook forward priority -150; policy accept; }"),
-        nftCommand("add set " + table + " ipv4_download { type ipv4_addr . inet_service; flags dynamic; counter; }"),
-        nftCommand("add set " + table + " ipv4_upload { type ipv4_addr . inet_service; flags dynamic; counter; }"),
-        nftCommand("add set " + table + " ipv6_download { type ipv6_addr . inet_service; flags dynamic; counter; }"),
-        nftCommand("add set " + table + " ipv6_upload { type ipv6_addr . inet_service; flags dynamic; counter; }"),
-        nftCommand("add rule " + table + " input_account tcp dport " + portSet + " update @ipv4_download { ip saddr . tcp dport }"),
-        nftCommand("add rule " + table + " input_account udp dport " + portSet + " update @ipv4_download { ip saddr . udp dport }"),
-        nftCommand("add rule " + table + " input_account meta nfproto ipv6 tcp dport " + portSet + " update @ipv6_download { ip6 saddr . tcp dport }"),
-        nftCommand("add rule " + table + " input_account meta nfproto ipv6 udp dport " + portSet + " update @ipv6_download { ip6 saddr . udp dport }"),
-        nftCommand("add rule " + table + " output_account tcp sport " + portSet + " update @ipv4_upload { ip daddr . tcp sport }"),
-        nftCommand("add rule " + table + " output_account udp sport " + portSet + " update @ipv4_upload { ip daddr . udp sport }"),
-        nftCommand("add rule " + table + " output_account meta nfproto ipv6 tcp sport " + portSet + " update @ipv6_upload { ip6 daddr . tcp sport }"),
-        nftCommand("add rule " + table + " output_account meta nfproto ipv6 udp sport " + portSet + " update @ipv6_upload { ip6 daddr . udp sport }"),
-        nftCommand("add rule " + table + " forward_account tcp dport " + portSet + " update @ipv4_download { ip saddr . tcp dport }"),
-        nftCommand("add rule " + table + " forward_account udp dport " + portSet + " update @ipv4_download { ip saddr . udp dport }"),
-        nftCommand("add rule " + table + " forward_account tcp sport " + portSet + " update @ipv4_upload { ip daddr . tcp sport }"),
-        nftCommand("add rule " + table + " forward_account udp sport " + portSet + " update @ipv4_upload { ip daddr . udp sport }"),
-        nftCommand("add rule " + table + " forward_account meta nfproto ipv6 tcp dport " + portSet + " update @ipv6_download { ip6 saddr . tcp dport }"),
-        nftCommand("add rule " + table + " forward_account meta nfproto ipv6 udp dport " + portSet + " update @ipv6_download { ip6 saddr . udp dport }"),
-        nftCommand("add rule " + table + " forward_account meta nfproto ipv6 tcp sport " + portSet + " update @ipv6_upload { ip6 daddr . tcp sport }"),
-        nftCommand("add rule " + table + " forward_account meta nfproto ipv6 udp sport " + portSet + " update @ipv6_upload { ip6 daddr . udp sport }"),
-    };
-
-    bool ok = true;
-    for (const auto &command : commands) {
-        const CommandResult result = Shell::run(command);
-        ok = ok && result.ok();
-    }
-    std::cout << (ok ? ansi::green + std::string("统计规则已启用。\n") : ansi::yellow + std::string("部分命令失败，请到“下钻检查”查看原始 nft 表。\n")) << ansi::plain;
-    Ui::pause();
-}
-
-inline void resetTrafficAccounting() {
-    Ui::header("重置流量统计", "重建统计表以清零计数");
-    Ui::note("重置会清空当前 IP/端口累计数据。");
-    installIpTrafficAccounting();
-}
-
-inline void removeTrafficAccounting() {
-    Ui::header("删除流量统计", "删除 nft 表和所有已累计计数");
-    if (!trafficTableEnabled()) {
-        Ui::note("统计表未启用，无需删除。");
-        Ui::pause();
-        return;
-    }
-    if (!Ui::confirmYesNo("将删除 inet " + kIpTrafficTable + " 并清空所有统计。", false)) {
-        Ui::pause();
-        return;
-    }
-    Shell::run("nft delete table inet " + kIpTrafficTable);
-    Ui::pause();
-}
-
-inline void rawNftTable() {
-    Ui::header("原始 nft 表", "排查模式保留底层原始输出");
-    Ui::rawBlock("inet " + kIpTrafficTable, "nft list table inet " + kIpTrafficTable + " 2>/dev/null || true");
-    Ui::pause();
-}
-
-inline void conntrackSnapshot() {
-    Ui::header("conntrack 实时快照", "当前活跃连接，不等同于长期累计统计");
-    const std::string ports = removeSpaces(Ui::ask("过滤端口，空=全部: "));
-    if (!isSafePortOrEmpty(ports)) {
-        Ui::note("端口列表不合法。示例: 80,443");
-        Ui::pause();
-        return;
-    }
-    std::string command = "conntrack -L -o extended 2>/dev/null";
-    if (!ports.empty()) {
-        std::string regex = ports;
-        std::replace(regex.begin(), regex.end(), ',', '|');
-        command += " | grep -E 'dport=(" + regex + ")|sport=(" + regex + ")'";
-    }
-    Ui::rawBlock("活跃连接", command + " | head -120 || true");
-    Ui::pause();
-}
-
-inline void focusedPortInspect() {
-    Ui::header("端口下钻", "监听、防火墙、nft 计数和 conntrack 明细");
-    const std::string port = removeSpaces(Ui::ask("端口号: "));
-    if (!isSafePortList(port)) {
-        Ui::note("端口不合法。请输入单个端口，例如 443。");
-        Ui::pause();
-        return;
-    }
-    Ui::rawBlock("监听情况", "ss -tulpen 2>/dev/null | awk '$0 ~ /:" + port + "([[:space:]]|$)/ {print}' || true");
-    Ui::rawBlock("UFW 规则", "ufw status numbered 2>/dev/null | grep -E '(^|[^0-9])" + port + "([^0-9]|$)' || true");
-    Ui::rawBlock("nft 统计", "nft list table inet " + kIpTrafficTable + " 2>/dev/null | grep -E '(^|[^0-9])" + port + "([^0-9]|$)|bytes|elements' | head -160 || true");
-    Ui::rawBlock("conntrack", "conntrack -L -o extended 2>/dev/null | grep -E 'dport=" + port + "|sport=" + port + "' | head -80 || true");
-    Ui::pause();
-}
-
-inline std::string pickJail() {
-    Table table({"序号", "目标"}, {6, 30});
-    table.add({"1", "sshd"});
-    table.add({"2", "ufw-slowscan-global"});
-    table.add({"3", "两个规则"});
-    table.print();
-    const std::string choice = Ui::ask("目标规则 [1-3]: ");
-    if (choice == "1") {
-        return kRule1Jail;
-    }
-    if (choice == "2") {
-        return kRule2Jail;
-    }
-    return "both";
-}
-
-inline void runForJailScope(const std::string &scope, const std::function<void(const std::string &)> &fn) {
-    if (scope == "both") {
-        fn(kRule1Jail);
-        fn(kRule2Jail);
-    } else {
-        fn(scope);
-    }
-}
-
-inline void securityStatus() {
-    Ui::header("安全状态", "UFW 与 fail2ban 摘要");
-    Ui::panel("服务", [] {
-        Table table({"项目", "状态"}, {24, 24});
-        table.add({"fail2ban 服务", serviceState("fail2ban")});
-        table.add({"ufw", ufwState()});
-        table.print();
-    });
-    Ui::panel("Fail2ban 规则", [] {
-        Table table({"规则", "摘要"}, {26, 52});
-        table.add({kRule1Jail, trim(Shell::capture("fail2ban-client status " + kRule1Jail + " 2>/dev/null | tail -n +2 | tr '\\n' ' ' || true").output)});
-        table.add({kRule2Jail, trim(Shell::capture("fail2ban-client status " + kRule2Jail + " 2>/dev/null | tail -n +2 | tr '\\n' ' ' || true").output)});
-        table.print("fail2ban-client 不可用或 jail 未启用");
-    });
-    Ui::pause();
-}
-
-inline void ipDisposition() {
-    Ui::header("IP 处置向导", "先展示摘要，再用 y/n 确认执行");
-    Table ops({"序号", "操作"}, {6, 32});
-    ops.add({"1", "fail2ban 封禁 IP"});
-    ops.add({"2", "fail2ban 解封 IP"});
-    ops.add({"3", "加入 fail2ban 忽略列表"});
-    ops.add({"4", "UFW 拒绝来源 IP"});
-    ops.add({"5", "UFW 放行来源 IP"});
-    ops.print();
-
-    const std::string op = Ui::ask("操作 [1-5]: ");
-    const std::string ip = Ui::ask("IP/CIDR: ");
-    if (ip.empty()) {
-        Ui::note("IP/CIDR 不能为空。");
-        Ui::pause();
-        return;
-    }
-
-    std::string scope;
-    if (op == "1" || op == "2" || op == "3") {
-        scope = pickJail();
-    }
-
-    Ui::panel("即将应用", [&] {
-        Table summary({"字段", "值"}, {16, 52});
-        summary.add({"操作", op});
-        summary.add({"ip", ip});
-        summary.add({"目标", scope.empty() ? "ufw" : scope});
-        summary.print();
-    });
-    if (!Ui::confirmYesNo("将执行来源 IP 处置。", false)) {
-        Ui::pause();
-        return;
-    }
-
-    if (op == "1") {
-        runForJailScope(scope, [&](const std::string &jail) {
-            Shell::run("fail2ban-client set " + shellQuote(jail) + " banip " + shellQuote(ip));
-        });
-    } else if (op == "2") {
-        runForJailScope(scope, [&](const std::string &jail) {
-            Shell::run("fail2ban-client set " + shellQuote(jail) + " unbanip " + shellQuote(ip) + " || true");
-        });
-        Shell::run("ufw --force delete deny from " + shellQuote(ip) + " 2>/dev/null || true");
-    } else if (op == "3") {
-        runForJailScope(scope, [&](const std::string &jail) {
-            Shell::run("fail2ban-client set " + shellQuote(jail) + " addignoreip " + shellQuote(ip) + " || true");
-        });
-    } else if (op == "4") {
-        Shell::run("ufw deny from " + shellQuote(ip));
-    } else if (op == "5") {
-        Shell::run("ufw allow from " + shellQuote(ip));
-    } else {
-        Ui::note("无效操作。");
-    }
-    Ui::pause();
-}
-
-inline void portFirewallAction() {
-    Ui::header("端口防火墙向导", "先展示摘要，再用 y/n 确认执行");
-    Table ops({"序号", "操作"}, {6, 26});
-    ops.add({"1", "UFW 放行端口"});
-    ops.add({"2", "UFW 拒绝端口"});
-    ops.add({"3", "删除放行规则"});
-    ops.add({"4", "删除拒绝规则"});
-    ops.print();
-    const std::string op = Ui::ask("操作 [1-4]: ");
-    const std::string port = removeSpaces(Ui::ask("端口号: "));
-    if (!isSafePortList(port)) {
-        Ui::note("端口不合法。示例: 443");
-        Ui::pause();
-        return;
-    }
-    const std::string proto = removeSpaces(Ui::ask("协议 tcp/udp/空=两者: "));
-    if (!proto.empty() && proto != "tcp" && proto != "udp") {
-        Ui::note("协议只允许 tcp 或 udp。");
-        Ui::pause();
-        return;
-    }
-    const std::string target = proto.empty() ? port : port + "/" + proto;
-    Ui::panel("即将应用", [&] {
-        Table summary({"字段", "值"}, {16, 52});
-        summary.add({"操作", op});
-        summary.add({"目标", target});
-        summary.print();
-    });
-    if (!Ui::confirmYesNo("将修改 UFW 端口规则。", false)) {
-        Ui::pause();
-        return;
-    }
-    if (op == "1") {
-        Shell::run("ufw allow " + shellQuote(target));
-    } else if (op == "2") {
-        Shell::run("ufw deny " + shellQuote(target));
-    } else if (op == "3") {
-        Shell::run("ufw --force delete allow " + shellQuote(target));
-    } else if (op == "4") {
-        Shell::run("ufw --force delete deny " + shellQuote(target));
-    } else {
-        Ui::note("无效操作。");
-    }
-    Ui::pause();
-}
-
-inline void serviceControl() {
-    Ui::header("服务控制", "所有服务变更都需要 y/n 确认");
-    Table ops({"序号", "操作"}, {6, 34});
-    ops.add({"1", "重启 fail2ban"});
-    ops.add({"2", "启用并启动 fail2ban"});
-    ops.add({"3", "停止 fail2ban"});
-    ops.add({"4", "启用 UFW"});
-    ops.add({"5", "重载 UFW"});
-    ops.print();
-    const std::string op = Ui::ask("操作 [1-5]: ");
-    std::string command;
-    if (op == "1") command = "systemctl restart fail2ban";
-    else if (op == "2") command = "systemctl enable --now fail2ban";
-    else if (op == "3") command = "systemctl stop fail2ban";
-    else if (op == "4") command = "ufw --force enable";
-    else if (op == "5") command = "ufw reload";
-    else {
-        Ui::note("无效操作。");
-        Ui::pause();
-        return;
-    }
-    if (!Ui::confirmYesNo("将执行: " + command, false)) {
-        Ui::pause();
-        return;
-    }
-    Shell::run(command);
-    Ui::pause();
+    addSection(buffer, "IP 总量");
+    addTableLines(buffer, trafficTable(aggregateTrafficByIp(rows), 30), "暂无匹配流量");
+    addSection(buffer, "端口 / 方向明细");
+    addTableLines(buffer, trafficTable(rows, 50), "暂无匹配流量");
+    printScreenBuffer(buffer);
 }
 
 inline void dependencyDoctor() {
-    Ui::header("依赖检查", "只检查这个单头文件直接使用的 Linux 系统工具");
-    const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl", "systemctl", "awk", "grep"};
-    Table table({"工具", "状态"}, {24, 14});
-    for (const auto &tool : tools) {
-        table.add({tool, Shell::exists(tool) ? "可用" : "缺失"});
-    }
-    table.print();
-    std::cout << "\nDebian/Ubuntu 安装命令:\n";
-    std::cout << "apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev\n";
-    Ui::pause();
+    printScreenBuffer(dependencyDoctorBuffer());
 }
 
 inline void logSummary() {
-    Ui::header("日志摘要", "诊断页保留必要的原始输出");
-    Ui::rawBlock("fail2ban", "tail -n 120 /var/log/fail2ban.log 2>/dev/null || journalctl -u fail2ban --no-pager -n 120 2>/dev/null || true");
-    Ui::rawBlock("ufw kernel", "journalctl -k --no-pager -n 160 2>/dev/null | grep -i 'ufw' || tail -n 160 /var/log/ufw.log 2>/dev/null || true");
-    Ui::pause();
+    printScreenBuffer(commandListBuffer({
+        "tail -n 120 /var/log/fail2ban.log 2>/dev/null || journalctl -u fail2ban --no-pager -n 120 2>/dev/null || true",
+        "journalctl -k --no-pager -n 160 2>/dev/null | grep -i 'ufw' || tail -n 160 /var/log/ufw.log 2>/dev/null || true",
+    }));
 }
 
 inline void exportDiagnosticReport() {
-    Ui::header("导出诊断报告", "在 /tmp 下写入一份文本报告");
     const std::string out = "/tmp/linux-traffic-guard-" + nowStamp() + ".log";
     std::ostringstream cmd;
     cmd << "{ "
@@ -5664,25 +5350,76 @@ inline void exportDiagnosticReport() {
         << "echo; echo '### fail2ban log'; tail -n 220 /var/log/fail2ban.log 2>/dev/null; "
         << "echo; echo '### ufw log'; journalctl -k --no-pager -n 220 2>/dev/null | grep -i 'ufw' || true; "
         << "} > " << shellQuote(out);
-    Shell::run(cmd.str());
-    std::cout << ansi::green << "已导出: " << out << ansi::plain << "\n";
-    Ui::pause();
+    ScreenBuffer buffer = commandListBuffer({cmd.str()});
+    buffer.add("报告路径: " + out);
+    printScreenBuffer(buffer);
 }
 
-inline void installCommonDependencies() {
-    Ui::header("安装常见依赖", "Debian/Ubuntu");
-    if (!Ui::confirmYesNo("将通过 apt 安装 fail2ban/ufw/nftables/iproute2/conntrack。", false)) {
-        Ui::pause();
-        return;
-    }
-    Shell::run("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev");
-    Ui::pause();
-}
+inline int selfTest() {
+    struct CaseResult {
+        std::string name;
+        bool ok = false;
+        std::string detail;
+    };
+    std::vector<CaseResult> cases;
+    const auto check = [&](const std::string &name, bool ok, const std::string &detail = "") {
+        cases.push_back({name, ok, detail});
+    };
 
-inline void printScreenBuffer(const ScreenBuffer &buffer) {
-    for (const auto &line : buffer.lines()) {
-        std::cout << line << "\n";
+    check("端口列表校验", isSafePortList("22,80,443,10000-10010") && !isSafePortList("0,70000") && !isSafePortList("80,,443"));
+    check("IP/CIDR 校验", isValidIpOrCidr("192.168.1.1") && isValidIpOrCidr("10.0.0.0/8") &&
+                              isValidIpOrCidr("2001:db8::1/64") && !isValidIpOrCidr("999.1.1.1"));
+    long long seconds = 0;
+    check("时间 token 解析", parseTimeToSeconds("10m", seconds) && seconds == 600 &&
+                                  parseTimeToSeconds("2h", seconds) && seconds == 7200 &&
+                                  !parseTimeToSeconds("abc", seconds));
+    check("UTF-8 宽度裁剪", visibleWidth("中文AB") == 6 && visibleWidth(fitLine("中文AB", 5)) <= 5);
+
+    UfwLogEvent event;
+    const std::string ufwLine = "2026-05-03T20:01:02 host kernel: [UFW BLOCK] IN=eth0 OUT= SRC=1.2.3.4 DST=5.6.7.8 DPT=22";
+    check("UFW 日志解析", parseUfwLogEvent(ufwLine, event) && event.action == "BLOCK" &&
+                              event.src == "1.2.3.4" && event.dpt == "22");
+
+    const auto traffic = parseTrafficSetOutput("elements = { 1.2.3.4 . 443 counter packets 7 bytes 2048 }", "下载", "IPv4");
+    check("nft 统计解析", traffic.size() == 1 && traffic[0].ip == "1.2.3.4" &&
+                              traffic[0].port == "443" && traffic[0].packets == 7 && traffic[0].bytes == 2048);
+
+    const auto merged = mergeRanges({{10, 20}, {1, 5}, {6, 9}, {30, 40}});
+    check("range 合并", merged.size() == 2 && merged[0].first == 1 && merged[0].second == 20 &&
+                            rangeCovered(1, 20, merged) && !rangeCovered(1, 30, merged));
+
+    IniConfig ini;
+    ini.loadString("[sshd]\nmaxretry = 5\n\n[DEFAULT]\nignoreip = 127.0.0.1\n");
+    ini.set("sshd", "bantime", "10m");
+    ini.set("ufw-slowscan-global", "enabled", "true");
+    const std::string rendered = ini.toString();
+    check("IniConfig 内存读写", ini.get("sshd", "maxretry") == "5" &&
+                                  rendered.find("bantime = 10m") != std::string::npos &&
+                                  rendered.find("[ufw-slowscan-global]") != std::string::npos);
+    check("危险命令 helper", fail2banSetIpCommand("sshd", "banip", "1.2.3.4").find("fail2ban-client set 'sshd' banip '1.2.3.4'") != std::string::npos &&
+                               ufwDenyFromCommand("1.2.3.4", "case").find("comment 'case'") != std::string::npos &&
+                               ufwDeleteDenyFromCommand("1.2.3.4").find("--force delete deny") != std::string::npos);
+
+#if LTG_HAS_SQLITE
+    check("SQLite 编译模式", true, "LTG_HAS_SQLITE=1");
+#else
+    check("SQLite fallback 编译模式", true, "LTG_HAS_SQLITE=0");
+#endif
+
+    int failed = 0;
+    for (const auto &test : cases) {
+        if (!test.ok) {
+            ++failed;
+        }
+        std::cout << (test.ok ? ansi::green + std::string("[PASS] ") : ansi::red + std::string("[FAIL] "))
+                  << test.name << ansi::plain;
+        if (!test.detail.empty()) {
+            std::cout << "  " << ansi::gray << test.detail << ansi::plain;
+        }
+        std::cout << "\n";
     }
+    std::cout << "\nself-test: " << (cases.size() - static_cast<std::size_t>(failed)) << "/" << cases.size() << " passed\n";
+    return failed == 0 ? 0 : 1;
 }
 
 inline int cliUfwAnalyze(const std::string &period) {
@@ -5732,7 +5469,7 @@ inline void usage(const char *argv0) {
     std::cout << "Ubuntu 服务器流量与防护运维工具，单头文件 C++17，纯 ANSI TUI。\n\n";
     std::cout << "用法: " << argv0 << " [选项]\n\n";
     std::cout << "说明:\n";
-    std::cout << "  除 --help / --version 外，本工具必须以 root 权限运行。\n";
+    std::cout << "  除 --help / --version / --self-test 外，本工具必须以 root 权限运行。\n";
     std::cout << "  交互模式会进入全屏 TUI；命令行参数模式输出普通文本，方便脚本/日志收集。\n";
     std::cout << "  会调用系统工具 nft/ufw/fail2ban-client/journalctl/ss/conntrack，不依赖 .sh/.py。\n\n";
     std::cout << "选项:\n";
@@ -5743,6 +5480,7 @@ inline void usage(const char *argv0) {
     std::cout << "  --f2b-audit       防护链路双日志核验\n";
     std::cout << "  --ufw-analyze P   分析 UFW 日志，P=24h|7d|28d\n";
     std::cout << "  --export-report   导出诊断报告\n";
+    std::cout << "  --self-test       运行非 root 纯逻辑自测\n";
     std::cout << "  --version         显示版本\n";
     std::cout << "  --help            显示帮助\n";
     std::cout << "\nUbuntu 依赖:\n";
@@ -5779,6 +5517,9 @@ inline int appMain(int argc, char **argv) {
         if (arg == "--help" || arg == "-h") {
             usage(argv[0]);
             return 0;
+        }
+        if (arg == "--self-test") {
+            return selfTest();
         }
         const int rootCheck = requireRootOrExit();
         if (rootCheck != 0) {

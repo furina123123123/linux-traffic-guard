@@ -25,6 +25,7 @@ make release-check
 ```
 
 `make check-root-guard` verifies that root-only commands are rejected when run without root. It is skipped automatically when the check itself runs as root.
+`./ltg --self-test` is non-root and covers pure parsing, validation, rendering-width, range, and in-memory config behavior.
 
 ## Project Constraints
 
@@ -32,7 +33,8 @@ make release-check
 - Do not add runtime `.sh` or `.py` helper scripts.
 - Keep the TUI pure ANSI; do not add ncurses or third-party UI libraries.
 - Ubuntu is the main runtime environment.
-- Except `--help` and `--version`, commands should remain root-only unless there is a clear maintenance reason.
+- Except `--help`, `--version`, and `--self-test`, commands should remain root-only unless there is a clear maintenance reason.
+- Keep CLI output on the `ScreenBuffer` path where practical, so command-line and TUI rendering do not drift.
 - Dangerous actions must use clear `y/N` or `Y/n` confirmation and should create backups before writing service configuration.
 
 ## Code Style

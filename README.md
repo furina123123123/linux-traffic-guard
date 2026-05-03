@@ -75,6 +75,7 @@ sudo ./ltg
 ```bash
 ./ltg --help
 ./ltg --version
+./ltg --self-test
 sudo ./ltg --status
 sudo ./ltg --ip-traffic
 sudo ./ltg --ufw-analyze 24h
@@ -83,7 +84,23 @@ sudo ./ltg --doctor
 sudo ./ltg --export-report
 ```
 
-除 `--help` 和 `--version` 外，工具必须以 root 权限运行。交互模式会进入 alternate screen，并在退出或收到信号时恢复终端状态。
+除 `--help`、`--version` 和 `--self-test` 外，工具必须以 root 权限运行。交互模式会进入 alternate screen，并在退出或收到信号时恢复终端状态。
+
+## 代码结构
+
+发布物仍然是一个单头文件，但内部按维护边界组织：
+
+- 基础工具：字符串、时间、校验、文件和命令执行。
+- 数据模型：流量、UFW 事件、fail2ban 策略和仪表盘快照。
+- 解析与缓存：nft 统计解析、UFW 日志分析、SQLite/文本 fallback 缓存。
+- 渲染与 TUI：UTF-8 宽度处理、表格、全屏视口、输入事件和页面栈。
+- CLI：非交互命令输出复用 `ScreenBuffer`，便于脚本和 CI 验证。
+
+纯逻辑自测不需要 root：
+
+```bash
+./ltg --self-test
+```
 
 ## 安装与卸载
 

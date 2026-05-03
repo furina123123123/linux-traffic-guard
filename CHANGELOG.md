@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.11.0 - 2026-05-03
+
+### Added
+
+- `--self-test` non-root command for pure logic coverage: validation, UTF-8 width, UFW parsing, nft parsing, range merging, SQLite fallback mode, and in-memory INI handling.
+- `IniConfig::loadString()` and `IniConfig::toString()` to make fail2ban config edits testable without touching `/etc`.
+- `LTG_FORCE_NO_SQLITE=1` self-test coverage in `make check-nosqlite`.
+
+### Changed
+
+- CLI status, traffic, doctor, audit, and export-report paths now render through `ScreenBuffer` instead of the old prompt-style UI helpers.
+- Removed legacy interactive menu/action functions that were superseded by the unified `TuiApp` loop.
+- `make check` now runs `./ltg --self-test`.
+
 ## 4.10.1 - 2026-05-03
 
 ### Added
