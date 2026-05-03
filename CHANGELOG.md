@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.12.1 - 2026-05-03
+
+### Changed
+
+- Traffic ranking now presents download, upload, and total traffic on the same row for each IP, so the two directions read as one bidirectional endpoint instead of separate objects.
+- IP+port traffic details now use the same bidirectional layout.
+
+### Added
+
+- Self-test coverage for bidirectional traffic aggregation.
+
 ## 4.12.0 - 2026-05-03
 
 ### Added
