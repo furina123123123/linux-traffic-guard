@@ -39,6 +39,19 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
+#endif
+#ifndef STDERR_FILENO
+#define STDERR_FILENO 2
+#endif
+#ifndef STDIN_FILENO
+#define STDIN_FILENO 0
+#endif
+#endif
+
 #ifndef _WIN32
 #include <sys/ioctl.h>
 #include <sys/wait.h>
@@ -185,6 +198,22 @@ struct DashboardSnapshot {
     std::chrono::steady_clock::time_point loadedAt{};
 };
 
+struct UfwDeleteCandidate {
+    int number = 0;
+    std::string ip;
+    std::string line;
+    std::string reason;
+};
+
+struct UfwSshExposure {
+    std::vector<std::string> sshPorts;
+    std::vector<std::string> allowRules;
+
+    bool hasAllowRule() const {
+        return !allowRules.empty();
+    }
+};
+
 enum class InputKind {
     None,
     Character,
@@ -223,6 +252,43 @@ inline std::map<std::string, bool> &toolExistsCache() {
 inline std::mutex &toolExistsCacheMutex() {
     static std::mutex mutex;
     return mutex;
+}
+
+inline bool shouldUseColor(int fd = STDOUT_FILENO) {
+    if (std::getenv("NO_COLOR") != nullptr) {
+        return false;
+    }
+#ifdef _WIN32
+    return _isatty(fd) != 0;
+#else
+    return isatty(fd) != 0;
+#endif
+}
+
+inline std::string stripAnsi(const std::string &value) {
+    std::string out;
+    out.reserve(value.size());
+    for (std::size_t i = 0; i < value.size();) {
+        if (value[i] != '\033') {
+            out.push_back(value[i++]);
+            continue;
+        }
+        ++i;
+        if (i < value.size() && value[i] == '[') {
+            ++i;
+            while (i < value.size()) {
+                const unsigned char ch = static_cast<unsigned char>(value[i++]);
+                if (ch >= 0x40 && ch <= 0x7e) {
+                    break;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+inline std::string colorIf(const std::string &text, const std::string &color, int fd = STDOUT_FILENO) {
+    return shouldUseColor(fd) ? color + text + ansi::plain : text;
 }
 
 #ifndef _WIN32
@@ -878,7 +944,7 @@ public:
     }
 
     static CommandResult run(const std::string &command) {
-        std::cout << ansi::gray << "$ " << command << ansi::plain << "\n";
+        std::cout << colorIf("$ " + command, ansi::gray) << "\n";
         const int raw = std::system(command.c_str());
         return {normalizedExitCode(raw), ""};
     }
@@ -902,6 +968,11 @@ public:
             toolExistsCache()[name] = ok;
         }
         return ok;
+    }
+
+    static void clearExistsCache() {
+        std::lock_guard<std::mutex> lock(toolExistsCacheMutex());
+        toolExistsCache().clear();
     }
 };
 
@@ -2079,6 +2150,102 @@ inline std::vector<DualAuditRow> buildDualAuditRows(std::time_t start, std::time
     return rows;
 }
 
+inline std::vector<std::string> dualAuditCandidateIps(const std::vector<DualAuditRow> &rows) {
+    std::vector<std::string> out;
+    for (const auto &row : rows) {
+        if (row.conclusion == "达到规则2阈值但未封禁") {
+            out.push_back(row.ip);
+        }
+    }
+    return out;
+}
+
+inline UfwSshExposure inspectUfwSshExposure() {
+    UfwSshExposure exposure;
+    const std::string listeners = Shell::capture("ss -lntpH 2>/dev/null | grep -Ei 'sshd|ssh' || true").output;
+    const std::regex portPattern(R"(:([0-9]+)\s)");
+    for (const auto &line : splitLines(listeners)) {
+        std::smatch match;
+        if (std::regex_search(line, match, portPattern)) {
+            const std::string port = match[1].str();
+            if (std::find(exposure.sshPorts.begin(), exposure.sshPorts.end(), port) == exposure.sshPorts.end()) {
+                exposure.sshPorts.push_back(port);
+            }
+        }
+    }
+    if (exposure.sshPorts.empty()) {
+        exposure.sshPorts.push_back("22");
+    }
+
+    const std::string ufw = Shell::capture("ufw status numbered 2>/dev/null || true").output;
+    for (const auto &line : splitLines(ufw)) {
+        const std::string lower = lowerCopy(line);
+        if (lower.find("allow") == std::string::npos) {
+            continue;
+        }
+        bool matches = lower.find("openssh") != std::string::npos;
+        for (const auto &port : exposure.sshPorts) {
+            const std::regex portRule("(^|[^0-9])" + port + "(/tcp|/udp)?([^0-9]|$)");
+            if (std::regex_search(line, portRule)) {
+                matches = true;
+                break;
+            }
+        }
+        if (!matches) {
+            const std::regex port22("(^|[^0-9])22(/tcp|/udp)?([^0-9]|$)");
+            matches = std::regex_search(line, port22);
+        }
+        if (matches) {
+            exposure.allowRules.push_back(line);
+        }
+    }
+    return exposure;
+}
+
+inline std::vector<UfwDeleteCandidate> findUfwAnomalyDeleteCandidates() {
+    const std::string status = Shell::capture("ufw status numbered 2>/dev/null || true").output;
+    std::set<std::string> banned;
+    for (const auto &ip : bannedSetForJail(kRule1Jail)) banned.insert(ip);
+    for (const auto &ip : bannedSetForJail(kRule2Jail)) banned.insert(ip);
+
+    std::map<std::string, std::vector<UfwDeleteCandidate>> byIp;
+    const std::regex linePattern(R"(\[\s*([0-9]+)\].*DENY.*from\s+([0-9A-Fa-f:./]+).*(f2b:|f2b-))");
+    for (const auto &line : splitLines(status)) {
+        std::smatch match;
+        if (std::regex_search(line, match, linePattern)) {
+            UfwDeleteCandidate candidate;
+            candidate.number = std::stoi(match[1].str());
+            candidate.ip = match[2].str();
+            candidate.line = line;
+            byIp[candidate.ip].push_back(candidate);
+        }
+    }
+
+    std::vector<UfwDeleteCandidate> out;
+    for (auto &item : byIp) {
+        auto &rules = item.second;
+        std::sort(rules.begin(), rules.end(), [](const UfwDeleteCandidate &a, const UfwDeleteCandidate &b) {
+            return a.number < b.number;
+        });
+        if (banned.count(item.first) == 0) {
+            for (auto candidate : rules) {
+                candidate.reason = "fail2ban 当前封禁列表中不存在该 IP";
+                out.push_back(candidate);
+            }
+        } else if (rules.size() > 1) {
+            for (std::size_t i = 1; i < rules.size(); ++i) {
+                UfwDeleteCandidate candidate = rules[i];
+                candidate.reason = "重复 f2b deny，保留编号 " + std::to_string(rules.front().number);
+                out.push_back(candidate);
+            }
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const UfwDeleteCandidate &a, const UfwDeleteCandidate &b) {
+        return a.number < b.number;
+    });
+    return out;
+}
+
 class Table {
 public:
     Table(std::vector<std::string> headers, std::vector<std::size_t> widths)
@@ -2096,7 +2263,7 @@ public:
         printRow(headers_, true);
         printRule();
         if (rows_.empty()) {
-            std::cout << "  " << ansi::gray << "- " << emptyMessage << ansi::plain << "\n";
+            std::cout << "  " << colorIf("- " + emptyMessage, ansi::gray) << "\n";
         } else {
             for (const auto &row : rows_) {
                 printRow(row, false);
@@ -2119,18 +2286,18 @@ private:
 
     void printRule() const {
         const std::size_t width = std::min<std::size_t>(contentWidth(), 86);
-        std::cout << "  " << ansi::gray << std::string(width, '-') << ansi::plain << "\n";
+        std::cout << "  " << colorIf(std::string(width, '-'), ansi::gray) << "\n";
     }
 
     void printRow(const std::vector<std::string> &row, bool strong) const {
         std::cout << "  ";
         for (std::size_t i = 0; i < widths_.size(); ++i) {
             const std::string value = i < row.size() ? truncateText(row[i], widths_[i]) : "";
-            if (strong) {
+            if (strong && shouldUseColor()) {
                 std::cout << ansi::bold;
             }
             std::cout << std::left << std::setw(static_cast<int>(widths_[i])) << value;
-            if (strong) {
+            if (strong && shouldUseColor()) {
                 std::cout << ansi::plain;
             }
             if (i + 1 < widths_.size()) {
@@ -3603,7 +3770,8 @@ private:
                      {"1", "双日志核验", "按扫描升级窗口检查 UFW 命中和封禁", false, [this] { actionDualAudit(false); }},
                      {"2", "当前封禁详情", "IP、封禁时间、预计剩余", false, [this] { actionCurrentBanDetails(); }},
                      {"3", "封禁日志", "查看 fail2ban Ban 记录", false, [this] { actionF2bBanLogs(); }},
-                     {"4", "导出防护诊断", "导出 fail2ban/UFW 配置与日志", false, [this] { actionExportF2bDiagnostic(); }},
+                     {"4", "补封禁候选 IP", "预览达到规则2阈值但未封禁的 IP", true, [this] { actionBanDualAuditCandidates(); }},
+                     {"5", "导出防护诊断", "导出 fail2ban/UFW 配置与日志", false, [this] { actionExportF2bDiagnostic(); }},
                  });
     }
 
@@ -3910,6 +4078,7 @@ private:
         if (event.ch == 'q' || event.ch == 'Q') {
             popPage();
         } else if (event.ch == 'r' || event.ch == 'R') {
+            Shell::clearExistsCache();
             cachedDashboardValid() = false;
             startDashboardLoad(page);
             page.scrollOffset = 0;
@@ -4017,6 +4186,28 @@ private:
                                          {ansi::yellow + summary + ansi::plain,
                                           defaultText + "。输入 y 或 n，然后按 Enter。"},
                                          prompt);
+        if (!answer.ok) {
+            return false;
+        }
+        const std::string value = trim(answer.value);
+        if (value.empty()) {
+            return defaultYes;
+        }
+        if (value == "y" || value == "Y" || value == "yes" || value == "YES") {
+            return true;
+        }
+        if (value == "n" || value == "N" || value == "no" || value == "NO") {
+            return false;
+        }
+        return false;
+    }
+
+    bool confirmYesNoWithBody(const std::string &title, std::vector<std::string> body, bool defaultYes = false) {
+        const std::string defaultText = defaultYes ? "默认: 是" : "默认: 否";
+        const std::string prompt = defaultYes ? "执行? [Y/n]: " : "执行? [y/N]: ";
+        body.push_back("");
+        body.push_back(defaultText + "。输入 y 或 n，然后按 Enter。");
+        PromptAnswer answer = promptLine(title, body, prompt);
         if (!answer.ok) {
             return false;
         }
@@ -4597,6 +4788,12 @@ private:
             pushResult("IP 处置向导", buffer);
             return;
         }
+        if (!isValidIpOrCidr(ip.value)) {
+            ScreenBuffer buffer;
+            buffer.add("IP/CIDR 格式不合法。");
+            pushResult("IP 处置向导", buffer);
+            return;
+        }
         std::string scope;
         if (op.value == "1" || op.value == "2" || op.value == "3") {
             scope = promptJail();
@@ -4684,6 +4881,64 @@ private:
         pushResult("端口防火墙向导", runCommandList(commands));
     }
 
+    void actionEnableUfwSafely() {
+        renderBusy("启用 UFW", "正在检查 SSH 端口与现有放行规则...");
+        const UfwSshExposure exposure = inspectUfwSshExposure();
+        ScreenBuffer buffer;
+        buffer.add(ansi::yellow + std::string("启用 UFW 可能影响当前远程连接。") + ansi::plain);
+        buffer.add("");
+        buffer.add("检测到的 SSH 端口: " + joinWords(exposure.sshPorts));
+        buffer.add("常见 SSH 端口: 22/tcp");
+        buffer.add("");
+        buffer.add("现有 SSH/UFW 放行规则:");
+        if (exposure.allowRules.empty()) {
+            buffer.add("  " + ansi::yellow + std::string("- 未发现匹配 SSH 端口的 allow 规则") + ansi::plain);
+        } else {
+            for (const auto &line : exposure.allowRules) {
+                buffer.add("  " + line);
+            }
+        }
+        buffer.add("");
+        buffer.add("建议先确认已放行当前 SSH 端口，例如:");
+        for (const auto &port : exposure.sshPorts) {
+            buffer.add("  ufw allow " + port + "/tcp");
+        }
+        if (std::find(exposure.sshPorts.begin(), exposure.sshPorts.end(), "22") == exposure.sshPorts.end()) {
+            buffer.add("  ufw allow 22/tcp");
+        }
+
+        if (exposure.hasAllowRule()) {
+            buffer.add("");
+            buffer.add("已发现 SSH 放行规则。仍将执行: ufw --force enable");
+            if (!confirmYesNoWithBody("启用 UFW 风险预检", buffer.lines(), false)) {
+                ScreenBuffer cancel;
+                cancel.add("操作已取消。");
+                pushResult("启用 UFW", cancel);
+                return;
+            }
+        } else {
+            buffer.add("");
+            buffer.add(ansi::yellow + std::string("未发现 SSH allow 规则。若你通过 SSH 操作，继续可能导致断连。") + ansi::plain);
+            std::vector<std::string> body = buffer.lines();
+            body.push_back("");
+            body.push_back("未发现 SSH allow 规则。普通 y/回车不会执行。");
+            body.push_back("只有确认已保留控制台或已手动放行 SSH 后，才输入完整确认词。");
+            PromptAnswer confirm = promptLine("启用 UFW 强确认",
+                                              body,
+                                              "输入 ENABLE UFW 执行: ");
+            if (!confirm.ok || confirm.value != "ENABLE UFW") {
+                ScreenBuffer cancel;
+                cancel.add("确认词不匹配，操作已取消。");
+                pushResult("启用 UFW", cancel);
+                return;
+            }
+        }
+
+        renderBusy("启用 UFW", "正在执行 ufw --force enable...");
+        cachedDashboardValid() = false;
+        pushResult("启用 UFW", runCommandList({"ufw --force enable"}));
+    }
+
     void actionServiceControl() {
         PromptAnswer op = promptLine("服务控制",
                                      {"1 = 重启 fail2ban", "2 = 启用并启动 fail2ban", "3 = 停止 fail2ban",
@@ -4694,7 +4949,10 @@ private:
         if (op.value == "1") command = "systemctl restart fail2ban";
         else if (op.value == "2") command = "systemctl enable --now fail2ban";
         else if (op.value == "3") command = "systemctl stop fail2ban";
-        else if (op.value == "4") command = "ufw --force enable";
+        else if (op.value == "4") {
+            actionEnableUfwSafely();
+            return;
+        }
         else if (op.value == "5") command = "ufw reload";
         else {
             ScreenBuffer buffer;
@@ -4969,16 +5227,19 @@ private:
             return;
         }
         ScreenBuffer buffer;
+        std::vector<std::string> failures;
         std::string backup;
         std::string error;
         bool ok = writeManagedFileWithBackup(kRule2FilterFile, renderRule2FilterFile(), backup, error);
         buffer.add(ok ? "[OK] 规则2 filter 已写入" : "[WARN] 规则2 filter 写入失败: " + error);
         if (!backup.empty()) buffer.add("  备份: " + backup);
+        if (!ok) failures.push_back(kRule2FilterFile + ": " + error);
         backup.clear();
         error.clear();
         ok = writeManagedFileWithBackup(kUfwDropActionFile, renderUfwDropActionFile(), backup, error);
         buffer.add(ok ? "[OK] ufw-drop action 已写入" : "[WARN] ufw-drop action 写入失败: " + error);
         if (!backup.empty()) buffer.add("  备份: " + backup);
+        if (!ok) failures.push_back(kUfwDropActionFile + ": " + error);
 
         IniConfig ini;
         ini.load(kJailConf);
@@ -4998,7 +5259,21 @@ private:
         ok = ini.save(backup);
         buffer.add(ok ? "[OK] jail.local 已更新" : "[WARN] jail.local 写入失败");
         if (!backup.empty()) buffer.add("  备份: " + backup);
+        if (!ok) failures.push_back(kJailConf + ": 无法写入");
         buffer.add("");
+        if (!failures.empty()) {
+            ScreenBuffer result;
+            result.add(ansi::yellow + std::string("关键配置写入失败，已停止重载 fail2ban。") + ansi::plain);
+            result.add("请先修复下面的问题，再重新执行安装/修复配置。");
+            result.add("");
+            for (const auto &failure : failures) {
+                result.add("- " + failure);
+            }
+            result.add("");
+            result.addAll(buffer.lines());
+            pushResult("安装/修复配置", result);
+            return;
+        }
         buffer.addAll(runCommandList(ensureFail2banBaselineCommands()).lines());
         pushResult("安装/修复配置", buffer);
     }
@@ -5056,15 +5331,55 @@ private:
         if (rows.empty()) {
             buffer.add("  " + ansi::gray + "- 当前窗口无 UFW BLOCK/AUDIT 命中" + ansi::plain);
         }
-        pushResult("双日志核验", buffer);
-        if (!fixIps.empty() && confirmYesNo("发现 " + std::to_string(fixIps.size()) + " 个达到规则2阈值但未封禁的 IP，是否补封禁?", false)) {
-            std::vector<std::string> commands;
+        if (!fixIps.empty()) {
+            buffer.add("");
+            buffer.add(ansi::yellow + std::string("候选补封禁 IP: ") + std::to_string(fixIps.size()) + ansi::plain);
             for (const auto &ip : fixIps) {
-                commands.push_back(fail2banSetIpCommand(kRule2Jail, "banip", ip));
+                buffer.add("  - " + ip);
             }
-            commands.push_back("ufw reload || true");
-            pushResult("双日志补封禁", runCommandList(commands));
+            buffer.add("如需执行，请返回“一致性核验 -> 补封禁候选 IP”。");
         }
+        pushResult("双日志核验", buffer);
+    }
+
+    void actionBanDualAuditCandidates() {
+        const F2bJailConfig cfg = readJailConfig(kRule2Jail);
+        long long seconds = 3600;
+        parseTimeToSeconds(configValueOr(cfg.findtime, "3600"), seconds);
+        const std::time_t end = std::time(nullptr);
+        const std::time_t start = end - static_cast<std::time_t>(seconds);
+        renderBusy("补封禁候选 IP", "正在重新核验候选 IP...");
+        const auto rows = buildDualAuditRows(start, end, 40);
+        const auto fixIps = dualAuditCandidateIps(rows);
+        ScreenBuffer preview;
+        preview.add("窗口: " + dateTimeStamp(start) + " ~ " + dateTimeStamp(end));
+        preview.add("规则2阈值: " + configValueOr(cfg.maxretry, "50") + " 次 / " + configValueOr(cfg.findtime, "3600"));
+        preview.add("");
+        if (fixIps.empty()) {
+            preview.add("没有发现需要补封禁的候选 IP。");
+            pushResult("补封禁候选 IP", preview);
+            return;
+        }
+        preview.add(ansi::yellow + std::string("将补封禁以下候选 IP:") + ansi::plain);
+        for (const auto &ip : fixIps) {
+            preview.add("  - " + ip);
+        }
+        preview.add("");
+        preview.add("执行命令会写入 fail2ban 运行状态，并影响对应来源访问。");
+        preview.add("");
+        preview.add("将对 " + std::to_string(fixIps.size()) + " 个候选 IP 执行规则2补封禁。");
+        if (!confirmYesNoWithBody("补封禁候选 IP 预览", preview.lines(), false)) {
+            ScreenBuffer cancel;
+            cancel.add("操作已取消。");
+            pushResult("补封禁候选 IP", cancel);
+            return;
+        }
+        std::vector<std::string> commands;
+        for (const auto &ip : fixIps) {
+            commands.push_back(fail2banSetIpCommand(kRule2Jail, "banip", ip));
+        }
+        commands.push_back("ufw reload || true");
+        pushResult("补封禁候选 IP", runCommandList(commands));
     }
 
     void actionF2bBanLogs() {
@@ -5092,36 +5407,40 @@ private:
     }
 
     void actionRepairUfwAnomalies() {
-        if (!confirmYesNo("将删除失效/重复的防护链路 UFW deny 规则，然后执行同步修复。", false)) {
+        renderBusy("UFW异常修复", "正在解析待清理规则...");
+        const auto candidates = findUfwAnomalyDeleteCandidates();
+        ScreenBuffer preview;
+        if (candidates.empty()) {
+            preview.add("没有发现需要删除的失效/重复 f2b UFW deny 规则。");
+            pushResult("UFW异常修复", preview);
+            return;
+        }
+        preview.add(ansi::yellow + std::string("将删除以下 UFW deny 规则:") + ansi::plain);
+        preview.add("");
+        const std::vector<int> widths = {8, 34, 28};
+        preview.add(bufferTableRow({"编号", "IP", "原因"}, widths, true));
+        preview.add(bufferTableRule(widths));
+        for (const auto &candidate : candidates) {
+            preview.add(bufferTableRow({std::to_string(candidate.number), candidate.ip, candidate.reason}, widths));
+            preview.add("  规则: " + candidate.line);
+        }
+        preview.add("");
+        preview.add("规则编号会按倒序删除，避免 UFW 编号重排导致误删。");
+        preview.add("");
+        preview.add("确认删除上述 " + std::to_string(candidates.size()) + " 条 UFW 规则?");
+        if (!confirmYesNoWithBody("UFW异常修复预览", preview.lines(), false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
             pushResult("UFW异常修复", buffer);
             return;
         }
-        const std::string status = Shell::capture("ufw status numbered 2>/dev/null || true").output;
-        std::set<std::string> banned;
-        for (const auto &ip : bannedSetForJail(kRule1Jail)) banned.insert(ip);
-        for (const auto &ip : bannedSetForJail(kRule2Jail)) banned.insert(ip);
-        std::map<std::string, std::vector<int>> ruleNumsByIp;
-        const std::regex linePattern(R"(\[\s*([0-9]+)\].*DENY.*from\s+([0-9A-Fa-f:.]+).*(f2b:|f2b-))");
-        for (const auto &line : splitLines(status)) {
-            std::smatch match;
-            if (std::regex_search(line, match, linePattern)) {
-                ruleNumsByIp[match[2].str()].push_back(std::stoi(match[1].str()));
-            }
-        }
-        std::vector<int> deleteNums;
-        for (const auto &item : ruleNumsByIp) {
-            if (banned.count(item.first) == 0) {
-                deleteNums.insert(deleteNums.end(), item.second.begin(), item.second.end());
-            } else if (item.second.size() > 1) {
-                deleteNums.insert(deleteNums.end(), item.second.begin() + 1, item.second.end());
-            }
-        }
-        std::sort(deleteNums.begin(), deleteNums.end(), std::greater<int>());
         std::vector<std::string> commands;
-        for (int num : deleteNums) {
-            commands.push_back("ufw --force delete " + std::to_string(num));
+        std::vector<UfwDeleteCandidate> sorted = candidates;
+        std::sort(sorted.begin(), sorted.end(), [](const UfwDeleteCandidate &a, const UfwDeleteCandidate &b) {
+            return a.number > b.number;
+        });
+        for (const auto &candidate : sorted) {
+            commands.push_back("ufw --force delete " + std::to_string(candidate.number));
         }
         commands.push_back("true");
         renderBusy("UFW异常修复", "正在清理异常 UFW 规则...");
@@ -5133,7 +5452,8 @@ private:
 
     void actionExportF2bDiagnostic() {
         const std::string out = "/tmp/f2b-panel-ltg-" + nowStamp() + ".log";
-        if (!confirmYesNo("将在 /tmp 写入 Fail2ban/UFW 诊断报告: " + out, true)) {
+        if (!confirmYesNo("将在 /tmp 写入 Fail2ban/UFW 诊断报告: " + out +
+                          "。内容包含服务状态、UFW/fail2ban 配置、规则编号和日志片段，可能含来源 IP、端口与路径信息。", false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
             pushResult("导出防护诊断", buffer);
@@ -5319,7 +5639,8 @@ private:
 
     void actionExportReport() {
         const std::string out = "/tmp/linux-traffic-guard-" + nowStamp() + ".log";
-        if (!confirmYesNo("将在 /tmp 写入诊断报告: " + out, true)) {
+        if (!confirmYesNo("将在 /tmp 写入诊断报告: " + out +
+                          "。内容包含服务状态、监听进程、conntrack、UFW/fail2ban 状态和日志片段，可能含来源 IP 与端口信息。", false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
             pushResult("导出诊断报告", buffer);
@@ -5351,13 +5672,19 @@ private:
             return;
         }
         renderBusy("安装常见依赖", "正在执行 apt 命令...");
-        pushResult("安装常见依赖", runCommandList({"apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev"}));
+        ScreenBuffer buffer = runCommandList({"apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev"});
+        Shell::clearExistsCache();
+        cachedDashboardValid() = false;
+        buffer.add("");
+        buffer.add("已刷新依赖检测缓存。返回仪表盘后会重新读取工具状态。");
+        pushResult("安装常见依赖", buffer);
     }
 };
 
 inline void printScreenBuffer(const ScreenBuffer &buffer) {
+    const bool useColor = shouldUseColor();
     for (const auto &line : buffer.lines()) {
-        std::cout << line << "\n";
+        std::cout << (useColor ? line : stripAnsi(line)) << "\n";
     }
 }
 
@@ -5590,10 +5917,10 @@ inline int selfTest() {
         if (!test.ok) {
             ++failed;
         }
-        std::cout << (test.ok ? ansi::green + std::string("[PASS] ") : ansi::red + std::string("[FAIL] "))
-                  << test.name << ansi::plain;
+        std::cout << (test.ok ? colorIf("[PASS] ", ansi::green) : colorIf("[FAIL] ", ansi::red))
+                  << test.name;
         if (!test.detail.empty()) {
-            std::cout << "  " << ansi::gray << test.detail << ansi::plain;
+            std::cout << "  " << colorIf(test.detail, ansi::gray);
         }
         std::cout << "\n";
     }
@@ -5677,9 +6004,7 @@ inline int requireRootOrExit() {
     if (isRoot()) {
         return 0;
     }
-    std::cerr << ansi::yellow
-              << "Linux 流量守卫需要 root 权限运行。请使用 sudo 重新执行。"
-              << ansi::plain << "\n";
+    std::cerr << colorIf("Linux 流量守卫需要 root 权限运行。请使用 sudo 重新执行。", ansi::yellow, STDERR_FILENO) << "\n";
     return 77;
 }
 
