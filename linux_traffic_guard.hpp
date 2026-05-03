@@ -5992,10 +5992,13 @@ inline void usage(const char *argv0) {
     std::cout << "\nUbuntu 依赖:\n";
     std::cout << "  sudo apt update\n";
     std::cout << "  sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep\n";
+    std::cout << "  # 仓库目录中也可执行: make deps\n";
     std::cout << "\n编译:\n";
     std::cout << "  make\n";
     std::cout << "  # 或: g++ -std=c++17 -O2 -Wall -Wextra -x c++ linux_traffic_guard.hpp -o ltg -lsqlite3\n";
     std::cout << "\n安装/卸载:\n";
+    std::cout << "  make bootstrap       # 首次安装: 依赖 + 编译 + 安装\n";
+    std::cout << "  make update          # 后续更新: git pull + 编译 + 安装\n";
     std::cout << "  sudo make install\n";
     std::cout << "  sudo make uninstall\n";
 }
