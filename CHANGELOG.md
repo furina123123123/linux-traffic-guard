@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.12.4 - 2026-05-03
+
+### Changed
+
+- Aligned the dashboard UFW source ranking with the legacy `ufw_analyze.py` semantics: public source IPs only, normalized IP addresses, `UNKNOWN` for records without `DPT`, and sorting by daily peak before period total.
+- Renamed the dashboard section to `UFW拦截风险来源Top` and clarified that it uses the legacy-compatible date-window metric rather than a simple total-hit ranking.
+- Moved UFW analysis cache files to `linux_traffic_guard_ufw_cache_v2` so older raw/private-IP cache entries do not leak into the corrected metric.
+
 ## 4.12.3 - 2026-05-03
 
 ### Changed

@@ -43,11 +43,11 @@ curl -fsSLO https://raw.githubusercontent.com/furina123123123/linux-traffic-guar
 
 ## 功能概览
 
-- 仪表盘：展示 IP/端口流量、UFW 近24小时拦截来源 Top、防护组件状态和建议动作。
+- 仪表盘：展示 IP/端口流量、兼容 `ufw_analyze.py` 口径的 UFW 拦截风险来源 Top、防护组件状态和建议动作。
 - 流量统计：基于 nftables `inet usp_ip_traffic` 记录 IPv4/IPv6、TCP/UDP、上传/下载、IP+端口细粒度流量。
 - 安全中心：按 `安全总览 -> 分析追查 -> 策略配置 -> 处置修复 -> 服务诊断` 组织日常运维路径。
 - 威胁分析：解析 UFW BLOCK/AUDIT/ALLOW 日志，按 IP、端口、时间段聚合，并支持指定 IP 下钻。
-- SQLite 缓存：使用 `/var/tmp/linux_traffic_guard_ufw_cache_v1/events.sqlite3` 缓存日志事件，按 `ts/src/dpt/action` 建索引。
+- SQLite 缓存：使用 `/var/tmp/linux_traffic_guard_ufw_cache_v2/events.sqlite3` 缓存日志事件，按 `ts/src/dpt/action` 建索引。
 - fail2ban 管理：统一维护默认 `sshd`、`ufw-slowscan-global` 两个策略，以及用户自定义 jail；支持白名单、封禁时长、阈值、指数封禁、filter/logpath 和全端口动作。
 - 诊断导出：收集服务状态、规则、日志、nft 统计和连接快照到 `/tmp`。
 
@@ -187,8 +187,8 @@ sudo make PREFIX=/opt/ltg install
 维护者发布新版本时，先更新 `linux_traffic_guard.hpp` 中的版本号和 `CHANGELOG.md`，再推送 tag：
 
 ```bash
-git tag v4.12.3
-git push origin v4.12.3
+git tag v4.12.4
+git push origin v4.12.4
 ```
 
 GitHub Actions 会自动编译并上传 Release 附件：
@@ -229,7 +229,7 @@ make release-check
 
 威胁分析使用 SQLite 缓存：
 
-- 数据库：`/var/tmp/linux_traffic_guard_ufw_cache_v1/events.sqlite3`
+- 数据库：`/var/tmp/linux_traffic_guard_ufw_cache_v2/events.sqlite3`
 - 表：`events`、`loaded_ranges`、`meta`
 - 自动清理：读取 `meta.last_activity`，超过 14 天未使用时，下次进入威胁分析会清空事件和范围缓存并重建。
 
