@@ -84,7 +84,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.2";
+inline const std::string kVersion = "4.12.3";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
@@ -3350,32 +3350,21 @@ inline bool collectUfwSourceTopSqlite(std::time_t start, std::time_t end, std::v
 }
 #endif
 
-inline std::vector<UfwHit> collectUfwSourceTop() {
-#if LTG_HAS_SQLITE
-    const std::time_t end = std::time(nullptr);
-    const std::time_t roundedEnd = end - (end % 60);
-    std::vector<UfwHit> cached;
-    if (collectUfwSourceTopSqlite(roundedEnd - 86400, roundedEnd, cached)) {
-        return cached;
-    }
-#endif
-    if (!Shell::exists("journalctl")) {
-        return {};
-    }
-    const std::string prefix = Shell::exists("timeout") ? "timeout 1s " : "";
-    const std::string command = prefix + "journalctl -k --no-pager -n 360 -o short-iso 2>/dev/null || true";
+inline std::vector<UfwHit> buildUfwSourceTopFromReport(const UfwAnalysisReport &report, std::size_t limit = 10) {
     std::map<std::string, UfwHit> grouped;
     std::map<std::string, std::map<std::string, std::uint64_t>> portsByIp;
-    for (const auto &line : splitLines(Shell::capture(command).output)) {
-        UfwLogEvent event;
-        if (!parseUfwLogEvent(line, event) || (event.action != "BLOCK" && event.action != "AUDIT")) {
-            continue;
+    for (const auto &ipEntry : report.ipDaily) {
+        auto &hit = grouped[ipEntry.first];
+        hit.value = ipEntry.first;
+        for (const auto &dayEntry : ipEntry.second) {
+            hit.count += static_cast<std::uint64_t>(dayEntry.second);
         }
-        auto &hit = grouped[event.src];
-        hit.value = event.src;
-        hit.count += 1;
-        if (!event.dpt.empty()) {
-            portsByIp[event.src][event.dpt] += 1;
+    }
+    for (const auto &ipEntry : report.ipPortDaily) {
+        for (const auto &portEntry : ipEntry.second) {
+            for (const auto &dayEntry : portEntry.second) {
+                portsByIp[ipEntry.first][portEntry.first] += static_cast<std::uint64_t>(dayEntry.second);
+            }
         }
     }
     std::vector<UfwHit> hits;
@@ -3403,10 +3392,17 @@ inline std::vector<UfwHit> collectUfwSourceTop() {
         }
         return a.value < b.value;
     });
-    if (hits.size() > 10) {
-        hits.resize(10);
+    if (hits.size() > limit) {
+        hits.resize(limit);
     }
     return hits;
+}
+
+inline std::vector<UfwHit> collectUfwSourceTop() {
+    const std::time_t end = std::time(nullptr);
+    const std::time_t roundedEnd = end - (end % 60);
+    const UfwAnalysisReport report = analyzeUfwEvents("仪表盘近24小时", roundedEnd - 86400, roundedEnd, false);
+    return buildUfwSourceTopFromReport(report, 10);
 }
 
 inline Table ufwHitsTable(const std::vector<UfwHit> &hits) {
@@ -3484,7 +3480,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
         buffer.add(std::string("> 流量 / IP 概览  加载中 ") + spinner);
         buffer.add("  正在读取 nft、UFW、fail2ban 数据。你可以先用 ↑↓/滚轮查看页面，按 q 返回。");
         buffer.add("");
-        buffer.add("> 近期来源态势  加载中");
+        buffer.add("> UFW近24小时拦截来源Top  加载中");
         buffer.add("");
         buffer.add("> 防护组件状态  加载中");
         return buffer;
@@ -3497,8 +3493,9 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     }
     buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, 8, false), snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用"));
     buffer.add("");
-    buffer.add("> 近期来源态势");
-    buffer.addAll(tableLines(ufwHitsTable(snapshot->ufwHits), "暂无来源日志。可进入“安全中心 -> 分析追查”读取更长时间段。"));
+    buffer.add("> UFW近24小时拦截来源Top");
+    buffer.add("统计口径: 最近24小时 UFW BLOCK/AUDIT 记录；不包含 ALLOW。命中=拦截/审计日志条数。");
+    buffer.addAll(tableLines(ufwHitsTable(snapshot->ufwHits), "近24小时暂无 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。"));
     buffer.add("");
     buffer.add("> 防护组件状态");
     Table services({"组件", "状态", "含义", "建议"}, {18, 12, 30, 18});
@@ -3973,7 +3970,7 @@ private:
                 buffer.add("  仍在读取系统数据，可按 q 返回，或等待加载完成。");
             }
             buffer.add("");
-            buffer.add("> 近期来源态势  加载中");
+            buffer.add("> UFW近24小时拦截来源Top  加载中");
             buffer.add("");
             buffer.add("> 防护组件状态  加载中");
             return buffer;
@@ -3991,8 +3988,9 @@ private:
         }
         addTrafficSummaryTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用", false);
         buffer.add("");
-        buffer.add("> 近期来源态势");
-        addUfwTable(buffer, snapshot->ufwHits, "暂无来源日志。可进入“安全中心 -> 分析追查”读取更长时间段。");
+        buffer.add("> UFW近24小时拦截来源Top");
+        buffer.add("统计口径: 最近24小时 UFW BLOCK/AUDIT 记录；不包含 ALLOW。命中=拦截/审计日志条数。");
+        addUfwTable(buffer, snapshot->ufwHits, "近24小时暂无 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。");
         buffer.add("");
         buffer.add("> 防护组件状态");
         const std::vector<int> serviceWidths = {18, 14, 32, 22};
@@ -4477,8 +4475,9 @@ private:
         });
         buffer.add("");
 
-        buffer.add("> 近期来源 Top");
-        addUfwTable(buffer, ufwTopFuture.get(), "暂无 UFW 来源日志，或 journalctl 不可用");
+        buffer.add("> UFW近24小时拦截来源Top");
+        buffer.add("统计口径: 最近24小时 UFW BLOCK/AUDIT 记录；不包含 ALLOW。命中=拦截/审计日志条数。");
+        addUfwTable(buffer, ufwTopFuture.get(), "近24小时暂无 UFW BLOCK/AUDIT 记录。");
         buffer.add("");
 
         buffer.add("> 建议操作路径");
@@ -5832,8 +5831,9 @@ inline ScreenBuffer dashboardBufferForCli() {
     }
     addTableLines(buffer, trafficSummaryTable(totalRows, 8, false), tableEnabled ? "暂无匹配流量" : "统计表未启用");
 
-    addSection(buffer, "近期来源态势");
-    addTableLines(buffer, ufwHitsTable(collectUfwSourceTop()), "暂无来源日志。可进入“安全中心 -> 分析追查”读取更长时间段。");
+    addSection(buffer, "UFW近24小时拦截来源Top");
+    buffer.add("统计口径: 最近24小时 UFW BLOCK/AUDIT 记录；不包含 ALLOW。命中=拦截/审计日志条数。");
+    addTableLines(buffer, ufwHitsTable(collectUfwSourceTop()), "近24小时暂无 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。");
 
     addSection(buffer, "防护组件状态");
     Table services({"组件", "状态", "含义", "建议"}, {18, 12, 30, 18});
@@ -6031,6 +6031,13 @@ inline int selfTest() {
                               event.src == "1.2.3.4" && event.dpt == "22");
     const std::string badUfwLine = "2026-05-03T20:01:02 host kernel: [UFW BLOCK] SRC=:::: DST=5.6.7.8 DPT=22";
     check("UFW 无效来源过滤", !parseUfwLogEvent(badUfwLine, event));
+    UfwAnalysisReport sourceTopReport;
+    sourceTopReport.ipDaily["1.2.3.4"]["2026-05-03"] = 2;
+    sourceTopReport.ipPortDaily["1.2.3.4"]["22"]["2026-05-03"] = 2;
+    sourceTopReport.allowRecent.push_back({"1.2.3.4", std::time(nullptr)});
+    const auto sourceTop = buildUfwSourceTopFromReport(sourceTopReport, 10);
+    check("UFW来源Top口径", sourceTop.size() == 1 && sourceTop[0].value == "1.2.3.4" &&
+                              sourceTop[0].count == 2 && sourceTop[0].topPort == "22");
 
     const auto traffic = parseTrafficSetOutput("elements = { 1.2.3.4 . 443 counter packets 7 bytes 2048 }", "下载", "IPv4");
     check("nft 统计解析", traffic.size() == 1 && traffic[0].ip == "1.2.3.4" &&

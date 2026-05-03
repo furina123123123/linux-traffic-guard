@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.3 - 2026-05-03
+
+### Changed
+
+- Renamed the dashboard source section to `UFW近24小时拦截来源Top` and added the exact metric definition: recent 24-hour UFW `BLOCK`/`AUDIT` records only, excluding `ALLOW`.
+- Dashboard source Top now uses the same UFW analysis/cache pipeline as the detailed UFW analysis view instead of falling back to a short `journalctl -n 360` sample.
+
 ## 4.12.2 - 2026-05-03
 
 ### Added
