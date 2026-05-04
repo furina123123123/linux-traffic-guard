@@ -110,6 +110,8 @@ inline const std::string kUfwDropActionFile = "/etc/fail2ban/action.d/ufw-drop.c
 inline const std::string kUfwCacheDir = "/var/tmp/linux_traffic_guard_ufw_cache_v2";
 inline const std::string kFail2banDb = "/var/lib/fail2ban/fail2ban.sqlite3";
 inline constexpr int kUfwCacheIdleDays = 14;
+inline constexpr std::size_t kDashboardTrafficDays = 31;
+inline constexpr std::size_t kDashboardTrafficPortLimit = 10;
 
 inline std::string nowStamp();
 inline bool parseTimeToSeconds(const std::string &text, long long &seconds);
@@ -1155,6 +1157,14 @@ inline std::string currentTrafficPeriodLabel(TrafficPeriodMode mode) {
     return localMonthStamp(now);
 }
 
+inline std::string recentTrafficDaysLabel(const std::vector<std::string> &periods, std::size_t days) {
+    if (periods.empty()) {
+        return "最近" + std::to_string(days) + "天";
+    }
+    const auto range = std::minmax_element(periods.begin(), periods.end());
+    return "最近" + std::to_string(days) + "天（" + *range.first + " ~ " + *range.second + "）";
+}
+
 inline std::string trafficPeriodModeTitle(TrafficPeriodMode mode) {
     if (mode == TrafficPeriodMode::Day) return "日流量";
     if (mode == TrafficPeriodMode::Year) return "年流量";
@@ -1225,6 +1235,29 @@ inline bool parseTrafficRollingLimit(const std::string &text,
 inline std::time_t makeLocalTime(std::tm tm) {
     tm.tm_isdst = -1;
     return std::mktime(&tm);
+}
+
+inline std::vector<std::string> recentTrafficDayPeriods(std::size_t days) {
+    std::vector<std::string> periods;
+    if (days == 0) {
+        return periods;
+    }
+    const std::time_t now = std::time(nullptr);
+    std::tm base{};
+#ifdef _WIN32
+    localtime_s(&base, &now);
+#else
+    localtime_r(&now, &base);
+#endif
+    base.tm_hour = 12;
+    base.tm_min = 0;
+    base.tm_sec = 0;
+    for (std::size_t offset = 0; offset < days; ++offset) {
+        std::tm candidate = base;
+        candidate.tm_mday -= static_cast<int>(offset);
+        periods.push_back(localDayStamp(makeLocalTime(candidate)));
+    }
+    return periods;
 }
 
 inline bool isLeapYear(int year) {
@@ -4913,6 +4946,15 @@ inline std::vector<TrafficSummaryRow> aggregateTrafficHistoryByPort(TrafficPerio
     return loadTrafficPortSummaryForPeriod(mode, period);
 }
 
+inline std::vector<TrafficSummaryRow> aggregateTrafficHistoryByPortForRecentDays(std::size_t days, std::vector<std::string> &periods) {
+    periods = recentTrafficDayPeriods(days);
+    std::vector<TrafficRow> combined;
+    for (const auto &entry : loadTrafficDeltasForPeriods(TrafficPeriodMode::Day, periods)) {
+        combined.insert(combined.end(), entry.second.begin(), entry.second.end());
+    }
+    return aggregateTrafficByPort(combined);
+}
+
 inline TrafficSummaryRow sumTrafficSummaryRows(const std::vector<TrafficSummaryRow> &rows) {
     TrafficSummaryRow total;
     total.ip = "*";
@@ -5614,8 +5656,9 @@ inline DashboardSnapshot loadDashboardSnapshot() {
     DashboardSnapshot snapshot;
     snapshot.tableEnabled = trafficHistoryConfiguredFast();
     snapshot.trackedPorts = loadTrackedTrafficPorts();
-    snapshot.trafficPeriodLabel = currentTrafficPeriodLabel(TrafficPeriodMode::Month);
-    snapshot.totalRows = aggregateTrafficHistoryByPort(TrafficPeriodMode::Month, snapshot.trafficPeriodLabel);
+    std::vector<std::string> trafficPeriods;
+    snapshot.totalRows = aggregateTrafficHistoryByPortForRecentDays(kDashboardTrafficDays, trafficPeriods);
+    snapshot.trafficPeriodLabel = recentTrafficDaysLabel(trafficPeriods, kDashboardTrafficDays);
     snapshot.trafficHistoryAvailable = !snapshot.totalRows.empty();
     collectCachedUfwSourceTop(snapshot.ufwHits, snapshot.ufwHitsNote);
     snapshot.fail2banState = "未刷新";
@@ -5645,7 +5688,7 @@ inline bool dashboardCacheFresh() {
 inline std::string dashboardFastHeaderLine() {
     std::ostringstream deps;
     deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow));
-    deps << "  首屏: 本地历史";
+    deps << "  首屏: 最近31天历史";
     deps << "  实时检查: 安全中心/诊断";
     return deps.str();
 }
@@ -5664,7 +5707,7 @@ inline void addTrafficOnboarding(ScreenBuffer &buffer, bool configured, bool has
         buffer.add("3. 想确认底层规则是否有实时计数，可进入“流量统计 -> 实时明细”。");
         return;
     }
-    buffer.add("1. 看趋势用“流量统计 -> 今日/本月/按日/月/年查看”。");
+    buffer.add("1. 看趋势用“流量统计 -> 日流量 / 月流量 / 年流量”。");
     buffer.add("2. 查具体 IP 用“流量统计 -> 实时明细”或“下钻检查”。");
     buffer.add("3. 查服务、防火墙、fail2ban 运行态用“安全中心”或“诊断”。");
 }
@@ -5686,25 +5729,25 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     buffer.add(dashboardFastHeaderLine());
     buffer.add("");
     if (loading || snapshot == nullptr) {
-        buffer.add(std::string("> 本月端口流量  加载中 ") + spinner);
+        buffer.add(std::string("> 最近31天端口流量  加载中 ") + spinner);
         buffer.add("  正在读取本地历史。实时检查放在对应页面执行。");
         buffer.add("");
         buffer.add("> 下一步  加载中");
         return buffer;
     }
 
-    buffer.add("> 本月端口流量");
-    buffer.add("统计口径: 系统本地时间 " + (snapshot->trafficPeriodLabel.empty() ? currentTrafficPeriodLabel(TrafficPeriodMode::Month) : snapshot->trafficPeriodLabel) +
-               "，按端口聚合上行/下行。");
+    buffer.add("> 最近31天端口流量 Top 10");
+    buffer.add("统计口径: 系统本地时间 " + (snapshot->trafficPeriodLabel.empty() ? recentTrafficDaysLabel(recentTrafficDayPeriods(kDashboardTrafficDays), kDashboardTrafficDays) : snapshot->trafficPeriodLabel) +
+               "，按端口聚合上行/下行，只展示前10个端口。");
     buffer.add(std::string("历史采样: ") + (snapshot->tableEnabled ? "[已初始化]" : "[未初始化]"));
     buffer.add("统计端口: " + std::to_string(snapshot->trackedPorts.size()) + " 个  " + humanPortList(snapshot->trackedPorts));
     if (!snapshot->tableEnabled) {
         buffer.add("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。");
     } else if (!snapshot->trafficHistoryAvailable) {
-        buffer.add("本月还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。");
+        buffer.add("最近31天还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。");
     }
-    buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, 8, TrafficGroupMode::Port),
-                             snapshot->tableEnabled ? "本月暂无采样增量" : "历史采样未初始化"));
+    buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, kDashboardTrafficPortLimit, TrafficGroupMode::Port),
+                             snapshot->tableEnabled ? "最近31天暂无采样增量" : "历史采样未初始化"));
     buffer.add("");
     buffer.add("> 安全分析摘要");
     if (!snapshot->ufwHitsNote.empty()) {
@@ -5929,7 +5972,7 @@ private:
         page.subtitle = "常用先看仪表盘和流量统计；慢查询放在安全中心、诊断和下钻里。";
         page.root = true;
         page.items = {
-            {"1", "仪表盘", "最快入口，本月端口流量和下一步建议", false, [this] { pushDashboard(); }},
+            {"1", "仪表盘", "最快入口，最近31天端口流量和下一步建议", false, [this] { pushDashboard(); }},
             {"2", "流量统计", "开启/追加端口，查看日/月/年流量", false, [this] { pushTrafficMenu(); }},
             {"3", "安全中心", "威胁分析、fail2ban、UFW 和处置核验", false, [this] { pushSecurityMenu(); }},
             {"4", "下钻检查", "较慢，按端口/连接/底层规则排障", false, [this] { pushInspectMenu(); }},
@@ -6192,7 +6235,7 @@ private:
         buffer.add(dashboardFastHeaderLine());
         buffer.add("");
         if (snapshot == nullptr) {
-            buffer.add(std::string("> 本月端口流量  加载中 ") + spinner);
+            buffer.add(std::string("> 最近31天端口流量  加载中 ") + spinner);
             buffer.add("  正在读取本地历史库。深度审计放在对应页面执行。");
             if (std::chrono::steady_clock::now() - page.started > std::chrono::seconds(2)) {
                 buffer.add("  仍在读取系统数据，可按 q 返回，或等待加载完成。");
@@ -6202,21 +6245,21 @@ private:
             return buffer;
         }
 
-        buffer.add("> 本月端口流量");
+        buffer.add("> 最近31天端口流量 Top 10");
         if (page.loading) {
             buffer.add(std::string("后台刷新中 ") + spinner + "  先显示上一份快照，刷新完成后自动更新。");
         }
-        buffer.add("统计口径: 系统本地时间 " + (snapshot->trafficPeriodLabel.empty() ? currentTrafficPeriodLabel(TrafficPeriodMode::Month) : snapshot->trafficPeriodLabel) +
-                   "，按端口聚合上行/下行。");
+        buffer.add("统计口径: 系统本地时间 " + (snapshot->trafficPeriodLabel.empty() ? recentTrafficDaysLabel(recentTrafficDayPeriods(kDashboardTrafficDays), kDashboardTrafficDays) : snapshot->trafficPeriodLabel) +
+                   "，按端口聚合上行/下行，只展示前10个端口。");
         buffer.add(std::string("历史采样: ") +
                    (snapshot->tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
         buffer.add("统计端口: " + std::to_string(snapshot->trackedPorts.size()) + " 个  " + humanPortList(snapshot->trackedPorts));
         if (!snapshot->tableEnabled) {
             buffer.add(ansi::yellow + std::string("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
         } else if (!snapshot->trafficHistoryAvailable) {
-            buffer.add(ansi::yellow + std::string("本月还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。") + ansi::plain);
+            buffer.add(ansi::yellow + std::string("最近31天还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。") + ansi::plain);
         }
-        addTrafficSummaryTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "本月暂无采样增量" : "历史采样未初始化", TrafficGroupMode::Port);
+        addTrafficSummaryTable(buffer, snapshot->totalRows, kDashboardTrafficPortLimit, snapshot->tableEnabled ? "最近31天暂无采样增量" : "历史采样未初始化", TrafficGroupMode::Port);
         buffer.add("");
         buffer.add("> 安全分析摘要");
         if (!snapshot->ufwHitsNote.empty()) {
@@ -8519,20 +8562,21 @@ inline ScreenBuffer dashboardBufferForCli() {
 
     const bool tableEnabled = trafficHistoryConfiguredFast();
     const std::set<int> trackedPorts = loadTrackedTrafficPorts();
-    const std::string month = currentTrafficPeriodLabel(TrafficPeriodMode::Month);
-    const auto totalRows = aggregateTrafficHistoryByPort(TrafficPeriodMode::Month, month);
+    std::vector<std::string> trafficPeriods;
+    const auto totalRows = aggregateTrafficHistoryByPortForRecentDays(kDashboardTrafficDays, trafficPeriods);
+    const std::string trafficLabel = recentTrafficDaysLabel(trafficPeriods, kDashboardTrafficDays);
 
-    addSection(buffer, "本月端口流量");
-    buffer.add("统计口径: 系统本地时间 " + month + "，按端口聚合上行/下行。");
+    addSection(buffer, "最近31天端口流量 Top 10");
+    buffer.add("统计口径: 系统本地时间 " + trafficLabel + "，按端口聚合上行/下行，只展示前10个端口。");
     buffer.add(std::string("历史采样: ") +
                (tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
     buffer.add("统计端口: " + std::to_string(trackedPorts.size()) + " 个  " + humanPortList(trackedPorts));
     if (!tableEnabled) {
         buffer.add(ansi::yellow + std::string("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
     } else if (totalRows.empty()) {
-        buffer.add(ansi::yellow + std::string("本月还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。") + ansi::plain);
+        buffer.add(ansi::yellow + std::string("最近31天还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。") + ansi::plain);
     }
-    addTableLines(buffer, trafficSummaryTable(totalRows, 8, TrafficGroupMode::Port), tableEnabled ? "本月暂无采样增量" : "历史采样未初始化");
+    addTableLines(buffer, trafficSummaryTable(totalRows, kDashboardTrafficPortLimit, TrafficGroupMode::Port), tableEnabled ? "最近31天暂无采样增量" : "历史采样未初始化");
 
     addSection(buffer, "安全分析摘要");
     std::vector<UfwHit> cachedHits;
@@ -8567,7 +8611,7 @@ inline void showTrafficRanking() {
         return;
     }
     const auto rows = collectTrafficRows();
-    buffer.add("统计口径: 底层实时累计计数。年月日统计来自后台采样历史，仪表盘默认展示本月端口汇总。");
+    buffer.add("统计口径: 底层实时累计计数。年月日统计来自后台采样历史，仪表盘默认展示最近31天端口汇总。");
     addSection(buffer, "端口排行");
     addTableLines(buffer, trafficSummaryTable(aggregateTrafficByPort(rows), 30, TrafficGroupMode::Port), "暂无匹配流量");
     addSection(buffer, "IP 总量");
@@ -8941,12 +8985,18 @@ inline int selfTest() {
     renderOnlySnapshot.tableEnabled = true;
     renderOnlySnapshot.defaultPolicies = collectDefaultFail2banPolicies(false);
     const auto dashboardLines = buildDashboardBuffer(&renderOnlySnapshot, false, '|').lines();
+    const std::string dashboardText = joinWords(dashboardLines, "\n");
     const bool dashboardAvoidsLiveProbe = std::none_of(dashboardLines.begin(), dashboardLines.end(), [](const std::string &line) {
         return line.find("nft 可用") != std::string::npos ||
                line.find("fail2ban-client 可用") != std::string::npos ||
                line.find("统计表:") != std::string::npos;
     });
     check("仪表盘渲染不触发运行态采集", !dashboardLines.empty() && dashboardAvoidsLiveProbe);
+    check("仪表盘默认最近31天Top10", dashboardText.find("最近31天端口流量 Top 10") != std::string::npos &&
+                                           dashboardText.find("最近31天暂无采样增量") != std::string::npos &&
+                                           dashboardText.find("本月端口流量") == std::string::npos);
+    check("最近31天标签", recentTrafficDaysLabel({"2026-05-04", "2026-04-04"}, 31) ==
+                              "最近31天（2026-04-04 ~ 2026-05-04）");
     check("危险命令 helper", fail2banSetIpCommand("sshd", "banip", "1.2.3.4").find("fail2ban-client set 'sshd' banip '1.2.3.4'") != std::string::npos &&
                                ufwDenyFromCommand("1.2.3.4", "case").find("comment 'case'") != std::string::npos &&
                                ufwDeleteDenyFromCommand("1.2.3.4").find("--force delete deny") != std::string::npos);
