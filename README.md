@@ -43,7 +43,7 @@ git clone https://github.com/furina123123123/linux-traffic-guard.git && cd linux
 - Traffic accounting: append/remove tracked ports without rebuilding by default, visible tracked-port lists, background snapshots every 5 minutes, and day/month/year queries with rolling-window or absolute-period mode plus per-period port and IP:port detail.
 - Reliability checks: `sudo ltg --reliability-check` verifies dependencies, update readiness, fail2ban/UFW, traffic accounting, diagnostics, and TUI terminal behavior; add `--active-probes` only for explicit temporary real probes.
 - Security center: daily workflows organized as overview, investigation, policy configuration, remediation, service checks, and diagnostics.
-- UFW analysis: parses UFW `BLOCK`/`AUDIT`/`ALLOW` events, aggregates by IP/port/time period, and supports IP tracing.
+- UFW analysis: parses UFW `BLOCK`/`AUDIT`/`ALLOW` events, aggregates by IP/port/time period, supports IP tracing, and can display city/country labels from the optional DB-IP Lite MMDB database.
 - fail2ban effectiveness checks: verifies that jails are really loaded after repair and can run a reversible test ban to confirm UFW rule landing.
 - Cache: stores parsed UFW events in `/var/tmp/linux_traffic_guard_ufw_cache_v2/events.sqlite3` for faster repeated analysis.
 - Traffic history: stores sampled traffic deltas in `/var/tmp/linux_traffic_guard_traffic_history_v1/` with SQLite when available and a TSV fallback for no-SQLite builds.
@@ -57,7 +57,7 @@ Dependencies:
 
 ```bash
 sudo apt update
-sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep curl
+sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep curl mmdb-bin
 ```
 
 From a source checkout, you can install dependencies with:
@@ -66,7 +66,22 @@ From a source checkout, you can install dependencies with:
 make deps
 ```
 
-At runtime, LTG calls system tools such as `nft`, `ufw`, `fail2ban-client`, `journalctl`, `ss`, `conntrack`, and `systemctl`.
+At runtime, LTG calls system tools such as `nft`, `ufw`, `fail2ban-client`, `journalctl`, `ss`, `conntrack`, `systemctl`, and optionally `mmdblookup`.
+
+## Optional IP Geolocation
+
+LTG can show city/country labels beside source IPs in UFW source tables and traffic IP detail tables. This uses the free [DB-IP IP to City Lite](https://db-ip.com/db/download/ip-to-city-lite) database in MMDB format.
+
+Install or update the local database from the TUI:
+
+```text
+sudo ltg
+Diagnostics -> Install/update IP city database
+```
+
+The database is stored at `/var/lib/linux-traffic-guard/dbip-city-lite.mmdb`. It is not bundled in this repository or in the release binary. If the database or `mmdblookup` is missing, LTG keeps working and shows `-` in the location column.
+
+Attribution: IP geolocation data is provided by [DB-IP.com](https://db-ip.com) through the free IP to City Lite database, licensed under [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/). The free Lite database has reduced accuracy compared with DB-IP commercial databases.
 
 ## Build And Check
 

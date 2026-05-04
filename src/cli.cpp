@@ -96,6 +96,11 @@ inline const std::string kTrafficHistoryDir = "/var/tmp/linux_traffic_guard_traf
 inline const std::string kTrafficSnapshotService = "linux-traffic-guard-traffic-snapshot.service";
 inline const std::string kTrafficSnapshotTimer = "linux-traffic-guard-traffic-snapshot.timer";
 inline const std::string kUnknownUfwPort = "UNKNOWN";
+inline const std::string kDbIpLiteDownloadPage = "https://db-ip.com/db/download/ip-to-city-lite";
+inline const std::string kDbIpLiteDir = "/var/lib/linux-traffic-guard";
+inline const std::string kDbIpLiteMmdbPath = "/var/lib/linux-traffic-guard/dbip-city-lite.mmdb";
+inline const std::string kDbIpLiteMetaPath = "/var/lib/linux-traffic-guard/dbip-city-lite.url";
+inline const std::string kDbIpLiteAttribution = "IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0";
 inline const std::string kRule1Jail = "sshd";
 inline const std::string kRule2Jail = "ufw-slowscan-global";
 inline const std::string kFail2banEffectProbeIp = "203.0.113.254";
@@ -138,6 +143,7 @@ struct TrafficRow {
 struct TrafficSummaryRow {
     std::string ip;
     std::string port;
+    std::string geo;
     std::uint64_t downloadBytes = 0;
     std::uint64_t uploadBytes = 0;
     std::uint64_t downloadPackets = 0;
@@ -193,6 +199,7 @@ enum class TrafficPeriodMode {
 
 struct UfwHit {
     std::string value;
+    std::string geo;
     std::uint64_t count = 0;
     std::uint64_t peak = 0;
     std::string topPort;
@@ -2291,6 +2298,107 @@ inline std::uint64_t fileSizeBytes(const std::string &path) {
         return 0;
     }
     return static_cast<std::uint64_t>(std::max<std::streamoff>(0, input.tellg()));
+}
+
+inline std::string unescapeQuotedValue(std::string value) {
+    std::string out;
+    bool escaped = false;
+    for (char ch : value) {
+        if (escaped) {
+            out.push_back(ch);
+            escaped = false;
+        } else if (ch == '\\') {
+            escaped = true;
+        } else {
+            out.push_back(ch);
+        }
+    }
+    if (escaped) {
+        out.push_back('\\');
+    }
+    return out;
+}
+
+inline std::string parseMmdbLookupString(const std::string &output) {
+    std::smatch match;
+    const std::regex quoted(R"MMDB("((?:[^"\\]|\\.)*)"\s*<)MMDB");
+    if (std::regex_search(output, match, quoted)) {
+        return unescapeQuotedValue(match[1].str());
+    }
+    return "";
+}
+
+inline bool dbIpLiteDatabaseReady() {
+    return fileExists(kDbIpLiteMmdbPath) && Shell::exists("mmdblookup");
+}
+
+inline std::string mmdbLookupString(const std::string &ip, const std::vector<std::string> &path) {
+    if (!dbIpLiteDatabaseReady()) {
+        return "";
+    }
+    std::ostringstream command;
+    command << "mmdblookup --file " << shellQuote(kDbIpLiteMmdbPath)
+            << " --ip " << shellQuote(ip);
+    for (const auto &item : path) {
+        command << " " << shellQuote(item);
+    }
+    return parseMmdbLookupString(Shell::capture(command.str()).output);
+}
+
+inline std::string ipGeoLabel(const std::string &rawIp) {
+    static std::mutex mutex;
+    static std::map<std::string, std::string> cache;
+    std::string ip;
+    if (!normalizePublicIpAddress(rawIp, ip)) {
+        return "-";
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto found = cache.find(ip);
+        if (found != cache.end()) {
+            return found->second;
+        }
+    }
+    std::string country = mmdbLookupString(ip, {"country", "names", "zh-CN"});
+    if (country.empty()) {
+        country = mmdbLookupString(ip, {"country", "names", "en"});
+    }
+    std::string city = mmdbLookupString(ip, {"city", "names", "zh-CN"});
+    if (city.empty()) {
+        city = mmdbLookupString(ip, {"city", "names", "en"});
+    }
+    std::string label = "-";
+    if (!country.empty() && !city.empty() && country != city) {
+        label = country + "/" + city;
+    } else if (!city.empty()) {
+        label = city;
+    } else if (!country.empty()) {
+        label = country;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        cache[ip] = label;
+    }
+    return label;
+}
+
+inline std::string dbIpLiteDownloadCommand() {
+    std::ostringstream command;
+    command << "mkdir -p " << shellQuote(kDbIpLiteDir)
+            << " && url=$(curl -fsSL " << shellQuote(kDbIpLiteDownloadPage)
+            << " | grep -Eo 'https://download[.]db-ip[.]com/free/dbip-city-lite-[0-9]{4}-[0-9]{2}[.]mmdb[.]gz' | head -n1)"
+            << " && test -n \"$url\""
+            << " && tmpgz=$(mktemp /tmp/ltg-dbip.XXXXXX.mmdb.gz)"
+            << " && tmp=$(mktemp /tmp/ltg-dbip.XXXXXX.mmdb)"
+            << " && curl -fL \"$url\" -o \"$tmpgz\""
+            << " && gzip -dc \"$tmpgz\" > \"$tmp\""
+            << " && install -m 0644 \"$tmp\" " << shellQuote(kDbIpLiteMmdbPath)
+            << " && printf '%s\\n' \"$url\" > " << shellQuote(kDbIpLiteMetaPath)
+            << " && rm -f \"$tmpgz\" \"$tmp\""
+            << " && mmdblookup --file " << shellQuote(kDbIpLiteMmdbPath)
+            << " --ip 8.8.8.8 country iso_code >/dev/null"
+            << " && echo 'installed DB-IP Lite MMDB: " << kDbIpLiteMmdbPath << "'";
+    return command.str();
 }
 
 inline void writeUfwCacheEvents(const std::vector<UfwLogEvent> &newEvents) {
@@ -4747,7 +4855,10 @@ inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<Traffic
         }
     }
     std::vector<TrafficSummaryRow> out;
-    for (const auto &entry : grouped) {
+    for (auto entry : grouped) {
+        if (mode != TrafficGroupMode::Port && !entry.second.ip.empty()) {
+            entry.second.geo = ipGeoLabel(entry.second.ip);
+        }
         out.push_back(entry.second);
     }
     std::sort(out.begin(), out.end(), [](const TrafficSummaryRow &a, const TrafficSummaryRow &b) {
@@ -4817,12 +4928,12 @@ inline std::string compactTrafficSummary(const std::vector<TrafficSummaryRow> &r
 }
 
 inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, TrafficGroupMode mode) {
-    Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "端口", "上行", "下行", "合计", "包数"}
+    Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "归属地", "端口", "上行", "下行", "合计", "包数"}
                 : mode == TrafficGroupMode::Port ? std::vector<std::string>{"序号", "端口", "服务", "上行", "下行", "合计", "包数"}
-                                                  : std::vector<std::string>{"序号", "IP", "上行", "下行", "合计", "包数"},
-                mode == TrafficGroupMode::IpPort ? std::vector<std::size_t>{6, 28, 8, 12, 12, 12, 10}
+                                                  : std::vector<std::string>{"序号", "IP", "归属地", "上行", "下行", "合计", "包数"},
+                mode == TrafficGroupMode::IpPort ? std::vector<std::size_t>{6, 28, 18, 8, 12, 12, 12, 10}
                 : mode == TrafficGroupMode::Port ? std::vector<std::size_t>{6, 8, 18, 12, 12, 12, 10}
-                                                  : std::vector<std::size_t>{6, 28, 12, 12, 12, 10});
+                                                  : std::vector<std::size_t>{6, 28, 18, 12, 12, 12, 10});
     for (std::size_t i = 0; i < rows.size() && i < limit; ++i) {
         std::vector<std::string> cells = {std::to_string(i + 1)};
         if (mode == TrafficGroupMode::Port) {
@@ -4830,6 +4941,7 @@ inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std
             cells.push_back(serviceNameForPort(rows[i].port));
         } else {
             cells.push_back(rows[i].ip);
+            cells.push_back(rows[i].geo.empty() ? ipGeoLabel(rows[i].ip) : rows[i].geo);
             if (mode == TrafficGroupMode::IpPort) {
                 cells.push_back(rows[i].port);
             }
@@ -4903,6 +5015,7 @@ inline std::string dependencyPackageForTool(const std::string &tool) {
     if (tool == "ss") return "iproute2";
     if (tool == "awk") return "gawk";
     if (tool == "fail2ban-client") return "fail2ban";
+    if (tool == "mmdblookup") return "mmdb-bin";
     if (tool == "curl" || tool == "wget") return tool;
     return tool;
 }
@@ -4923,6 +5036,28 @@ inline void verifyDependencyChain(ReliabilityReport &report) {
                          std::string("curl=") + (Shell::exists("curl") ? "yes" : "no") +
                              " wget=" + (Shell::exists("wget") ? "yes" : "no"),
                          downloader ? "" : "apt install -y curl");
+}
+
+inline void verifyGeoDatabaseChain(ReliabilityReport &report) {
+    const bool db = fileExists(kDbIpLiteMmdbPath);
+    const bool reader = Shell::exists("mmdblookup");
+    if (!db) {
+        addReliabilityResult(report, "IP归属地链路", "DB-IP Lite MMDB", ReliabilityStatus::Skipped,
+                             "未安装本地城市库，表格归属地显示为 -",
+                             kDbIpLiteMmdbPath,
+                             "诊断 -> 安装/更新 IP 城市库");
+        return;
+    }
+    addReliabilityResult(report, "IP归属地链路", "DB-IP Lite MMDB", reader ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         reader ? "数据库与 MMDB 读取工具可用" : "数据库存在但缺少 mmdblookup",
+                         kDbIpLiteMmdbPath + " / " + humanBytes(fileSizeBytes(kDbIpLiteMmdbPath)),
+                         reader ? kDbIpLiteAttribution : "apt install -y mmdb-bin");
+    if (reader) {
+        const std::string label = ipGeoLabel("8.8.8.8");
+        addReliabilityResult(report, "IP归属地链路", "样例查询", label == "-" ? ReliabilityStatus::Fail : ReliabilityStatus::Pass,
+                             label == "-" ? "样例 IP 未查到归属地" : "样例 IP 查询成功",
+                             "8.8.8.8 => " + label);
+    }
 }
 
 inline void verifyUpdateChainReadiness(ReliabilityReport &report) {
@@ -5189,6 +5324,7 @@ inline void verifyTuiTerminalChain(ReliabilityReport &report) {
 inline ReliabilityReport runReliabilitySelfCheck(bool allowActiveProbes) {
     ReliabilityReport report;
     verifyDependencyChain(report);
+    verifyGeoDatabaseChain(report);
     verifyUpdateChainReadiness(report);
     verifyFail2banUfwChain(report, allowActiveProbes);
     verifyTrafficAccountingChain(report, allowActiveProbes);
@@ -5224,6 +5360,9 @@ inline ScreenBuffer reliabilityReportBuffer(const ReliabilityReport &report, boo
 }
 
 inline void enrichUfwHit(UfwHit &hit) {
+    if (hit.geo.empty()) {
+        hit.geo = ipGeoLabel(hit.value);
+    }
     const std::uint64_t riskBase = hit.peak > 0 ? hit.peak : hit.count;
     if (riskBase >= 100) {
         hit.risk = "高";
@@ -5441,12 +5580,13 @@ inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &no
 }
 
 inline Table ufwHitsTable(const std::vector<UfwHit> &hits) {
-    Table table({"序号", "来源IP", "单日峰值", "时段总计", "首要端口", "风险", "建议"}, {6, 34, 10, 10, 12, 8, 18});
+    Table table({"序号", "来源IP", "归属地", "单日峰值", "时段总计", "首要端口", "风险", "建议"}, {6, 30, 18, 10, 10, 12, 8, 18});
     for (std::size_t i = 0; i < hits.size(); ++i) {
         const std::string port = hits[i].topPort == "-" || hits[i].topPort.empty()
                                      ? "-"
                                      : hits[i].topPort + "(" + std::to_string(hits[i].topPortCount) + ")";
-        table.add({std::to_string(i + 1), hits[i].value, std::to_string(hits[i].peak), std::to_string(hits[i].count),
+        const std::string geo = hits[i].geo.empty() ? ipGeoLabel(hits[i].value) : hits[i].geo;
+        table.add({std::to_string(i + 1), hits[i].value, geo, std::to_string(hits[i].peak), std::to_string(hits[i].count),
                    port, hits[i].risk, hits[i].suggestion});
     }
     return table;
@@ -5663,12 +5803,12 @@ private:
                                        std::size_t limit,
                                        const std::string &emptyMessage,
                                        TrafficGroupMode mode) {
-        const std::vector<int> widths = mode == TrafficGroupMode::IpPort ? std::vector<int>{6, 30, 8, 14, 14, 14, 10}
+        const std::vector<int> widths = mode == TrafficGroupMode::IpPort ? std::vector<int>{6, 26, 18, 8, 14, 14, 14, 10}
                                       : mode == TrafficGroupMode::Port ? std::vector<int>{6, 8, 20, 14, 14, 14, 10}
-                                                                       : std::vector<int>{6, 30, 14, 14, 14, 10};
-        buffer.add(mode == TrafficGroupMode::IpPort ? tableRow({"序号", "IP", "端口", "上行", "下行", "合计", "包数"}, widths, true)
+                                                                       : std::vector<int>{6, 26, 18, 14, 14, 14, 10};
+        buffer.add(mode == TrafficGroupMode::IpPort ? tableRow({"序号", "IP", "归属地", "端口", "上行", "下行", "合计", "包数"}, widths, true)
                    : mode == TrafficGroupMode::Port ? tableRow({"序号", "端口", "服务", "上行", "下行", "合计", "包数"}, widths, true)
-                                                     : tableRow({"序号", "IP", "上行", "下行", "合计", "包数"}, widths, true));
+                                                     : tableRow({"序号", "IP", "归属地", "上行", "下行", "合计", "包数"}, widths, true));
         buffer.add(tableRule(widths));
         if (rows.empty()) {
             buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
@@ -5681,6 +5821,7 @@ private:
                 cells.push_back(serviceNameForPort(rows[i].port));
             } else {
                 cells.push_back(rows[i].ip);
+                cells.push_back(rows[i].geo.empty() ? ipGeoLabel(rows[i].ip) : rows[i].geo);
                 if (mode == TrafficGroupMode::IpPort) {
                     cells.push_back(rows[i].port);
                 }
@@ -5702,8 +5843,8 @@ private:
     }
 
     static void addUfwTable(ScreenBuffer &buffer, const std::vector<UfwHit> &hits, const std::string &emptyMessage) {
-        const std::vector<int> widths = {6, 34, 10, 12, 8, 18};
-        buffer.add(tableRow({"序号", "来源IP", "命中", "首要端口", "风险", "建议"}, widths, true));
+        const std::vector<int> widths = {6, 28, 18, 10, 12, 8, 18};
+        buffer.add(tableRow({"序号", "来源IP", "归属地", "命中", "首要端口", "风险", "建议"}, widths, true));
         buffer.add(tableRule(widths));
         if (hits.empty()) {
             buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
@@ -5716,7 +5857,8 @@ private:
             const std::string port = hits[i].topPort == "-" || hits[i].topPort.empty()
                                          ? "-"
                                          : hits[i].topPort + "(" + std::to_string(hits[i].topPortCount) + ")";
-            buffer.add(tableRow({std::to_string(i + 1), hits[i].value, std::to_string(hits[i].count),
+            const std::string geo = hits[i].geo.empty() ? ipGeoLabel(hits[i].value) : hits[i].geo;
+            buffer.add(tableRow({std::to_string(i + 1), hits[i].value, geo, std::to_string(hits[i].count),
                                  port, risk, hits[i].suggestion}, widths));
         }
     }
@@ -5963,6 +6105,7 @@ private:
                      {"2", "日志摘要", "fail2ban 与 UFW 日志", false, [this] { actionLogSummary(); }},
                      {"3", "导出报告", "写入 /tmp 报告", false, [this] { actionExportReport(); }},
                      {"4", "安装依赖", "Debian/Ubuntu apt 命令", true, [this] { actionInstallDependencies(); }},
+                     {"5", "安装/更新 IP 城市库", "DB-IP Lite 免费 MMDB，用于来源归属地展示", true, [this] { actionInstallGeoDatabase(); }},
                  });
     }
 
@@ -8196,15 +8339,18 @@ private:
 
     void actionDependencyDoctor() {
         ScreenBuffer buffer;
-        const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl", "systemctl", "awk", "grep"};
+        const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl", "systemctl", "awk", "grep", "mmdblookup"};
         std::vector<std::pair<std::string, std::string>> rows;
         for (const auto &tool : tools) {
             rows.push_back({tool, Shell::exists(tool) ? Ui::badge("可用", ansi::green) : Ui::badge("缺失", ansi::yellow)});
         }
         addKeyValueTable(buffer, rows);
         buffer.add("");
+        buffer.add("DB-IP Lite MMDB: " + std::string(fileExists(kDbIpLiteMmdbPath) ? Ui::badge("已安装", ansi::green) : Ui::badge("未安装", ansi::yellow)) +
+                   "  " + kDbIpLiteMmdbPath);
+        buffer.add("");
         buffer.add("Debian/Ubuntu 安装命令:");
-        buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl");
+        buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl mmdb-bin");
         pushResult("依赖检查", buffer);
     }
 
@@ -8252,19 +8398,42 @@ private:
     }
 
     void actionInstallDependencies() {
-        if (!confirmYesNo("将通过 apt 安装 fail2ban/ufw/nftables/iproute2/conntrack/curl。", false)) {
+        if (!confirmYesNo("将通过 apt 安装 fail2ban/ufw/nftables/iproute2/conntrack/curl/mmdb-bin。", false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
             pushResult("安装常见依赖", buffer);
             return;
         }
         renderBusy("安装常见依赖", "正在执行 apt 命令...");
-        ScreenBuffer buffer = runCommandList({"apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl"});
+        ScreenBuffer buffer = runCommandList({"apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl mmdb-bin"});
         Shell::clearExistsCache();
         cachedDashboardValid() = false;
         buffer.add("");
         buffer.add("已刷新依赖检测缓存。返回仪表盘后会重新读取工具状态。");
         pushResult("安装常见依赖", buffer);
+    }
+
+    void actionInstallGeoDatabase() {
+        if (!confirmYesNo("将下载 DB-IP IP to City Lite 免费版 MMDB（约 125MB）到 " + kDbIpLiteMmdbPath +
+                          "。该数据按 CC BY 4.0 授权，展示结果时会在文档中鸣谢 DB-IP.com。", false)) {
+            ScreenBuffer buffer;
+            buffer.add("操作已取消。");
+            pushResult("安装/更新 IP 城市库", buffer);
+            return;
+        }
+        renderBusy("安装/更新 IP 城市库", "正在下载并验证 DB-IP Lite MMDB...");
+        ScreenBuffer buffer = runCommandList({dbIpLiteDownloadCommand()});
+        Shell::clearExistsCache();
+        buffer.add("");
+        buffer.add("数据库路径: " + kDbIpLiteMmdbPath);
+        buffer.add("数据库大小: " + humanBytes(fileSizeBytes(kDbIpLiteMmdbPath)));
+        std::string sourceUrl;
+        if (readTextFile(kDbIpLiteMetaPath, sourceUrl)) {
+            buffer.add("下载 URL: " + trim(sourceUrl));
+        }
+        buffer.add("鸣谢: " + kDbIpLiteAttribution);
+        buffer.add("归属地会显示在 UFW 来源 Top 与流量 IP 明细表中；未命中时显示 -。");
+        pushResult("安装/更新 IP 城市库", buffer);
     }
 };
 
@@ -8308,7 +8477,7 @@ inline ScreenBuffer commandListBuffer(const std::vector<std::string> &commands) 
 
 inline ScreenBuffer dependencyDoctorBuffer() {
     ScreenBuffer buffer;
-    const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl", "systemctl", "awk", "grep"};
+    const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl", "systemctl", "awk", "grep", "mmdblookup"};
     Table table({"工具", "状态"}, {24, 14});
     for (const auto &tool : tools) {
         table.add({tool, Shell::exists(tool) ? "可用" : "缺失"});
@@ -8316,8 +8485,10 @@ inline ScreenBuffer dependencyDoctorBuffer() {
     addSection(buffer, "依赖检查");
     addTableLines(buffer, table);
     buffer.add("");
+    buffer.add("DB-IP Lite MMDB: " + std::string(fileExists(kDbIpLiteMmdbPath) ? "已安装" : "未安装") + "  " + kDbIpLiteMmdbPath);
+    buffer.add("");
     buffer.add("Debian/Ubuntu 安装命令:");
-    buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl");
+    buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl mmdb-bin");
     return buffer;
 }
 
@@ -8778,6 +8949,11 @@ inline int selfTest() {
     const bool vimPageUp = adjustScrollForEvent({InputKind::Character, 2}, vimScrollProbe, 100);
     const bool vimBottom = adjustScrollForEvent({InputKind::Character, 'G'}, vimScrollProbe, 100);
     check("Vim 风格滚动快捷键", vimDown && vimHalfDown && vimPageUp && vimBottom && vimScrollProbe > 0);
+    check("MMDB 输出解析", parseMmdbLookupString("  \"美国\" <utf8_string>\n") == "美国" &&
+                              parseMmdbLookupString("  \"Mountain View\" <utf8_string>\n") == "Mountain View");
+    check("DB-IP Lite 下载命令", dbIpLiteDownloadCommand().find(kDbIpLiteDownloadPage) != std::string::npos &&
+                                  dbIpLiteDownloadCommand().find(".mmdb.gz") != std::string::npos &&
+                                  dbIpLiteDownloadCommand().find(kDbIpLiteMmdbPath) != std::string::npos);
 
 #if LTG_HAS_SQLITE
     check("SQLite 编译模式", true, "LTG_HAS_SQLITE=1");
@@ -8871,7 +9047,7 @@ inline void usage(const char *argv0) {
     std::cout << "  --help            显示帮助\n";
     std::cout << "\nUbuntu 依赖:\n";
     std::cout << "  sudo apt update\n";
-    std::cout << "  sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep curl\n";
+    std::cout << "  sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep curl mmdb-bin\n";
     std::cout << "  # 仓库目录中也可执行: make deps\n";
     std::cout << "\n编译:\n";
     std::cout << "  make\n";

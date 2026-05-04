@@ -8,6 +8,7 @@
 - Made prompt input feedback more obvious with a software blinking cursor that updates only when needed.
 - Hid the terminal hardware cursor while prompt input pages are active so only one cursor is visible.
 - Added Vim-style TUI navigation: `j/k`, `g/G`, `Ctrl-f/Ctrl-b`, and `Ctrl-d/Ctrl-u`.
+- Added optional DB-IP IP to City Lite MMDB support for source-IP location labels, with README attribution for the free CC BY 4.0 database.
 
 ## 4.12.15 - 2026-05-04
 
