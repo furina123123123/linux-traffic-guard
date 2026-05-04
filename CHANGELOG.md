@@ -1,11 +1,18 @@
 # Changelog
 
+## 4.12.22 - 2026-05-04
+
+### Changed
+
+- Removed Top IP columns from traffic period tables so port-level traffic stays focused on inbound, outbound, total, and packets.
+- Aligned result-page tables using display width instead of byte width, improving Chinese header and numeric column layout.
+
 ## 4.12.21 - 2026-05-04
 
 ### Changed
 
 - Simplified traffic table labels to `inbound` and `outbound` and made period traffic tables more compact.
-- Reworked period overview rows to show totals plus counted ports and IPs, leaving Top IP detail to the port-level table.
+- Reworked period overview rows to show totals plus counted ports and IPs, keeping IP detail in explicit drilldown views.
 
 ## 4.12.20 - 2026-05-04
 

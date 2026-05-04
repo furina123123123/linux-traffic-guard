@@ -201,7 +201,6 @@ struct TrafficPeriodPortRow {
     std::uint64_t uploadBytes = 0;
     std::uint64_t downloadPackets = 0;
     std::uint64_t uploadPackets = 0;
-    std::string topIps;
 
     std::uint64_t totalBytes() const {
         return downloadBytes + uploadBytes;
@@ -3262,6 +3261,9 @@ inline std::vector<UfwDeleteCandidate> findUfwAnomalyDeleteCandidates() {
     return out;
 }
 
+inline std::string fitLine(const std::string &line, int width);
+inline std::string padRightCells(const std::string &value, int width);
+
 class Table {
 public:
     Table(std::vector<std::string> headers, std::vector<std::size_t> widths)
@@ -3308,11 +3310,11 @@ private:
     void printRow(const std::vector<std::string> &row, bool strong) const {
         std::cout << "  ";
         for (std::size_t i = 0; i < widths_.size(); ++i) {
-            const std::string value = i < row.size() ? truncateText(row[i], widths_[i]) : "";
+            const std::string value = i < row.size() ? row[i] : "";
             if (strong && shouldUseColor()) {
                 std::cout << ansi::bold;
             }
-            std::cout << std::left << std::setw(static_cast<int>(widths_[i])) << value;
+            std::cout << padRightCells(fitLine(value, static_cast<int>(widths_[i])), static_cast<int>(widths_[i]));
             if (strong && shouldUseColor()) {
                 std::cout << ansi::plain;
             }
@@ -5397,37 +5399,23 @@ inline std::vector<TrafficPeriodPortRow> trafficPeriodPortRows(
         }
         struct PortBucket {
             TrafficPeriodPortRow total;
-            std::map<std::string, TrafficSummaryRow> ips;
         };
         std::map<std::string, PortBucket> buckets;
         for (const auto &traffic : found->second) {
             auto &bucket = buckets[traffic.port];
             bucket.total.period = period.period;
             bucket.total.port = traffic.port;
-            auto &ip = bucket.ips[traffic.ip];
-            ip.ip = traffic.ip;
-            ip.port = traffic.port;
             if (traffic.direction == "上传") {
                 bucket.total.uploadBytes += traffic.bytes;
                 bucket.total.uploadPackets += traffic.packets;
-                ip.uploadBytes += traffic.bytes;
-                ip.uploadPackets += traffic.packets;
             } else {
                 bucket.total.downloadBytes += traffic.bytes;
                 bucket.total.downloadPackets += traffic.packets;
-                ip.downloadBytes += traffic.bytes;
-                ip.downloadPackets += traffic.packets;
             }
         }
         std::vector<TrafficPeriodPortRow> periodRows;
         periodRows.reserve(buckets.size());
         for (auto &item : buckets) {
-            std::vector<TrafficSummaryRow> ipRows;
-            ipRows.reserve(item.second.ips.size());
-            for (auto &ip : item.second.ips) {
-                ipRows.push_back(std::move(ip.second));
-            }
-            item.second.total.topIps = compactTrafficSummary(sortTrafficSummaryRows(std::move(ipRows)), TrafficGroupMode::Ip, 2);
             periodRows.push_back(std::move(item.second.total));
         }
         std::sort(periodRows.begin(), periodRows.end(), [](const TrafficPeriodPortRow &a, const TrafficPeriodPortRow &b) {
@@ -5508,8 +5496,8 @@ inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &row
 
 inline Table trafficPeriodPortTable(const std::vector<TrafficPeriodPortRow> &rows, TrafficPeriodMode mode) {
     const std::string label = trafficPeriodModeColumn(mode);
-    Table table({label, "端口", "服务", "入站", "出站", "合计", "包数", "Top IP"},
-                {12, 8, 14, 11, 11, 11, 9, 32});
+    Table table({label, "端口", "服务", "入站", "出站", "合计", "包数"},
+                {12, 8, 14, 12, 12, 12, 10});
     for (const auto &row : rows) {
         table.add({row.period,
                    row.port,
@@ -5517,8 +5505,7 @@ inline Table trafficPeriodPortTable(const std::vector<TrafficPeriodPortRow> &row
                    humanBytes(row.downloadBytes),
                    humanBytes(row.uploadBytes),
                    humanBytes(row.totalBytes()),
-                   std::to_string(row.totalPackets()),
-                   row.topIps.empty() ? "-" : row.topIps});
+                   std::to_string(row.totalPackets())});
     }
     return table;
 }
@@ -6712,9 +6699,9 @@ private:
         pushMenu("流量统计", "端口级 vnStat：按日/月/年看端口，并下钻 IP",
                  {
                      {"1", "开启/追加端口", "默认追加，不清空已有统计", true, [this] { actionInstallTraffic(); }},
-                     {"2", "日流量", "端口级 vnStat -d，带端口 Top IP", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Day); }},
-                     {"3", "月流量", "端口级 vnStat -m，带端口 Top IP", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Month); }},
-                     {"4", "年流量", "端口级 vnStat -y，带端口 Top IP", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Year); }},
+                     {"2", "日流量", "端口级 vnStat -d，带 IP 明细入口", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Day); }},
+                     {"3", "月流量", "端口级 vnStat -m，带 IP 明细入口", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Month); }},
+                     {"4", "年流量", "端口级 vnStat -y，带 IP 明细入口", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Year); }},
                      {"5", "实时明细", "较慢，读取底层实时计数和 IP 明细", false, [this] { actionShowTrafficRanking(); }},
                      {"6", "删除统计端口", "停止统计指定端口，保留历史", true, [this] { actionRemoveTrafficPorts(); }},
                      {"7", "高级：删除全部统计规则", "高风险，删除底层统计规则", true, [this] { actionRemoveTrafficAccounting(); }},
@@ -7395,7 +7382,7 @@ private:
         ScreenBuffer buffer;
         buffer.add("查询模式: " + queryNote);
         buffer.add("统计口径: 端口级 vnStat。保留 " + vnstat + " 的时间维度，但主表按“周期 + 端口”展示。");
-        buffer.add("每个周期最多展示 Top 5 端口，并给出该端口 Top IP；绝对时间查询会展开更多 IP 明细。");
+        buffer.add("每个周期最多展示 Top 5 端口；绝对时间查询会展开更多 IP 明细。");
         buffer.add("时间使用服务器系统本地时区；入站在前，出站在后。");
         buffer.add("历史目录: " + kTrafficHistoryDir);
         buffer.add("");
@@ -9757,8 +9744,7 @@ inline int selfTest() {
     const auto periodPortRows = trafficPeriodPortRows({periodTotal}, {{"2026-05-04", bidirectionalTraffic}}, 5);
     check("端口级vnStat聚合", periodPortRows.size() == 1 && periodPortRows[0].port == "443" &&
                                     periodPortRows[0].downloadBytes == 6144 &&
-                                    periodPortRows[0].uploadBytes == 1024 &&
-                                    periodPortRows[0].topIps.find("5.6.7.8") != std::string::npos);
+                                    periodPortRows[0].uploadBytes == 1024);
     std::map<std::string, TrafficRow> previousTraffic;
     previousTraffic[trafficKey(traffic[0])] = traffic[0];
     TrafficRow increased = traffic[0];

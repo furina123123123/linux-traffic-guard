@@ -28,7 +28,7 @@ LTG joins those paths into one workflow:
 
 1. Track chosen service ports with nftables counters.
 2. Snapshot counters every 5 minutes into a local history store.
-3. Show port-level vnStat-style day/month/year traffic with Top IP drilldown.
+3. Show port-level vnStat-style day/month/year traffic with optional IP detail drilldown.
 4. Parse UFW BLOCK/AUDIT/ALLOW logs with cache-backed source and port analysis.
 5. Install, repair, and verify fail2ban policies for SSH and slow UFW port scans.
 6. Run reliability checks that distinguish "configured" from "actually working".
@@ -72,7 +72,7 @@ LTG is meant to behave like a port-level vnStat with IP visibility:
 - Keep historical day/month/year data when appending new ports.
 - Sample nftables counters every 5 minutes through a systemd timer.
 - View day/month/year traffic in rolling-window or absolute-period mode.
-- Read each period as `period + port` rows: host inbound, host outbound, total, packets, and Top IPs.
+- Read each period as `period + port` rows: host inbound, host outbound, total, and packets.
 - Drill down from a port into IP-level outbound/inbound details.
 
 Example TUI path:
@@ -280,8 +280,8 @@ GitHub Actions builds and uploads:
 Maintainers release a new version by updating `include/ltg/version.hpp`, implementation files, and `CHANGELOG.md`, then pushing a version tag:
 
 ```bash
-git tag v4.12.21
-git push origin v4.12.21
+git tag v4.12.22
+git push origin v4.12.22
 ```
 
 ## Safety Notes
