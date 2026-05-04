@@ -85,7 +85,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.6";
+inline const std::string kVersion = "4.12.7";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
@@ -261,6 +261,7 @@ struct DashboardSnapshot {
     std::vector<TrafficRow> trafficRows;
     std::vector<TrafficSummaryRow> totalRows;
     std::vector<UfwHit> ufwHits;
+    std::vector<F2bPolicyInfo> defaultPolicies;
     std::string fail2banState = "未知";
     std::string ufwState = "未知";
     std::chrono::steady_clock::time_point loadedAt{};
@@ -1620,6 +1621,16 @@ inline std::vector<F2bPolicyInfo> collectFail2banPolicies(bool includeRuntimeSta
         return a.name < b.name;
     });
     return policies;
+}
+
+inline std::vector<F2bPolicyInfo> collectDefaultFail2banPolicies(bool includeRuntimeStatus) {
+    std::vector<F2bPolicyInfo> defaults;
+    for (const auto &policy : collectFail2banPolicies(includeRuntimeStatus)) {
+        if (policy.name == kRule1Jail || policy.name == kRule2Jail) {
+            defaults.push_back(policy);
+        }
+    }
+    return defaults;
 }
 
 inline std::vector<std::string> customFail2banJailNames() {
@@ -3697,6 +3708,7 @@ inline DashboardSnapshot loadDashboardSnapshot() {
     auto ufwHitsFuture = std::async(std::launch::async, [] { return collectUfwSourceTop(); });
     auto fail2banStateFuture = std::async(std::launch::async, [] { return serviceState("fail2ban"); });
     auto ufwStateFuture = std::async(std::launch::async, [] { return ufwState(); });
+    auto defaultPoliciesFuture = std::async(std::launch::async, [] { return collectDefaultFail2banPolicies(true); });
 
     snapshot.tableEnabled = tableFuture.get();
     if (snapshot.tableEnabled) {
@@ -3706,6 +3718,7 @@ inline DashboardSnapshot loadDashboardSnapshot() {
     snapshot.ufwHits = ufwHitsFuture.get();
     snapshot.fail2banState = fail2banStateFuture.get();
     snapshot.ufwState = ufwStateFuture.get();
+    snapshot.defaultPolicies = defaultPoliciesFuture.get();
     snapshot.loadedAt = std::chrono::steady_clock::now();
     return snapshot;
 }
@@ -4296,13 +4309,7 @@ private:
                              serviceSuggestion("ufw", snapshot->ufwState)}, serviceWidths));
         buffer.add("");
         buffer.add("> Fail2ban 默认策略");
-        std::vector<F2bPolicyInfo> defaultPolicies;
-        for (const auto &policy : collectFail2banPolicies(true)) {
-            if (policy.name == kRule1Jail || policy.name == kRule2Jail) {
-                defaultPolicies.push_back(policy);
-            }
-        }
-        addF2bPolicyTable(buffer, defaultPolicies, "jail.local 中未发现默认策略");
+        addF2bPolicyTable(buffer, snapshot->defaultPolicies, "jail.local 中未发现默认策略");
         buffer.add("");
         buffer.add(ansi::gray + std::string("提示: “服务诊断”处理安装/启动/日志，“处置修复”处理封禁和规则一致性。") + ansi::plain);
         return buffer;
@@ -6582,6 +6589,10 @@ inline int selfTest() {
     probeTest.ufwCleanupOk = true;
     check("fail2ban 实效自检聚合", probeTest.serviceOk && probeTest.jailLoaded && probeTest.banListed &&
                                       !probeTest.ufwLanded && probeTest.unbanOk && probeTest.ufwCleanupOk);
+    DashboardSnapshot renderOnlySnapshot;
+    renderOnlySnapshot.tableEnabled = true;
+    renderOnlySnapshot.defaultPolicies = collectDefaultFail2banPolicies(false);
+    check("仪表盘渲染不触发运行态采集", !buildDashboardBuffer(&renderOnlySnapshot, false, '|').lines().empty());
     check("危险命令 helper", fail2banSetIpCommand("sshd", "banip", "1.2.3.4").find("fail2ban-client set 'sshd' banip '1.2.3.4'") != std::string::npos &&
                                ufwDenyFromCommand("1.2.3.4", "case").find("comment 'case'") != std::string::npos &&
                                ufwDeleteDenyFromCommand("1.2.3.4").find("--force delete deny") != std::string::npos);
