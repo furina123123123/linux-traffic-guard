@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.12.15 - 2026-05-04
+
+### Changed
+
+- Reorganized the project into a modular `include/`, `src/`, and `tests/` layout while keeping `linux_traffic_guard.hpp` as a legacy umbrella header.
+- Updated the makefile, source package, and release workflow to build from `src/*.cpp` and read the version from `include/ltg/version.hpp`.
+- Updated README and help output to describe the modular source layout instead of single-header compilation.
+
 ## 4.12.14 - 2026-05-04
 
 ### Changed

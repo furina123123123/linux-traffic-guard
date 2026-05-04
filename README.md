@@ -7,7 +7,7 @@
 
 Languages: English | [简体中文](README.zh-CN.md)
 
-Linux Traffic Guard is a single-header C++17 operations tool for Ubuntu servers. It combines traffic accounting, UFW source analysis, fail2ban policy management, remediation workflows, diagnostics, and a pure ANSI full-screen TUI without requiring external `.sh` or `.py` scripts.
+Linux Traffic Guard is a modular C++17 operations tool for Ubuntu servers. It combines traffic accounting, UFW source analysis, fail2ban policy management, remediation workflows, diagnostics, and a pure ANSI full-screen TUI without requiring external `.sh` or `.py` scripts.
 
 ## One-Line Install
 
@@ -80,7 +80,7 @@ make check-root-guard
 Equivalent manual build command:
 
 ```bash
-g++ -std=c++17 -O2 -Wall -Wextra -x c++ linux_traffic_guard.hpp -o ltg -lsqlite3
+make
 ```
 
 ## Usage
@@ -158,7 +158,7 @@ sudo make PREFIX=/opt/ltg install
 
 ## Release Assets
 
-Maintainers release a new version by updating `linux_traffic_guard.hpp` and `CHANGELOG.md`, then pushing a tag:
+Maintainers release a new version by updating `include/ltg/version.hpp`, implementation files, and `CHANGELOG.md`, then pushing a tag:
 
 ```bash
 git tag v4.12.8

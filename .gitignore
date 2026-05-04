@@ -3,6 +3,8 @@
 /ltg.exe
 /ltg-nosqlite
 /ltg-nosqlite.exe
+/build/
+/build-nosqlite/
 /*.tar.gz
 
 # Local editor/runtime files

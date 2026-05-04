@@ -24,7 +24,7 @@ jobs:
 
       - name: Verify tag matches source version
         run: |
-          version="$(sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' linux_traffic_guard.hpp | head -n 1)"
+          version="$(sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' include/ltg/version.hpp | head -n 1)"
           tag="${GITHUB_REF_NAME#v}"
           test "$version" = "$tag"
           echo "VERSION=$version" >> "$GITHUB_ENV"
