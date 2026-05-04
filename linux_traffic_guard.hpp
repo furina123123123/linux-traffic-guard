@@ -85,10 +85,13 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.8";
+inline const std::string kVersion = "4.12.9";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
+inline const std::string kTrafficHistoryDir = "/var/tmp/linux_traffic_guard_traffic_history_v1";
+inline const std::string kTrafficSnapshotService = "linux-traffic-guard-traffic-snapshot.service";
+inline const std::string kTrafficSnapshotTimer = "linux-traffic-guard-traffic-snapshot.timer";
 inline const std::string kUnknownUfwPort = "UNKNOWN";
 inline const std::string kRule1Jail = "sshd";
 inline const std::string kRule2Jail = "ufw-slowscan-global";
@@ -144,6 +147,29 @@ struct TrafficSummaryRow {
     std::uint64_t totalPackets() const {
         return downloadPackets + uploadPackets;
     }
+};
+
+struct TrafficDelta {
+    TrafficRow row;
+    std::time_t sampledAt = 0;
+    std::string day;
+    std::string month;
+    std::string year;
+};
+
+struct TrafficSnapshotResult {
+    bool ok = false;
+    std::time_t sampledAt = 0;
+    std::size_t liveRows = 0;
+    std::size_t deltaRows = 0;
+    std::size_t resetRows = 0;
+    std::string message;
+};
+
+enum class TrafficPeriodMode {
+    Day,
+    Month,
+    Year
 };
 
 struct UfwHit {
@@ -260,6 +286,9 @@ struct DashboardSnapshot {
     bool tableEnabled = false;
     std::vector<TrafficRow> trafficRows;
     std::vector<TrafficSummaryRow> totalRows;
+    std::set<int> trackedPorts;
+    std::string trafficPeriodLabel;
+    bool trafficHistoryAvailable = false;
     std::vector<UfwHit> ufwHits;
     std::vector<F2bPolicyInfo> defaultPolicies;
     std::string fail2banState = "未知";
@@ -532,6 +561,11 @@ inline bool readTextFile(const std::string &path, std::string &content) {
     return true;
 }
 
+inline bool fileExists(const std::string &path) {
+    std::ifstream input(path, std::ios::binary);
+    return static_cast<bool>(input);
+}
+
 inline bool writeTextFile(const std::string &path, const std::string &content) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) {
@@ -619,6 +653,93 @@ inline bool isSafePortList(const std::string &value) {
         start = comma + 1;
     }
     return true;
+}
+
+inline bool expandPortList(const std::string &value, std::set<int> &ports) {
+    ports.clear();
+    const std::string cleaned = removeSpaces(value);
+    if (!isSafePortList(cleaned)) {
+        return false;
+    }
+    std::size_t start = 0;
+    while (start < cleaned.size()) {
+        const std::size_t comma = cleaned.find(',', start);
+        const std::string item = cleaned.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        const std::size_t dash = item.find('-');
+        const int first = std::stoi(dash == std::string::npos ? item : item.substr(0, dash));
+        const int last = dash == std::string::npos ? first : std::stoi(item.substr(dash + 1));
+        for (int port = first; port <= last; ++port) {
+            ports.insert(port);
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return true;
+}
+
+inline std::string joinPorts(const std::set<int> &ports, const std::string &sep = ",") {
+    std::ostringstream out;
+    bool first = true;
+    for (int port : ports) {
+        if (!first) {
+            out << sep;
+        }
+        first = false;
+        out << port;
+    }
+    return out.str();
+}
+
+inline std::string nftPortElements(const std::set<int> &ports) {
+    return "{ " + joinPorts(ports, ", ") + " }";
+}
+
+inline std::string humanPortList(const std::set<int> &ports, std::size_t limit = 12) {
+    if (ports.empty()) {
+        return "未记录";
+    }
+    std::ostringstream out;
+    std::size_t shown = 0;
+    for (int port : ports) {
+        if (shown > 0) {
+            out << ", ";
+        }
+        out << port;
+        ++shown;
+        if (shown >= limit && ports.size() > limit) {
+            out << " ... +" << (ports.size() - limit);
+            break;
+        }
+    }
+    return out.str();
+}
+
+inline std::set<int> setDifference(const std::set<int> &left, const std::set<int> &right) {
+    std::set<int> out;
+    std::set_difference(left.begin(), left.end(), right.begin(), right.end(), std::inserter(out, out.begin()));
+    return out;
+}
+
+inline std::set<int> setIntersection(const std::set<int> &left, const std::set<int> &right) {
+    std::set<int> out;
+    std::set_intersection(left.begin(), left.end(), right.begin(), right.end(), std::inserter(out, out.begin()));
+    return out;
+}
+
+inline void parseNftPortListInto(const std::string &text, std::set<int> &ports) {
+    const std::regex rangePattern(R"(([0-9]{1,5})(?:\s*-\s*([0-9]{1,5}))?)");
+    for (std::sregex_iterator it(text.begin(), text.end(), rangePattern), end; it != end; ++it) {
+        const int first = std::stoi((*it)[1].str());
+        const int last = (*it)[2].matched ? std::stoi((*it)[2].str()) : first;
+        if (first < 1 || last > 65535 || first > last) {
+            continue;
+        }
+        for (int port = first; port <= last; ++port) {
+            ports.insert(port);
+        }
+    }
 }
 
 inline bool isSafeSinglePort(const std::string &value) {
@@ -945,6 +1066,41 @@ inline std::string dateTimeStamp(std::time_t value) {
     return buf;
 }
 
+inline std::string localTimeFormat(std::time_t value, const char *format) {
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &value);
+#else
+    localtime_r(&value, &tm);
+#endif
+    char buf[32]{};
+    std::strftime(buf, sizeof(buf), format, &tm);
+    return buf;
+}
+
+inline std::string localDayStamp(std::time_t value) {
+    return localTimeFormat(value, "%Y-%m-%d");
+}
+
+inline std::string localMonthStamp(std::time_t value) {
+    return localTimeFormat(value, "%Y-%m");
+}
+
+inline std::string localYearStamp(std::time_t value) {
+    return localTimeFormat(value, "%Y");
+}
+
+inline std::string currentTrafficPeriodLabel(TrafficPeriodMode mode) {
+    const std::time_t now = std::time(nullptr);
+    if (mode == TrafficPeriodMode::Day) {
+        return localDayStamp(now);
+    }
+    if (mode == TrafficPeriodMode::Year) {
+        return localYearStamp(now);
+    }
+    return localMonthStamp(now);
+}
+
 inline std::time_t makeLocalTime(std::tm tm) {
     tm.tm_isdst = -1;
     return std::mktime(&tm);
@@ -1012,6 +1168,24 @@ inline bool parseYmdDate(const std::string &text, bool endOfDay, std::time_t &ou
     return roundTrip.tm_year == year - 1900 &&
            roundTrip.tm_mon == month - 1 &&
            roundTrip.tm_mday == day;
+}
+
+inline bool isValidTrafficPeriodLabel(TrafficPeriodMode mode, const std::string &value) {
+    if (mode == TrafficPeriodMode::Day) {
+        std::time_t ignored = 0;
+        return std::regex_match(value, std::regex(R"([0-9]{4}-[0-9]{2}-[0-9]{2})")) &&
+               parseYmdDate(value, false, ignored);
+    }
+    if (mode == TrafficPeriodMode::Month) {
+        std::smatch match;
+        if (!std::regex_match(value, match, std::regex(R"(([0-9]{4})-([0-9]{2}))"))) {
+            return false;
+        }
+        const int year = std::stoi(match[1].str());
+        const int month = std::stoi(match[2].str());
+        return year >= 1970 && year <= 9999 && month >= 1 && month <= 12;
+    }
+    return std::regex_match(value, std::regex(R"([0-9]{4})"));
 }
 
 inline bool parseTimeToSeconds(const std::string &text, long long &seconds) {
@@ -3303,6 +3477,100 @@ inline std::string nftCommand(const std::string &body) {
     return "nft " + shellQuote(body);
 }
 
+inline std::string nftCommandIgnoreError(const std::string &body) {
+    return nftCommand(body) + " 2>/dev/null || true";
+}
+
+inline std::vector<std::string> trafficAccountingRuleCommands(const std::set<int> &ports, bool resetTable) {
+    const std::string table = "inet " + kIpTrafficTable;
+    const std::string portElements = nftPortElements(ports);
+    std::vector<std::string> commands;
+    if (resetTable) {
+        commands.push_back("nft delete table " + table + " 2>/dev/null || true");
+    }
+    commands.push_back(nftCommandIgnoreError("add table " + table));
+    commands.push_back(nftCommandIgnoreError("add set " + table + " tracked_ports { type inet_service; flags interval; }"));
+    commands.push_back(nftCommandIgnoreError("add set " + table + " ipv4_download { type ipv4_addr . inet_service; flags dynamic; counter; }"));
+    commands.push_back(nftCommandIgnoreError("add set " + table + " ipv4_upload { type ipv4_addr . inet_service; flags dynamic; counter; }"));
+    commands.push_back(nftCommandIgnoreError("add set " + table + " ipv6_download { type ipv6_addr . inet_service; flags dynamic; counter; }"));
+    commands.push_back(nftCommandIgnoreError("add set " + table + " ipv6_upload { type ipv6_addr . inet_service; flags dynamic; counter; }"));
+    commands.push_back(nftCommandIgnoreError("flush set " + table + " tracked_ports"));
+    commands.push_back(nftCommand("add element " + table + " tracked_ports " + portElements));
+    for (const char *chain : {"input_account", "output_account", "forward_account"}) {
+        commands.push_back(nftCommandIgnoreError("flush chain " + table + " " + std::string(chain)));
+        commands.push_back(nftCommandIgnoreError("delete chain " + table + " " + std::string(chain)));
+    }
+    commands.push_back(nftCommand("add chain " + table + " input_account { type filter hook input priority -150; policy accept; }"));
+    commands.push_back(nftCommand("add chain " + table + " output_account { type filter hook output priority -150; policy accept; }"));
+    commands.push_back(nftCommand("add chain " + table + " forward_account { type filter hook forward priority -150; policy accept; }"));
+    commands.push_back(nftCommand("add rule " + table + " input_account tcp dport @tracked_ports update @ipv4_download { ip saddr . tcp dport }"));
+    commands.push_back(nftCommand("add rule " + table + " input_account udp dport @tracked_ports update @ipv4_download { ip saddr . udp dport }"));
+    commands.push_back(nftCommand("add rule " + table + " input_account meta nfproto ipv6 tcp dport @tracked_ports update @ipv6_download { ip6 saddr . tcp dport }"));
+    commands.push_back(nftCommand("add rule " + table + " input_account meta nfproto ipv6 udp dport @tracked_ports update @ipv6_download { ip6 saddr . udp dport }"));
+    commands.push_back(nftCommand("add rule " + table + " output_account tcp sport @tracked_ports update @ipv4_upload { ip daddr . tcp sport }"));
+    commands.push_back(nftCommand("add rule " + table + " output_account udp sport @tracked_ports update @ipv4_upload { ip daddr . udp sport }"));
+    commands.push_back(nftCommand("add rule " + table + " output_account meta nfproto ipv6 tcp sport @tracked_ports update @ipv6_upload { ip6 daddr . tcp sport }"));
+    commands.push_back(nftCommand("add rule " + table + " output_account meta nfproto ipv6 udp sport @tracked_ports update @ipv6_upload { ip6 daddr . udp sport }"));
+    commands.push_back(nftCommand("add rule " + table + " forward_account tcp dport @tracked_ports update @ipv4_download { ip saddr . tcp dport }"));
+    commands.push_back(nftCommand("add rule " + table + " forward_account udp dport @tracked_ports update @ipv4_download { ip saddr . udp dport }"));
+    commands.push_back(nftCommand("add rule " + table + " forward_account tcp sport @tracked_ports update @ipv4_upload { ip daddr . tcp sport }"));
+    commands.push_back(nftCommand("add rule " + table + " forward_account udp sport @tracked_ports update @ipv4_upload { ip daddr . udp sport }"));
+    commands.push_back(nftCommand("add rule " + table + " forward_account meta nfproto ipv6 tcp dport @tracked_ports update @ipv6_download { ip6 saddr . tcp dport }"));
+    commands.push_back(nftCommand("add rule " + table + " forward_account meta nfproto ipv6 udp dport @tracked_ports update @ipv6_download { ip6 saddr . udp dport }"));
+    commands.push_back(nftCommand("add rule " + table + " forward_account meta nfproto ipv6 tcp sport @tracked_ports update @ipv6_upload { ip6 daddr . tcp sport }"));
+    commands.push_back(nftCommand("add rule " + table + " forward_account meta nfproto ipv6 udp sport @tracked_ports update @ipv6_upload { ip6 daddr . udp sport }"));
+    return commands;
+}
+
+inline std::vector<std::string> trafficPortSetUpdateCommands(const std::set<int> &ports) {
+    const std::string table = "inet " + kIpTrafficTable;
+    std::vector<std::string> commands = {
+        nftCommandIgnoreError("add set " + table + " tracked_ports { type inet_service; flags interval; }"),
+        nftCommandIgnoreError("flush set " + table + " tracked_ports"),
+    };
+    if (!ports.empty()) {
+        commands.push_back(nftCommand("add element " + table + " tracked_ports " + nftPortElements(ports)));
+    }
+    return commands;
+}
+
+inline bool writeTrafficSnapshotTimerUnits(const std::string &argv0, std::string &error) {
+#ifdef _WIN32
+    (void)argv0;
+    error = "Windows 不支持 systemd timer。";
+    return false;
+#else
+    const std::string exe = currentExecutablePath(argv0.empty() ? nullptr : argv0.c_str());
+    const std::string servicePath = "/etc/systemd/system/" + kTrafficSnapshotService;
+    const std::string timerPath = "/etc/systemd/system/" + kTrafficSnapshotTimer;
+    std::ostringstream service;
+    service << "[Unit]\n"
+            << "Description=Linux Traffic Guard traffic history snapshot\n\n"
+            << "[Service]\n"
+            << "Type=oneshot\n"
+            << "ExecStart=" << exe << " --traffic-snapshot\n";
+    std::ostringstream timer;
+    timer << "[Unit]\n"
+          << "Description=Run Linux Traffic Guard traffic snapshot every 5 minutes\n\n"
+          << "[Timer]\n"
+          << "OnBootSec=2min\n"
+          << "OnUnitActiveSec=5min\n"
+          << "AccuracySec=30s\n"
+          << "Persistent=true\n\n"
+          << "[Install]\n"
+          << "WantedBy=timers.target\n";
+    if (!writeTextFile(servicePath, service.str())) {
+        error = "无法写入 " + servicePath;
+        return false;
+    }
+    if (!writeTextFile(timerPath, timer.str())) {
+        error = "无法写入 " + timerPath;
+        return false;
+    }
+    return true;
+#endif
+}
+
 inline std::string serviceState(const std::string &name) {
     if (!Shell::exists("systemctl")) {
         return "未知";
@@ -3375,6 +3643,11 @@ inline std::string serviceSuggestion(const std::string &name, const std::string 
 
 inline bool trafficTableEnabled() {
     return Shell::exists("nft") && Shell::capture("nft list table inet " + kIpTrafficTable).ok();
+}
+
+inline bool trafficTrackedPortsSetEnabled() {
+    return Shell::exists("nft") &&
+           Shell::capture("nft list set inet " + kIpTrafficTable + " tracked_ports 2>/dev/null").ok();
 }
 
 inline bool parseU64(const std::string &text, std::uint64_t &value) {
@@ -3455,6 +3728,539 @@ inline std::vector<TrafficRow> collectTrafficRows() {
     return rows;
 }
 
+inline std::string trafficHistoryPath(const std::string &name) {
+    return kTrafficHistoryDir + "/" + name;
+}
+
+inline bool trafficHistoryConfiguredFast() {
+#if LTG_HAS_SQLITE
+    return fileExists(trafficHistoryPath("events.sqlite3"));
+#else
+    return fileExists(trafficHistoryPath("tracked_ports.tsv")) ||
+           fileExists(trafficHistoryPath("snapshot.tsv")) ||
+           fileExists(trafficHistoryPath("delta.tsv"));
+#endif
+}
+
+inline std::string trafficKey(const TrafficRow &row) {
+    return row.family + "\t" + row.direction + "\t" + row.ip + "\t" + row.port;
+}
+
+inline bool sameOrHigherCounters(const TrafficRow &current, const TrafficRow &previous) {
+    return current.bytes >= previous.bytes && current.packets >= previous.packets;
+}
+
+inline std::vector<TrafficDelta> computeTrafficDeltas(const std::vector<TrafficRow> &current,
+                                                      const std::map<std::string, TrafficRow> &previous,
+                                                      std::time_t sampledAt,
+                                                      std::size_t &resetRows) {
+    std::vector<TrafficDelta> deltas;
+    resetRows = 0;
+    for (const auto &row : current) {
+        const auto found = previous.find(trafficKey(row));
+        if (found == previous.end()) {
+            continue;
+        }
+        if (!sameOrHigherCounters(row, found->second)) {
+            ++resetRows;
+            continue;
+        }
+        TrafficRow delta = row;
+        delta.bytes -= found->second.bytes;
+        delta.packets -= found->second.packets;
+        if (delta.bytes == 0 && delta.packets == 0) {
+            continue;
+        }
+        deltas.push_back({delta, sampledAt, localDayStamp(sampledAt), localMonthStamp(sampledAt), localYearStamp(sampledAt)});
+    }
+    return deltas;
+}
+
+#if LTG_HAS_SQLITE
+inline std::string trafficHistoryDbPath() {
+    return trafficHistoryPath("events.sqlite3");
+}
+
+inline bool trafficSqlExec(sqlite3 *db, const std::string &sql, std::string &error) {
+    char *rawError = nullptr;
+    const int rc = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &rawError);
+    if (rc != SQLITE_OK) {
+        error = rawError ? rawError : sqlite3_errmsg(db);
+        sqlite3_free(rawError);
+        return false;
+    }
+    return true;
+}
+
+inline bool openTrafficHistoryDb(sqlite3 **db, std::string &error) {
+    ensureDirectory(kTrafficHistoryDir);
+    if (sqlite3_open(trafficHistoryDbPath().c_str(), db) != SQLITE_OK) {
+        error = *db ? sqlite3_errmsg(*db) : "无法打开 SQLite 历史库";
+        if (*db) {
+            sqlite3_close(*db);
+            *db = nullptr;
+        }
+        return false;
+    }
+    const std::string schema =
+        "create table if not exists traffic_snapshot("
+        "sampled_at integer not null,family text not null,direction text not null,ip text not null,port text not null,"
+        "bytes integer not null,packets integer not null,primary key(sampled_at,family,direction,ip,port));"
+        "create table if not exists traffic_delta("
+        "sampled_at integer not null,day text not null,month text not null,year text not null,"
+        "family text not null,direction text not null,ip text not null,port text not null,bytes integer not null,packets integer not null);"
+        "create table if not exists tracked_ports(port integer primary key);"
+        "create table if not exists meta(key text primary key,value text not null);"
+        "create index if not exists idx_traffic_delta_month_port on traffic_delta(month,port,direction);"
+        "create index if not exists idx_traffic_delta_day_port on traffic_delta(day,port,direction);"
+        "create index if not exists idx_traffic_delta_year_port on traffic_delta(year,port,direction);";
+    if (!trafficSqlExec(*db, schema, error)) {
+        sqlite3_close(*db);
+        *db = nullptr;
+        return false;
+    }
+    return true;
+}
+
+inline std::map<std::string, TrafficRow> loadLatestTrafficSnapshot(std::string &error) {
+    std::map<std::string, TrafficRow> out;
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return out;
+    }
+    const char *sql =
+        "select family,direction,ip,port,bytes,packets from traffic_snapshot "
+        "where sampled_at=(select max(sampled_at) from traffic_snapshot);";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+        return out;
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        TrafficRow row;
+        row.family = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
+        row.direction = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+        row.ip = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+        row.port = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+        row.bytes = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 4));
+        row.packets = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 5));
+        out[trafficKey(row)] = row;
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return out;
+}
+
+inline bool insertTrafficSnapshotRows(const std::vector<TrafficRow> &rows, std::time_t sampledAt, std::string &error) {
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return false;
+    }
+    trafficSqlExec(db, "begin immediate;", error);
+    const char *sql =
+        "insert or replace into traffic_snapshot(sampled_at,family,direction,ip,port,bytes,packets) values(?,?,?,?,?,?,?);";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+        return false;
+    }
+    bool ok = true;
+    for (const auto &row : rows) {
+        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(sampledAt));
+        sqlite3_bind_text(stmt, 2, row.family.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, row.direction.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, row.ip.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, row.port.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(row.bytes));
+        sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(row.packets));
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            error = sqlite3_errmsg(db);
+            ok = false;
+            break;
+        }
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+    }
+    sqlite3_finalize(stmt);
+    trafficSqlExec(db, ok ? "commit;" : "rollback;", error);
+    sqlite3_close(db);
+    return ok;
+}
+
+inline bool insertTrafficDeltas(const std::vector<TrafficDelta> &deltas, std::string &error) {
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return false;
+    }
+    trafficSqlExec(db, "begin immediate;", error);
+    const char *sql =
+        "insert into traffic_delta(sampled_at,day,month,year,family,direction,ip,port,bytes,packets) values(?,?,?,?,?,?,?,?,?,?);";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+        return false;
+    }
+    bool ok = true;
+    for (const auto &delta : deltas) {
+        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(delta.sampledAt));
+        sqlite3_bind_text(stmt, 2, delta.day.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, delta.month.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, delta.year.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, delta.row.family.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, delta.row.direction.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 7, delta.row.ip.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 8, delta.row.port.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(delta.row.bytes));
+        sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(delta.row.packets));
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            error = sqlite3_errmsg(db);
+            ok = false;
+            break;
+        }
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+    }
+    sqlite3_finalize(stmt);
+    trafficSqlExec(db, ok ? "commit;" : "rollback;", error);
+    sqlite3_close(db);
+    return ok;
+}
+
+inline bool storeTrackedTrafficPorts(const std::set<int> &ports, std::string &error) {
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return false;
+    }
+    trafficSqlExec(db, "begin immediate; delete from tracked_ports;", error);
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "insert or ignore into tracked_ports(port) values(?);", -1, &stmt, nullptr) != SQLITE_OK) {
+        error = sqlite3_errmsg(db);
+        sqlite3_close(db);
+        return false;
+    }
+    bool ok = true;
+    for (int port : ports) {
+        sqlite3_bind_int(stmt, 1, port);
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            error = sqlite3_errmsg(db);
+            ok = false;
+            break;
+        }
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+    }
+    sqlite3_finalize(stmt);
+    trafficSqlExec(db, ok ? "commit;" : "rollback;", error);
+    sqlite3_close(db);
+    return ok;
+}
+
+inline std::set<int> loadTrackedTrafficPorts() {
+    std::set<int> out;
+    std::string error;
+    if (!fileExists(trafficHistoryDbPath())) {
+        return out;
+    }
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return out;
+    }
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "select port from tracked_ports order by port;", -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            out.insert(sqlite3_column_int(stmt, 0));
+        }
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return out;
+}
+
+inline std::vector<TrafficRow> loadTrafficDeltasForPeriod(TrafficPeriodMode mode, const std::string &period) {
+    std::vector<TrafficRow> rows;
+    if (!fileExists(trafficHistoryDbPath())) {
+        return rows;
+    }
+    std::string error;
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return rows;
+    }
+    const std::string column = mode == TrafficPeriodMode::Day ? "day" : mode == TrafficPeriodMode::Year ? "year" : "month";
+    const std::string sql = "select family,direction,ip,port,sum(bytes),sum(packets) from traffic_delta where " +
+                            column + "=? group by family,direction,ip,port;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return rows;
+    }
+    sqlite3_bind_text(stmt, 1, period.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        TrafficRow row;
+        row.family = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
+        row.direction = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+        row.ip = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+        row.port = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+        row.bytes = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 4));
+        row.packets = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 5));
+        rows.push_back(row);
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return rows;
+}
+
+inline std::vector<TrafficSummaryRow> loadTrafficPortSummaryForPeriod(TrafficPeriodMode mode, const std::string &period) {
+    std::map<std::string, TrafficSummaryRow> grouped;
+    if (!fileExists(trafficHistoryDbPath())) {
+        return {};
+    }
+    std::string error;
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return {};
+    }
+    const std::string column = mode == TrafficPeriodMode::Day ? "day" : mode == TrafficPeriodMode::Year ? "year" : "month";
+    const std::string sql = "select direction,port,sum(bytes),sum(packets) from traffic_delta where " +
+                            column + "=? group by direction,port;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return {};
+    }
+    sqlite3_bind_text(stmt, 1, period.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const std::string direction = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
+        const std::string port = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+        auto &slot = grouped[port];
+        slot.ip = "*";
+        slot.port = port;
+        const auto bytes = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 2));
+        const auto packets = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 3));
+        if (direction == "上传") {
+            slot.uploadBytes += bytes;
+            slot.uploadPackets += packets;
+        } else {
+            slot.downloadBytes += bytes;
+            slot.downloadPackets += packets;
+        }
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    std::vector<TrafficSummaryRow> out;
+    for (const auto &item : grouped) {
+        out.push_back(item.second);
+    }
+    std::sort(out.begin(), out.end(), [](const TrafficSummaryRow &a, const TrafficSummaryRow &b) {
+        if (a.totalBytes() != b.totalBytes()) {
+            return a.totalBytes() > b.totalBytes();
+        }
+        return a.port < b.port;
+    });
+    return out;
+}
+#else
+inline std::map<std::string, TrafficRow> loadLatestTrafficSnapshot(std::string &error) {
+    std::map<std::string, TrafficRow> out;
+    std::ifstream input(trafficHistoryPath("snapshot.tsv"), std::ios::binary);
+    if (!input) {
+        error.clear();
+        return out;
+    }
+    std::string line;
+    std::time_t latest = 0;
+    std::vector<std::pair<std::time_t, TrafficRow>> parsed;
+    while (std::getline(input, line)) {
+        const auto parts = splitByChar(line, '\t');
+        if (parts.size() != 7) {
+            continue;
+        }
+        TrafficRow row;
+        row.family = parts[1];
+        row.direction = parts[2];
+        row.ip = parts[3];
+        row.port = parts[4];
+        std::uint64_t bytes = 0;
+        std::uint64_t packets = 0;
+        if (!parseU64(parts[5], bytes) || !parseU64(parts[6], packets)) {
+            continue;
+        }
+        row.bytes = bytes;
+        row.packets = packets;
+        const std::time_t ts = static_cast<std::time_t>(std::stoll(parts[0]));
+        latest = std::max(latest, ts);
+        parsed.push_back({ts, row});
+    }
+    for (const auto &item : parsed) {
+        if (item.first == latest) {
+            out[trafficKey(item.second)] = item.second;
+        }
+    }
+    return out;
+}
+
+inline bool insertTrafficSnapshotRows(const std::vector<TrafficRow> &rows, std::time_t sampledAt, std::string &error) {
+    ensureDirectory(kTrafficHistoryDir);
+    std::ofstream output(trafficHistoryPath("snapshot.tsv"), std::ios::binary | std::ios::app);
+    if (!output) {
+        error = "无法写入 snapshot.tsv";
+        return false;
+    }
+    for (const auto &row : rows) {
+        output << sampledAt << '\t' << row.family << '\t' << row.direction << '\t' << row.ip << '\t'
+               << row.port << '\t' << row.bytes << '\t' << row.packets << '\n';
+    }
+    return static_cast<bool>(output);
+}
+
+inline bool insertTrafficDeltas(const std::vector<TrafficDelta> &deltas, std::string &error) {
+    ensureDirectory(kTrafficHistoryDir);
+    std::ofstream output(trafficHistoryPath("delta.tsv"), std::ios::binary | std::ios::app);
+    if (!output) {
+        error = "无法写入 delta.tsv";
+        return false;
+    }
+    for (const auto &delta : deltas) {
+        output << delta.sampledAt << '\t' << delta.day << '\t' << delta.month << '\t' << delta.year << '\t'
+               << delta.row.family << '\t' << delta.row.direction << '\t' << delta.row.ip << '\t'
+               << delta.row.port << '\t' << delta.row.bytes << '\t' << delta.row.packets << '\n';
+    }
+    return static_cast<bool>(output);
+}
+
+inline bool storeTrackedTrafficPorts(const std::set<int> &ports, std::string &error) {
+    ensureDirectory(kTrafficHistoryDir);
+    std::ofstream output(trafficHistoryPath("tracked_ports.tsv"), std::ios::binary | std::ios::trunc);
+    if (!output) {
+        error = "无法写入 tracked_ports.tsv";
+        return false;
+    }
+    for (int port : ports) {
+        output << port << '\n';
+    }
+    return static_cast<bool>(output);
+}
+
+inline std::set<int> loadTrackedTrafficPorts() {
+    std::set<int> out;
+    std::ifstream input(trafficHistoryPath("tracked_ports.tsv"), std::ios::binary);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (isSafeSinglePort(trim(line))) {
+            out.insert(std::stoi(trim(line)));
+        }
+    }
+    return out;
+}
+
+inline std::vector<TrafficRow> loadTrafficDeltasForPeriod(TrafficPeriodMode mode, const std::string &period) {
+    std::vector<TrafficRow> rows;
+    std::ifstream input(trafficHistoryPath("delta.tsv"), std::ios::binary);
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto parts = splitByChar(line, '\t');
+        if (parts.size() != 10) {
+            continue;
+        }
+        const std::string &bucket = mode == TrafficPeriodMode::Day ? parts[1] : mode == TrafficPeriodMode::Year ? parts[3] : parts[2];
+        if (bucket != period) {
+            continue;
+        }
+        TrafficRow row;
+        row.family = parts[4];
+        row.direction = parts[5];
+        row.ip = parts[6];
+        row.port = parts[7];
+        if (!parseU64(parts[8], row.bytes) || !parseU64(parts[9], row.packets)) {
+            continue;
+        }
+        rows.push_back(row);
+    }
+    return rows;
+}
+
+inline std::vector<TrafficSummaryRow> loadTrafficPortSummaryForPeriod(TrafficPeriodMode mode, const std::string &period) {
+    std::map<std::string, TrafficSummaryRow> grouped;
+    for (const auto &row : loadTrafficDeltasForPeriod(mode, period)) {
+        auto &slot = grouped[row.port];
+        slot.ip = "*";
+        slot.port = row.port;
+        if (row.direction == "上传") {
+            slot.uploadBytes += row.bytes;
+            slot.uploadPackets += row.packets;
+        } else {
+            slot.downloadBytes += row.bytes;
+            slot.downloadPackets += row.packets;
+        }
+    }
+    std::vector<TrafficSummaryRow> out;
+    for (const auto &item : grouped) {
+        out.push_back(item.second);
+    }
+    std::sort(out.begin(), out.end(), [](const TrafficSummaryRow &a, const TrafficSummaryRow &b) {
+        if (a.totalBytes() != b.totalBytes()) {
+            return a.totalBytes() > b.totalBytes();
+        }
+        return a.port < b.port;
+    });
+    return out;
+}
+#endif
+
+inline std::set<int> detectExistingTrafficPorts() {
+    std::set<int> ports = loadTrackedTrafficPorts();
+    if (!Shell::exists("nft")) {
+        return ports;
+    }
+    const CommandResult tracked = Shell::capture("nft list set inet " + kIpTrafficTable + " tracked_ports 2>/dev/null || true");
+    const std::regex elementsPattern(R"(elements\s*=\s*\{([^}]*)\})");
+    std::smatch match;
+    if (std::regex_search(tracked.output, match, elementsPattern)) {
+        parseNftPortListInto(match[1].str(), ports);
+    }
+    const CommandResult table = Shell::capture("nft list table inet " + kIpTrafficTable + " 2>/dev/null || true");
+    const std::regex literalPattern(R"((?:dport|sport)\s+\{([^}]*)\})");
+    for (std::sregex_iterator it(table.output.begin(), table.output.end(), literalPattern), end; it != end; ++it) {
+        parseNftPortListInto((*it)[1].str(), ports);
+    }
+    return ports;
+}
+
+inline TrafficSnapshotResult recordTrafficSnapshot() {
+    TrafficSnapshotResult result;
+    result.sampledAt = std::time(nullptr);
+    if (!trafficTableEnabled()) {
+        result.message = "流量统计规则未启用。";
+        return result;
+    }
+    std::string error;
+    const auto previous = loadLatestTrafficSnapshot(error);
+    if (!error.empty()) {
+        result.message = error;
+        return result;
+    }
+    const auto current = collectTrafficRows();
+    std::size_t resetRows = 0;
+    const auto deltas = computeTrafficDeltas(current, previous, result.sampledAt, resetRows);
+    if (!insertTrafficSnapshotRows(current, result.sampledAt, error)) {
+        result.message = error;
+        return result;
+    }
+    if (!deltas.empty() && !insertTrafficDeltas(deltas, error)) {
+        result.message = error;
+        return result;
+    }
+    result.ok = true;
+    result.liveRows = current.size();
+    result.deltaRows = deltas.size();
+    result.resetRows = resetRows;
+    result.message = "采样完成。";
+    return result;
+}
+
 inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<TrafficRow> &rows, TrafficGroupMode mode) {
     std::map<std::string, TrafficSummaryRow> grouped;
     for (const auto &row : rows) {
@@ -3503,10 +4309,14 @@ inline std::vector<TrafficSummaryRow> aggregateTrafficByIpPort(const std::vector
     return aggregateTraffic(rows, TrafficGroupMode::IpPort);
 }
 
+inline std::vector<TrafficSummaryRow> aggregateTrafficHistoryByPort(TrafficPeriodMode mode, const std::string &period) {
+    return loadTrafficPortSummaryForPeriod(mode, period);
+}
+
 inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, TrafficGroupMode mode) {
-    Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "端口", "下载", "上传", "合计", "包数"}
-                : mode == TrafficGroupMode::Port ? std::vector<std::string>{"序号", "端口", "服务", "下载", "上传", "合计", "包数"}
-                                                  : std::vector<std::string>{"序号", "IP", "下载", "上传", "合计", "包数"},
+    Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "端口", "上行", "下行", "合计", "包数"}
+                : mode == TrafficGroupMode::Port ? std::vector<std::string>{"序号", "端口", "服务", "上行", "下行", "合计", "包数"}
+                                                  : std::vector<std::string>{"序号", "IP", "上行", "下行", "合计", "包数"},
                 mode == TrafficGroupMode::IpPort ? std::vector<std::size_t>{6, 28, 8, 12, 12, 12, 10}
                 : mode == TrafficGroupMode::Port ? std::vector<std::size_t>{6, 8, 18, 12, 12, 12, 10}
                                                   : std::vector<std::size_t>{6, 28, 12, 12, 12, 10});
@@ -3521,8 +4331,8 @@ inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std
                 cells.push_back(rows[i].port);
             }
         }
-        cells.push_back(humanBytes(rows[i].downloadBytes));
         cells.push_back(humanBytes(rows[i].uploadBytes));
+        cells.push_back(humanBytes(rows[i].downloadBytes));
         cells.push_back(humanBytes(rows[i].totalBytes()));
         cells.push_back(std::to_string(rows[i].totalPackets()));
         table.add(std::move(cells));
@@ -3704,21 +4514,13 @@ inline Table ufwHitsTable(const std::vector<UfwHit> &hits) {
 
 inline DashboardSnapshot loadDashboardSnapshot() {
     DashboardSnapshot snapshot;
-    auto tableFuture = std::async(std::launch::async, [] { return trafficTableEnabled(); });
-    auto ufwHitsFuture = std::async(std::launch::async, [] { return collectUfwSourceTop(); });
-    auto fail2banStateFuture = std::async(std::launch::async, [] { return serviceState("fail2ban"); });
-    auto ufwStateFuture = std::async(std::launch::async, [] { return ufwState(); });
-    auto defaultPoliciesFuture = std::async(std::launch::async, [] { return collectDefaultFail2banPolicies(true); });
-
-    snapshot.tableEnabled = tableFuture.get();
-    if (snapshot.tableEnabled) {
-        snapshot.trafficRows = collectTrafficRows();
-        snapshot.totalRows = aggregateTrafficByPort(snapshot.trafficRows);
-    }
-    snapshot.ufwHits = ufwHitsFuture.get();
-    snapshot.fail2banState = fail2banStateFuture.get();
-    snapshot.ufwState = ufwStateFuture.get();
-    snapshot.defaultPolicies = defaultPoliciesFuture.get();
+    snapshot.tableEnabled = trafficHistoryConfiguredFast();
+    snapshot.trackedPorts = loadTrackedTrafficPorts();
+    snapshot.trafficPeriodLabel = currentTrafficPeriodLabel(TrafficPeriodMode::Month);
+    snapshot.totalRows = aggregateTrafficHistoryByPort(TrafficPeriodMode::Month, snapshot.trafficPeriodLabel);
+    snapshot.trafficHistoryAvailable = !snapshot.totalRows.empty();
+    snapshot.fail2banState = "未刷新";
+    snapshot.ufwState = "未刷新";
     snapshot.loadedAt = std::chrono::steady_clock::now();
     return snapshot;
 }
@@ -3741,6 +4543,33 @@ inline bool dashboardCacheFresh() {
     return age < std::chrono::seconds(5);
 }
 
+inline std::string dashboardFastHeaderLine() {
+    std::ostringstream deps;
+    deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow));
+    deps << "  首屏: 本地历史";
+    deps << "  实时检查: 安全中心/诊断";
+    return deps.str();
+}
+
+inline void addTrafficOnboarding(ScreenBuffer &buffer, bool configured, bool hasHistory) {
+    buffer.add("> 下一步");
+    if (!configured) {
+        buffer.add("1. 进入“流量统计 -> 开启/追加端口”，输入要统计的服务端口。");
+        buffer.add("2. 工具会保留已有计数，并启用 5 分钟一次的后台采样。");
+        buffer.add("3. 第一轮采样建立基线，下一轮开始出现日/月/年增量。");
+        return;
+    }
+    if (!hasHistory) {
+        buffer.add("1. 历史采样已初始化，但当前时间段还没有增量。");
+        buffer.add("2. 第一轮采样只建立基线，至少再等一轮采样后才会出现流量。");
+        buffer.add("3. 想确认底层规则是否有实时计数，可进入“流量统计 -> 实时明细”。");
+        return;
+    }
+    buffer.add("1. 看趋势用“流量统计 -> 今日/本月/按日/月/年查看”。");
+    buffer.add("2. 查具体 IP 用“流量统计 -> 实时明细”或“下钻检查”。");
+    buffer.add("3. 查服务、防火墙、fail2ban 运行态用“安全中心”或“诊断”。");
+}
+
 inline std::vector<std::string> tableLines(const Table &table, const std::string &emptyMessage = "暂无数据") {
     std::ostringstream out;
     auto *old = std::cout.rdbuf(out.rdbuf());
@@ -3755,44 +4584,30 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     ScreenBuffer buffer;
     buffer.add("  流量/端口优先的服务器防护仪表盘");
     buffer.add("");
-    std::ostringstream deps;
-    deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow)) << "  ";
-    const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl"};
-    for (const auto &tool : tools) {
-        deps << tool << " " << Ui::statusBadge(Shell::exists(tool), "可用", "缺失") << "  ";
-    }
-    buffer.add(deps.str());
+    buffer.add(dashboardFastHeaderLine());
     buffer.add("");
     if (loading || snapshot == nullptr) {
-        buffer.add(std::string("> 流量 / 端口概览  加载中 ") + spinner);
-        buffer.add("  正在读取 nft、UFW、fail2ban 数据。你可以先用 ↑↓/滚轮查看页面，按 q 返回。");
+        buffer.add(std::string("> 本月端口流量  加载中 ") + spinner);
+        buffer.add("  正在读取本地历史。实时检查放在对应页面执行。");
         buffer.add("");
-        buffer.add("> UFW拦截风险来源Top  加载中");
-        buffer.add("");
-        buffer.add("> 防护组件状态  加载中");
+        buffer.add("> 下一步  加载中");
         return buffer;
     }
 
-    buffer.add("> 流量 / 端口概览");
-    buffer.add(std::string("统计表: ") + (snapshot->tableEnabled ? "[已启用]" : "[未启用]") + "  nft=inet " + kIpTrafficTable);
+    buffer.add("> 本月端口流量");
+    buffer.add("统计口径: 系统本地时间 " + (snapshot->trafficPeriodLabel.empty() ? currentTrafficPeriodLabel(TrafficPeriodMode::Month) : snapshot->trafficPeriodLabel) +
+               "，按端口聚合上行/下行。");
+    buffer.add(std::string("历史采样: ") + (snapshot->tableEnabled ? "[已初始化]" : "[未初始化]"));
+    buffer.add("统计端口: " + std::to_string(snapshot->trackedPorts.size()) + " 个  " + humanPortList(snapshot->trackedPorts));
     if (!snapshot->tableEnabled) {
-        buffer.add("端口流量统计未启用。进入“流量统计 -> 开启统计”启用。");
+        buffer.add("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。");
+    } else if (!snapshot->trafficHistoryAvailable) {
+        buffer.add("本月还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。");
     }
-    buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, 8, TrafficGroupMode::Port), snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用"));
+    buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, 8, TrafficGroupMode::Port),
+                             snapshot->tableEnabled ? "本月暂无采样增量" : "历史采样未初始化"));
     buffer.add("");
-    buffer.add("> UFW拦截风险来源Top");
-    buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
-    buffer.addAll(tableLines(ufwHitsTable(snapshot->ufwHits), "该窗口暂无公网 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。"));
-    buffer.add("");
-    buffer.add("> 防护组件状态");
-    Table services({"组件", "状态", "含义", "建议"}, {18, 12, 30, 18});
-    services.add({"fail2ban", normalizedServiceState(snapshot->fail2banState),
-                  serviceMeaning("fail2ban", snapshot->fail2banState),
-                  serviceSuggestion("fail2ban", snapshot->fail2banState)});
-    services.add({"ufw", normalizedServiceState(snapshot->ufwState),
-                  serviceMeaning("ufw", snapshot->ufwState),
-                  serviceSuggestion("ufw", snapshot->ufwState)});
-    buffer.addAll(tableLines(services));
+    addTrafficOnboarding(buffer, snapshot->tableEnabled, snapshot->trafficHistoryAvailable);
     return buffer;
 }
 
@@ -3903,9 +4718,9 @@ private:
         const std::vector<int> widths = mode == TrafficGroupMode::IpPort ? std::vector<int>{6, 30, 8, 14, 14, 14, 10}
                                       : mode == TrafficGroupMode::Port ? std::vector<int>{6, 8, 20, 14, 14, 14, 10}
                                                                        : std::vector<int>{6, 30, 14, 14, 14, 10};
-        buffer.add(mode == TrafficGroupMode::IpPort ? tableRow({"序号", "IP", "端口", "下载", "上传", "合计", "包数"}, widths, true)
-                   : mode == TrafficGroupMode::Port ? tableRow({"序号", "端口", "服务", "下载", "上传", "合计", "包数"}, widths, true)
-                                                     : tableRow({"序号", "IP", "下载", "上传", "合计", "包数"}, widths, true));
+        buffer.add(mode == TrafficGroupMode::IpPort ? tableRow({"序号", "IP", "端口", "上行", "下行", "合计", "包数"}, widths, true)
+                   : mode == TrafficGroupMode::Port ? tableRow({"序号", "端口", "服务", "上行", "下行", "合计", "包数"}, widths, true)
+                                                     : tableRow({"序号", "IP", "上行", "下行", "合计", "包数"}, widths, true));
         buffer.add(tableRule(widths));
         if (rows.empty()) {
             buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
@@ -3922,8 +4737,8 @@ private:
                     cells.push_back(rows[i].port);
                 }
             }
-            cells.push_back(humanBytes(rows[i].downloadBytes));
             cells.push_back(humanBytes(rows[i].uploadBytes));
+            cells.push_back(humanBytes(rows[i].downloadBytes));
             cells.push_back(humanBytes(rows[i].totalBytes()));
             cells.push_back(std::to_string(rows[i].totalPackets()));
             buffer.add(tableRow(cells, widths));
@@ -4003,14 +4818,14 @@ private:
         Page page;
         page.kind = PageKind::Menu;
         page.title = kName + " v" + kVersion;
-        page.subtitle = "选择一个页面进入。用上下键移动高亮，Enter 打开。";
+        page.subtitle = "常用先看仪表盘和流量统计；慢查询放在安全中心、诊断和下钻里。";
         page.root = true;
         page.items = {
-            {"1", "仪表盘", "刷新当前概览", false, [this] { pushDashboard(); }},
-            {"2", "流量统计", "按端口汇总，保留 IP 下钻", false, [this] { pushTrafficMenu(); }},
-            {"3", "安全中心", "威胁分析、策略、处置、核验", false, [this] { pushSecurityMenu(); }},
-            {"4", "下钻检查", "端口/IP 下钻和原始详情", false, [this] { pushInspectMenu(); }},
-            {"5", "诊断", "依赖、日志、报告", false, [this] { pushDiagnoseMenu(); }},
+            {"1", "仪表盘", "最快入口，本月端口流量和下一步建议", false, [this] { pushDashboard(); }},
+            {"2", "流量统计", "开启/追加端口，查看日/月/年流量", false, [this] { pushTrafficMenu(); }},
+            {"3", "安全中心", "威胁分析、fail2ban、UFW 和处置核验", false, [this] { pushSecurityMenu(); }},
+            {"4", "下钻检查", "较慢，按端口/连接/底层规则排障", false, [this] { pushInspectMenu(); }},
+            {"5", "诊断", "较慢，依赖、日志、报告和导出", false, [this] { pushDiagnoseMenu(); }},
         };
         pages_.push_back(std::move(page));
     }
@@ -4024,10 +4839,11 @@ private:
         if (forceRefresh) {
             cachedDashboardValid() = false;
         }
-        page.loading = !dashboardCacheFresh();
-        if (page.loading) {
-            startDashboardLoad(page);
+        if (!dashboardCacheFresh()) {
+            cachedDashboardSnapshot() = loadDashboardSnapshot();
+            cachedDashboardValid() = true;
         }
+        page.loading = false;
         pages_.push_back(std::move(page));
     }
 
@@ -4056,13 +4872,18 @@ private:
     }
 
     void pushTrafficMenu() {
-        pushMenu("流量统计", "端口优先的结构化流量统计",
+        pushMenu("流量统计", "像 vnStat 一样按日/月/年查看，默认按端口聚合",
                  {
-                     {"1", "开启统计", "向导创建 nft 动态计数集合", true, [this] { actionInstallTraffic(false); }},
-                     {"2", "查看排行", "端口总量、IP 总量与 IP+端口明细", false, [this] { actionShowTrafficRanking(); }},
-                     {"3", "重置统计", "按选择端口重建统计表", true, [this] { actionInstallTraffic(true); }},
-                     {"4", "删除统计", "删除 nft 表与计数", true, [this] { actionRemoveTrafficAccounting(); }},
-                     {"5", "原始 nft 表", "查看底层统计表", false, [this] { actionRawNftTable(); }},
+                     {"1", "开启/追加端口", "默认追加，不清空已有统计", true, [this] { actionInstallTraffic(); }},
+                     {"2", "本月流量", "默认视图，按端口汇总", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Month, currentTrafficPeriodLabel(TrafficPeriodMode::Month)); }},
+                     {"3", "今日流量", "今天的端口汇总", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Day, currentTrafficPeriodLabel(TrafficPeriodMode::Day)); }},
+                     {"4", "按日查看", "输入 YYYY-MM-DD 查看端口汇总", false, [this] { actionPromptTrafficPeriod(TrafficPeriodMode::Day); }},
+                     {"5", "按月查看", "输入 YYYY-MM 查看端口汇总", false, [this] { actionPromptTrafficPeriod(TrafficPeriodMode::Month); }},
+                     {"6", "按年查看", "输入 YYYY 查看端口汇总", false, [this] { actionPromptTrafficPeriod(TrafficPeriodMode::Year); }},
+                     {"7", "实时明细", "较慢，读取底层实时计数和 IP 明细", false, [this] { actionShowTrafficRanking(); }},
+                     {"8", "删除统计端口", "停止统计指定端口，保留历史", true, [this] { actionRemoveTrafficPorts(); }},
+                     {"9", "高级：删除全部统计规则", "高风险，删除底层统计规则", true, [this] { actionRemoveTrafficAccounting(); }},
+                     {"0", "高级：底层计数规则", "查看 nftables 原始输出", false, [this] { actionRawNftTable(); }},
                  });
     }
 
@@ -4184,7 +5005,7 @@ private:
                  {
                      {"1", "端口下钻", "监听、防火墙、计数、conntrack", false, [this] { actionFocusedPortInspect(); }},
                      {"2", "conntrack 快照", "当前活跃连接视图", false, [this] { actionConntrackSnapshot(); }},
-                     {"3", "原始 nft 表", "查看统计表", false, [this] { actionRawNftTable(); }},
+                     {"3", "高级：底层计数规则", "查看 nftables 原始输出", false, [this] { actionRawNftTable(); }},
                  });
     }
 
@@ -4260,58 +5081,38 @@ private:
         ScreenBuffer buffer;
         buffer.add("  " + page.subtitle);
         buffer.add("");
-        std::ostringstream deps;
-        deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow)) << "  ";
-        const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl"};
-        for (const auto &tool : tools) {
-            deps << tool << " " << Ui::statusBadge(Shell::exists(tool), "可用", "缺失") << "  ";
-        }
-        buffer.add(deps.str());
+        buffer.add(dashboardFastHeaderLine());
         buffer.add("");
         if (snapshot == nullptr) {
-            buffer.add(std::string("> 流量 / 端口概览  加载中 ") + spinner);
-            buffer.add("  正在读取 nft、UFW、fail2ban 数据。");
+            buffer.add(std::string("> 本月端口流量  加载中 ") + spinner);
+            buffer.add("  正在读取本地历史库。深度审计放在对应页面执行。");
             if (std::chrono::steady_clock::now() - page.started > std::chrono::seconds(2)) {
                 buffer.add("  仍在读取系统数据，可按 q 返回，或等待加载完成。");
             }
             buffer.add("");
-            buffer.add("> UFW拦截风险来源Top  加载中");
-            buffer.add("");
-            buffer.add("> 防护组件状态  加载中");
+            buffer.add("> 下一步  加载中");
             return buffer;
         }
 
-        buffer.add("> 流量 / 端口概览");
+        buffer.add("> 本月端口流量");
         if (page.loading) {
             buffer.add(std::string("后台刷新中 ") + spinner + "  先显示上一份快照，刷新完成后自动更新。");
         }
-        buffer.add(std::string("统计表: ") +
-                   (snapshot->tableEnabled ? Ui::badge("已启用", ansi::green) : Ui::badge("未启用", ansi::yellow)) +
-                   "  nft=inet " + kIpTrafficTable);
+        buffer.add("统计口径: 系统本地时间 " + (snapshot->trafficPeriodLabel.empty() ? currentTrafficPeriodLabel(TrafficPeriodMode::Month) : snapshot->trafficPeriodLabel) +
+                   "，按端口聚合上行/下行。");
+        buffer.add(std::string("历史采样: ") +
+                   (snapshot->tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
+        buffer.add("统计端口: " + std::to_string(snapshot->trackedPorts.size()) + " 个  " + humanPortList(snapshot->trackedPorts));
         if (!snapshot->tableEnabled) {
-            buffer.add(ansi::yellow + std::string("端口流量统计未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
+            buffer.add(ansi::yellow + std::string("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
+        } else if (!snapshot->trafficHistoryAvailable) {
+            buffer.add(ansi::yellow + std::string("本月还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。") + ansi::plain);
         }
-        addTrafficSummaryTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "暂无匹配流量" : "统计表未启用", TrafficGroupMode::Port);
+        addTrafficSummaryTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "本月暂无采样增量" : "历史采样未初始化", TrafficGroupMode::Port);
         buffer.add("");
-        buffer.add("> UFW拦截风险来源Top");
-        buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
-        addUfwTable(buffer, snapshot->ufwHits, "该窗口暂无公网 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。");
+        addTrafficOnboarding(buffer, snapshot->tableEnabled, snapshot->trafficHistoryAvailable);
         buffer.add("");
-        buffer.add("> 防护组件状态");
-        const std::vector<int> serviceWidths = {18, 14, 32, 22};
-        buffer.add(tableRow({"组件", "状态", "含义", "建议"}, serviceWidths, true));
-        buffer.add(tableRule(serviceWidths));
-        buffer.add(tableRow({"fail2ban", normalizedServiceState(snapshot->fail2banState),
-                             serviceMeaning("fail2ban", snapshot->fail2banState),
-                             serviceSuggestion("fail2ban", snapshot->fail2banState)}, serviceWidths));
-        buffer.add(tableRow({"ufw", normalizedServiceState(snapshot->ufwState),
-                             serviceMeaning("ufw", snapshot->ufwState),
-                             serviceSuggestion("ufw", snapshot->ufwState)}, serviceWidths));
-        buffer.add("");
-        buffer.add("> Fail2ban 默认策略");
-        addF2bPolicyTable(buffer, snapshot->defaultPolicies, "jail.local 中未发现默认策略");
-        buffer.add("");
-        buffer.add(ansi::gray + std::string("提示: “服务诊断”处理安装/启动/日志，“处置修复”处理封禁和规则一致性。") + ansi::plain);
+        buffer.add(ansi::gray + std::string("提示: 实时状态和慢查询在安全中心、诊断、下钻检查中执行。") + ansi::plain);
         return buffer;
     }
 
@@ -4438,9 +5239,9 @@ private:
         if (event.ch == 'q' || event.ch == 'Q') {
             popPage();
         } else if (event.ch == 'r' || event.ch == 'R') {
-            Shell::clearExistsCache();
-            cachedDashboardValid() = false;
-            startDashboardLoad(page);
+            cachedDashboardSnapshot() = loadDashboardSnapshot();
+            cachedDashboardValid() = true;
+            page.loading = false;
             page.scrollOffset = 0;
         }
     }
@@ -4584,6 +5385,48 @@ private:
         return false;
     }
 
+    bool confirmAppendTrafficPorts(const std::set<int> &existingPorts,
+                                   const std::set<int> &requestedPorts,
+                                   const std::set<int> &finalPorts) {
+        const std::set<int> newPorts = setDifference(requestedPorts, existingPorts);
+        std::vector<std::string> body = {
+            ansi::green + std::string("本次操作是追加统计端口，不会重建流量统计规则，也不会清空已有计数。") + ansi::plain,
+            "已统计端口: " + std::to_string(existingPorts.size()) + " 个  " + humanPortList(existingPorts),
+            "本次输入端口: " + humanPortList(requestedPorts),
+            "新增端口: " + (newPorts.empty() ? std::string("无，输入端口已在统计范围内") : humanPortList(newPorts)),
+            "执行后统计端口: " + std::to_string(finalPorts.size()) + " 个  " + humanPortList(finalPorts),
+            "",
+            "按 Enter 执行追加。只有输入 q 或 CANCEL 才取消。",
+        };
+        PromptAnswer answer = promptLine("开启/追加统计端口", body, "追加端口> ");
+        if (!answer.ok) {
+            return false;
+        }
+        const std::string value = trim(answer.value);
+        return !(value == "q" || value == "Q" || value == "cancel" || value == "CANCEL");
+    }
+
+    bool confirmRemoveTrafficPorts(const std::set<int> &existingPorts,
+                                   const std::set<int> &requestedPorts,
+                                   const std::set<int> &finalPorts) {
+        const std::set<int> removablePorts = setIntersection(requestedPorts, existingPorts);
+        std::vector<std::string> body = {
+            ansi::yellow + std::string("本次操作只停止统计指定端口，不删除历史日/月/年数据。") + ansi::plain,
+            "当前统计端口: " + std::to_string(existingPorts.size()) + " 个  " + humanPortList(existingPorts),
+            "本次输入端口: " + humanPortList(requestedPorts),
+            "会停止统计: " + (removablePorts.empty() ? std::string("无，输入端口不在当前统计范围内") : humanPortList(removablePorts)),
+            "执行后统计端口: " + std::to_string(finalPorts.size()) + " 个  " + humanPortList(finalPorts),
+            "",
+            "按 Enter 执行删除。只有输入 q 或 CANCEL 才取消。",
+        };
+        PromptAnswer answer = promptLine("删除统计端口", body, "删除端口> ");
+        if (!answer.ok) {
+            return false;
+        }
+        const std::string value = trim(answer.value);
+        return !(value == "q" || value == "Q" || value == "cancel" || value == "CANCEL");
+    }
+
     void renderBusy(const std::string &title, const std::string &message) {
         ScreenBuffer buffer;
         buffer.add(message);
@@ -4623,16 +5466,64 @@ private:
         return buffer;
     }
 
+    void actionShowTrafficPeriod(TrafficPeriodMode mode, const std::string &period) {
+        ScreenBuffer buffer;
+        const std::string title = mode == TrafficPeriodMode::Day ? "按日流量"
+                                : mode == TrafficPeriodMode::Year ? "按年流量"
+                                                                  : "按月流量";
+        const auto rows = loadTrafficDeltasForPeriod(mode, period);
+        const auto byPort = aggregateTrafficByPort(rows);
+    buffer.add("统计口径: 系统本地时间 " + period + "，按端口聚合上行/下行。");
+        buffer.add("历史目录: " + kTrafficHistoryDir);
+        if (rows.empty()) {
+            buffer.add(ansi::yellow + std::string("该时间段还没有采样增量。") + ansi::plain);
+            buffer.add("如果刚开启统计，这是正常现象：第一轮采样建立基线，下一轮采样才会产生增量。");
+            buffer.add("想确认底层实时计数是否在增长，可返回“流量统计 -> 实时明细”。");
+            buffer.add("");
+        }
+        buffer.add("> 端口汇总");
+        addTrafficSummaryTable(buffer, byPort, 50, "暂无采样增量", TrafficGroupMode::Port);
+        buffer.add("");
+        buffer.add("> IP 明细");
+        addTrafficSummaryTable(buffer, aggregateTrafficByIp(rows), 50, "暂无采样增量", false);
+        pushResult(title + " " + period, buffer);
+    }
+
+    void actionPromptTrafficPeriod(TrafficPeriodMode mode) {
+        const std::string title = mode == TrafficPeriodMode::Day ? "按日查看"
+                                : mode == TrafficPeriodMode::Year ? "按年查看"
+                                                                  : "按月查看";
+        const std::string sample = mode == TrafficPeriodMode::Day ? "示例: 2026-05-04"
+                                  : mode == TrafficPeriodMode::Year ? "示例: 2026"
+                                                                    : "示例: 2026-05";
+        PromptAnswer answer = promptLine(title, {sample, "时间按服务器系统本地时区解释。"}, "时间: ");
+        if (!answer.ok) {
+            return;
+        }
+        const std::string period = trim(answer.value);
+        if (!isValidTrafficPeriodLabel(mode, period)) {
+            ScreenBuffer buffer;
+            buffer.add(ansi::yellow + std::string("时间格式不合法。") + ansi::plain);
+            buffer.add(sample);
+            pushResult(title, buffer);
+            return;
+        }
+        actionShowTrafficPeriod(mode, period);
+    }
+
     void actionShowTrafficRanking() {
-        renderBusy("流量排行", "正在读取 nft 统计数据...");
+        renderBusy("实时累计明细", "正在读取底层实时计数...");
         ScreenBuffer buffer;
         if (!trafficTableEnabled()) {
-            buffer.add(ansi::yellow + std::string("统计表未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
-            pushResult("流量排行", buffer);
+            buffer.add(ansi::yellow + std::string("底层统计规则未启用。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
+            pushResult("实时累计明细", buffer);
             return;
         }
         const auto rows = collectTrafficRows();
-        buffer.add("> 端口总量");
+        buffer.add("统计口径: 底层实时累计计数，适合确认规则是否正在增长；年月日趋势请看“本月/今日/按日/月/年查看”。");
+        buffer.add("提示: 这个页面会读取底层规则，数据多时比仪表盘慢。");
+        buffer.add("");
+        buffer.add("> 端口排行");
         addTrafficSummaryTable(buffer, aggregateTrafficByPort(rows), 30, "暂无匹配流量", TrafficGroupMode::Port);
         buffer.add("");
         buffer.add("> IP 总量");
@@ -4640,12 +5531,13 @@ private:
         buffer.add("");
         buffer.add("> IP + 端口明细");
         addTrafficSummaryTable(buffer, aggregateTrafficByIpPort(rows), 80, "暂无匹配流量", TrafficGroupMode::IpPort);
-        pushResult("流量排行", buffer);
+        pushResult("实时累计明细", buffer);
     }
 
-    void actionInstallTraffic(bool resetOnly) {
-        PromptAnswer ports = promptLine(resetOnly ? "重置流量统计" : "开启流量统计",
-                                        {"输入需要统计的端口列表，支持单端口、逗号和范围。", "示例: 80,443,10000-10100"},
+    void actionInstallTraffic() {
+        PromptAnswer ports = promptLine("开启/追加统计端口",
+                                        {"默认追加到现有端口，不清空已有统计。",
+                                         "输入需要统计的服务端口，支持单端口、逗号和范围。示例: 80,443,10000-10100"},
                                         "端口列表: ");
         if (!ports.ok) {
             return;
@@ -4655,60 +5547,116 @@ private:
             ScreenBuffer buffer;
             buffer.add(ansi::yellow + std::string("端口列表不合法。") + ansi::plain);
             buffer.add("示例: 80,443,10000-10100");
-            pushResult(resetOnly ? "重置流量统计" : "开启流量统计", buffer);
+            pushResult("开启/追加统计端口", buffer);
             return;
         }
 
-        if (!confirmYesNo("将重建 nft 统计表，旧统计数据会清空。端口: " + value, false)) {
+        std::set<int> requestedPorts;
+        expandPortList(value, requestedPorts);
+        std::set<int> finalPorts = requestedPorts;
+        std::set<int> managed;
+        managed = detectExistingTrafficPorts();
+        finalPorts.insert(managed.begin(), managed.end());
+        if (!confirmAppendTrafficPorts(managed, requestedPorts, finalPorts)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
-            pushResult(resetOnly ? "重置流量统计" : "开启流量统计", buffer);
+            pushResult("开启/追加统计端口", buffer);
             return;
         }
 
-        const std::string table = "inet " + kIpTrafficTable;
-        const std::string portSet = "{ " + value + " }";
-        std::vector<std::string> commands = {
-            "nft delete table " + table + " 2>/dev/null || true",
-            nftCommand("add table " + table),
-            nftCommand("add chain " + table + " input_account { type filter hook input priority -150; policy accept; }"),
-            nftCommand("add chain " + table + " output_account { type filter hook output priority -150; policy accept; }"),
-            nftCommand("add chain " + table + " forward_account { type filter hook forward priority -150; policy accept; }"),
-            nftCommand("add set " + table + " ipv4_download { type ipv4_addr . inet_service; flags dynamic; counter; }"),
-            nftCommand("add set " + table + " ipv4_upload { type ipv4_addr . inet_service; flags dynamic; counter; }"),
-            nftCommand("add set " + table + " ipv6_download { type ipv6_addr . inet_service; flags dynamic; counter; }"),
-            nftCommand("add set " + table + " ipv6_upload { type ipv6_addr . inet_service; flags dynamic; counter; }"),
-            nftCommand("add rule " + table + " input_account tcp dport " + portSet + " update @ipv4_download { ip saddr . tcp dport }"),
-            nftCommand("add rule " + table + " input_account udp dport " + portSet + " update @ipv4_download { ip saddr . udp dport }"),
-            nftCommand("add rule " + table + " input_account meta nfproto ipv6 tcp dport " + portSet + " update @ipv6_download { ip6 saddr . tcp dport }"),
-            nftCommand("add rule " + table + " input_account meta nfproto ipv6 udp dport " + portSet + " update @ipv6_download { ip6 saddr . udp dport }"),
-            nftCommand("add rule " + table + " output_account tcp sport " + portSet + " update @ipv4_upload { ip daddr . tcp sport }"),
-            nftCommand("add rule " + table + " output_account udp sport " + portSet + " update @ipv4_upload { ip daddr . udp sport }"),
-            nftCommand("add rule " + table + " output_account meta nfproto ipv6 tcp sport " + portSet + " update @ipv6_upload { ip6 daddr . tcp sport }"),
-            nftCommand("add rule " + table + " output_account meta nfproto ipv6 udp sport " + portSet + " update @ipv6_upload { ip6 daddr . udp sport }"),
-            nftCommand("add rule " + table + " forward_account tcp dport " + portSet + " update @ipv4_download { ip saddr . tcp dport }"),
-            nftCommand("add rule " + table + " forward_account udp dport " + portSet + " update @ipv4_download { ip saddr . udp dport }"),
-            nftCommand("add rule " + table + " forward_account tcp sport " + portSet + " update @ipv4_upload { ip daddr . tcp sport }"),
-            nftCommand("add rule " + table + " forward_account udp sport " + portSet + " update @ipv4_upload { ip daddr . udp sport }"),
-            nftCommand("add rule " + table + " forward_account meta nfproto ipv6 tcp dport " + portSet + " update @ipv6_download { ip6 saddr . tcp dport }"),
-            nftCommand("add rule " + table + " forward_account meta nfproto ipv6 udp dport " + portSet + " update @ipv6_download { ip6 saddr . udp dport }"),
-            nftCommand("add rule " + table + " forward_account meta nfproto ipv6 tcp sport " + portSet + " update @ipv6_upload { ip6 daddr . tcp sport }"),
-            nftCommand("add rule " + table + " forward_account meta nfproto ipv6 udp sport " + portSet + " update @ipv6_upload { ip6 daddr . udp sport }"),
-        };
-        renderBusy(resetOnly ? "重置流量统计" : "开启流量统计", "正在应用 nft 规则...");
+        const bool updatePortSetOnly = trafficTrackedPortsSetEnabled();
+        std::vector<std::string> commands = updatePortSetOnly
+            ? trafficPortSetUpdateCommands(finalPorts)
+            : trafficAccountingRuleCommands(finalPorts, false);
+        std::string storeError;
+        storeTrackedTrafficPorts(finalPorts, storeError);
+        std::string timerError;
+        const bool timerWritten = writeTrafficSnapshotTimerUnits("", timerError);
+        if (timerWritten && Shell::exists("systemctl")) {
+            commands.push_back("systemctl daemon-reload");
+            commands.push_back("systemctl enable --now " + kTrafficSnapshotTimer);
+        }
+        renderBusy("开启/追加统计端口", "正在应用统计规则...");
         cachedDashboardValid() = false;
-        pushResult(resetOnly ? "重置流量统计" : "开启流量统计", runCommandList(commands));
+        ScreenBuffer buffer = runCommandList(commands);
+        if (updatePortSetOnly) {
+            buffer.add("已只更新统计端口集合，没有重建底层管理链。");
+        } else {
+            buffer.add("已把旧规则迁移为端口集合；保留实时计数和历史数据。之后追加端口只更新端口集合。");
+        }
+        const TrafficSnapshotResult snapshotResult = recordTrafficSnapshot();
+        buffer.add("");
+        buffer.add("> 历史采样基线");
+        buffer.add(snapshotResult.ok ? ansi::green + std::string("已记录一次基线采样。") + ansi::plain
+                                     : ansi::yellow + std::string("基线采样未完成: ") + snapshotResult.message + ansi::plain);
+        buffer.add("说明: 第一轮采样用于建立基线，下一轮采样后日/月/年视图开始出现增量。");
+        if (!storeError.empty()) {
+            buffer.add(ansi::yellow + std::string("端口记录写入失败: ") + storeError + ansi::plain);
+        }
+        if (!timerWritten) {
+            buffer.add(ansi::yellow + std::string("后台采样 timer 未安装: ") + timerError + ansi::plain);
+        } else {
+            buffer.add("后台采样: " + kTrafficSnapshotTimer + " 每 5 分钟记录一次历史增量。");
+        }
+        pushResult("开启/追加统计端口", buffer);
+    }
+
+    void actionRemoveTrafficPorts() {
+        const std::set<int> existingPorts = detectExistingTrafficPorts();
+        if (existingPorts.empty()) {
+            ScreenBuffer buffer;
+            buffer.add(ansi::yellow + std::string("当前没有记录到正在统计的端口。") + ansi::plain);
+            buffer.add("如需开始统计，进入“流量统计 -> 开启/追加端口”。");
+            pushResult("删除统计端口", buffer);
+            return;
+        }
+        PromptAnswer ports = promptLine("删除统计端口",
+                                        {"输入要停止统计的端口。不会删除历史数据，也不会重建整套规则。",
+                                         "当前统计端口: " + humanPortList(existingPorts),
+                                         "示例: 8080,8443,10000-10010"},
+                                        "端口列表: ");
+        if (!ports.ok) {
+            return;
+        }
+        const std::string value = removeSpaces(ports.value);
+        if (!isSafePortList(value)) {
+            ScreenBuffer buffer;
+            buffer.add(ansi::yellow + std::string("端口列表不合法。") + ansi::plain);
+            buffer.add("示例: 8080,8443,10000-10010");
+            pushResult("删除统计端口", buffer);
+            return;
+        }
+        std::set<int> requestedPorts;
+        expandPortList(value, requestedPorts);
+        const std::set<int> finalPorts = setDifference(existingPorts, requestedPorts);
+        if (!confirmRemoveTrafficPorts(existingPorts, requestedPorts, finalPorts)) {
+            ScreenBuffer buffer;
+            buffer.add("操作已取消。");
+            pushResult("删除统计端口", buffer);
+            return;
+        }
+        renderBusy("删除统计端口", "正在更新统计端口集合...");
+        std::string storeError;
+        storeTrackedTrafficPorts(finalPorts, storeError);
+        cachedDashboardValid() = false;
+        ScreenBuffer buffer = runCommandList(trafficPortSetUpdateCommands(finalPorts));
+        if (!storeError.empty()) {
+            buffer.add(ansi::yellow + std::string("端口记录写入失败: ") + storeError + ansi::plain);
+        }
+        buffer.add("");
+        buffer.add("历史数据已保留；被删除端口不会继续产生新的采样增量。");
+        pushResult("删除统计端口", buffer);
     }
 
     void actionRemoveTrafficAccounting() {
         renderBusy("删除流量统计", "正在检查统计表...");
         if (!trafficTableEnabled()) {
             ScreenBuffer buffer;
-            buffer.add("统计表未启用，无需删除。");
+            buffer.add("底层统计规则未启用，无需删除。");
             pushResult("删除流量统计", buffer);
             return;
         }
-        if (!confirmYesNo("将删除 inet " + kIpTrafficTable + " 并清空所有统计。", false)) {
+        if (!confirmYesNo("将删除流量统计规则并清空实时计数。历史年月日数据保留。", false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
             pushResult("删除流量统计", buffer);
@@ -4719,16 +5667,18 @@ private:
     }
 
     void actionRawNftTable() {
-        renderBusy("原始 nft 表", "正在读取 nft 表...");
+        renderBusy("底层计数规则", "正在读取 nftables 底层规则...");
         CommandResult result = Shell::capture("nft list table inet " + kIpTrafficTable + " 2>/dev/null || true");
         ScreenBuffer buffer;
+        buffer.add("以下是 nftables 原始输出，主要用于排障；日/月/年统计请回到“流量统计”查看。");
+        buffer.add("");
         const std::string output = trim(result.output);
         if (output.empty()) {
             buffer.add("(无输出，统计表可能未启用)");
         } else {
             buffer.addAll(splitLines(output));
         }
-        pushResult("原始 nft 表", buffer);
+        pushResult("底层计数规则", buffer);
     }
 
     void actionSecurityStatus() {
@@ -6275,61 +7225,33 @@ inline ScreenBuffer dashboardBufferForCli() {
     buffer.add(ansi::bold + kName + " v" + kVersion + ansi::plain);
     buffer.add(ansi::gray + std::string("流量/端口优先的服务器防护仪表盘") + ansi::plain);
     buffer.add(ansi::gray + std::string(72, '-') + ansi::plain);
+    buffer.add(dashboardFastHeaderLine());
 
-    std::ostringstream deps;
-    deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow)) << "  ";
-    const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl"};
-    for (const auto &tool : tools) {
-        deps << tool << " " << Ui::statusBadge(Shell::exists(tool), "可用", "缺失") << "  ";
-    }
-    buffer.add(deps.str());
+    const bool tableEnabled = trafficHistoryConfiguredFast();
+    const std::set<int> trackedPorts = loadTrackedTrafficPorts();
+    const std::string month = currentTrafficPeriodLabel(TrafficPeriodMode::Month);
+    const auto totalRows = aggregateTrafficHistoryByPort(TrafficPeriodMode::Month, month);
 
-    const bool tableEnabled = trafficTableEnabled();
-    const auto trafficRows = tableEnabled ? collectTrafficRows() : std::vector<TrafficRow>{};
-    const auto totalRows = aggregateTrafficByPort(trafficRows);
-    const std::string f2b = serviceState("fail2ban");
-    const std::string ufw = ufwState();
-
-    addSection(buffer, "流量 / 端口概览");
-    buffer.add(std::string("统计表: ") +
-               (tableEnabled ? Ui::badge("已启用", ansi::green) : Ui::badge("未启用", ansi::yellow)) +
-               "  nft=inet " + kIpTrafficTable);
+    addSection(buffer, "本月端口流量");
+    buffer.add("统计口径: 系统本地时间 " + month + "，按端口聚合上行/下行。");
+    buffer.add(std::string("历史采样: ") +
+               (tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
+    buffer.add("统计端口: " + std::to_string(trackedPorts.size()) + " 个  " + humanPortList(trackedPorts));
     if (!tableEnabled) {
-        buffer.add(ansi::yellow + std::string("端口流量统计未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
+        buffer.add(ansi::yellow + std::string("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
+    } else if (totalRows.empty()) {
+        buffer.add(ansi::yellow + std::string("本月还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。") + ansi::plain);
     }
-    addTableLines(buffer, trafficSummaryTable(totalRows, 8, TrafficGroupMode::Port), tableEnabled ? "暂无匹配流量" : "统计表未启用");
+    addTableLines(buffer, trafficSummaryTable(totalRows, 8, TrafficGroupMode::Port), tableEnabled ? "本月暂无采样增量" : "历史采样未初始化");
 
-    addSection(buffer, "UFW拦截风险来源Top");
-    buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
-    addTableLines(buffer, ufwHitsTable(collectUfwSourceTop()), "该窗口暂无公网 UFW BLOCK/AUDIT 记录。可进入“安全中心 -> 分析追查”查看更长时间段。");
-
-    addSection(buffer, "防护组件状态");
-    Table services({"组件", "状态", "含义", "建议"}, {18, 12, 30, 18});
-    services.add({"fail2ban", normalizedServiceState(f2b), serviceMeaning("fail2ban", f2b), serviceSuggestion("fail2ban", f2b)});
-    services.add({"ufw", normalizedServiceState(ufw), serviceMeaning("ufw", ufw), serviceSuggestion("ufw", ufw)});
-    addTableLines(buffer, services);
-
-    addSection(buffer, "Fail2ban 默认策略");
-    const F2bJailConfig ssh = readJailConfig(kRule1Jail);
-    const F2bJailConfig scan = readJailConfig(kRule2Jail);
-    const F2bJailRuntimeInfo sshRuntime = fail2banJailRuntimeStatus(kRule1Jail);
-    const F2bJailRuntimeInfo scanRuntime = fail2banJailRuntimeStatus(kRule2Jail);
-    Table policies({"策略", "定位", "jail", "启用", "阈值", "窗口", "封禁", "动作"}, {24, 16, 10, 10, 8, 9, 9, 16});
-    policies.add({kRule1Jail, "SSH 登录",
-                  sshRuntime.label,
-                  configValueOr(ssh.enabled, normalizedServiceState(f2b) == "运行" ? "随服务" : "待确认"),
-                  configValueOr(ssh.maxretry, "5"),
-                  configValueOr(ssh.findtime, "3600"),
-                  configValueOr(ssh.bantime, "600"),
-                  configValueOr(ssh.banaction, "默认")});
-    policies.add({kRule2Jail, "UFW 慢扫",
-                  scanRuntime.label,
-                  configValueOr(scan.enabled, "false"),
-                  configValueOr(scan.maxretry, "50"),
-                  configValueOr(scan.findtime, "3600"),
-                  configValueOr(scan.bantime, "1d"),
-                  configValueOr(scan.banaction, "ufw-drop")});
-    addTableLines(buffer, policies);
+    addSection(buffer, "下一步");
+    if (!tableEnabled) {
+        buffer.add("sudo ltg 进入“流量统计 -> 开启/追加端口”后开始采样。");
+    } else if (totalRows.empty()) {
+        buffer.add("等待下一轮 5 分钟采样，或用 sudo ltg --traffic-snapshot 手动记录一次。");
+    } else {
+        buffer.add("趋势看流量统计，实时排障看 --ip-traffic 或 TUI 下钻检查。");
+    }
     return buffer;
 }
 
@@ -6339,20 +7261,38 @@ inline void renderDashboard(bool) {
 
 inline void showTrafficRanking() {
     ScreenBuffer buffer;
-    addSection(buffer, "流量排行");
+    addSection(buffer, "实时累计明细");
     if (!trafficTableEnabled()) {
-        buffer.add(ansi::yellow + std::string("统计表未启用。进入“流量统计 -> 开启统计”启用。") + ansi::plain);
+        buffer.add(ansi::yellow + std::string("底层统计规则未启用。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
         printScreenBuffer(buffer);
         return;
     }
     const auto rows = collectTrafficRows();
-    addSection(buffer, "端口总量");
+    buffer.add("统计口径: 底层实时累计计数。年月日统计来自后台采样历史，仪表盘默认展示本月端口汇总。");
+    addSection(buffer, "端口排行");
     addTableLines(buffer, trafficSummaryTable(aggregateTrafficByPort(rows), 30, TrafficGroupMode::Port), "暂无匹配流量");
     addSection(buffer, "IP 总量");
     addTableLines(buffer, trafficSummaryTable(aggregateTrafficByIp(rows), 30, false), "暂无匹配流量");
     addSection(buffer, "IP + 端口明细");
     addTableLines(buffer, trafficSummaryTable(aggregateTrafficByIpPort(rows), 50, TrafficGroupMode::IpPort), "暂无匹配流量");
     printScreenBuffer(buffer);
+}
+
+inline int cliTrafficSnapshot() {
+    const TrafficSnapshotResult result = recordTrafficSnapshot();
+    ScreenBuffer buffer;
+    addSection(buffer, "流量历史采样");
+    buffer.add("采样时间: " + dateTimeStamp(result.sampledAt));
+    buffer.add("历史目录: " + kTrafficHistoryDir);
+    buffer.add(std::string("结果: ") + (result.ok ? "成功" : "失败"));
+    buffer.add("实时行数: " + std::to_string(result.liveRows));
+    buffer.add("增量行数: " + std::to_string(result.deltaRows));
+    buffer.add("重置行数: " + std::to_string(result.resetRows));
+    if (!result.message.empty()) {
+        buffer.add("说明: " + result.message);
+    }
+    printScreenBuffer(buffer);
+    return result.ok ? 0 : 1;
 }
 
 inline void dependencyDoctor() {
@@ -6475,6 +7415,22 @@ inline int selfTest() {
 
     check("端口列表校验", isSafePortList("22,80,443,10000-10010") &&
                                !isSafePortList("0,70000") && !isSafePortList("80,,443"));
+    std::set<int> expandedPorts;
+    expandPortList("443,80,10000-10002", expandedPorts);
+    const std::set<int> diffPorts = setDifference(expandedPorts, std::set<int>{80, 443});
+    const auto appendCommands = trafficAccountingRuleCommands(expandedPorts, false);
+    const auto resetCommands = trafficAccountingRuleCommands(expandedPorts, true);
+    const auto setOnlyCommands = trafficPortSetUpdateCommands(expandedPorts);
+    check("统计端口追加命令", expandedPorts.size() == 5 && expandedPorts.count(80) == 1 &&
+                                  diffPorts.size() == 3 && diffPorts.count(10001) == 1 &&
+                                  appendCommands.front().find("delete table") == std::string::npos &&
+                                  std::none_of(setOnlyCommands.begin(), setOnlyCommands.end(), [](const std::string &cmd) {
+                                      return cmd.find("add chain") != std::string::npos || cmd.find("delete chain") != std::string::npos;
+                                  }) &&
+                                  std::any_of(appendCommands.begin(), appendCommands.end(), [](const std::string &cmd) {
+                                      return cmd.find("tracked_ports") != std::string::npos;
+                                  }) &&
+                                  resetCommands.front().find("delete table") != std::string::npos);
     check("单端口校验", isSafeSinglePort("22") && isSafeSinglePort("65535") &&
                             !isSafeSinglePort("0") && !isSafeSinglePort("80,443") &&
                             !isSafeSinglePort("80-90") && !isSafeSinglePort("abc"));
@@ -6552,6 +7508,23 @@ inline int selfTest() {
     check("端口流量分组", byPort.size() == 1 && byPort[0].port == "443" &&
                               byPort[0].downloadBytes == 6144 && byPort[0].uploadBytes == 1024 &&
                               byPort[0].totalBytes() == 7168);
+    std::map<std::string, TrafficRow> previousTraffic;
+    previousTraffic[trafficKey(traffic[0])] = traffic[0];
+    TrafficRow increased = traffic[0];
+    increased.bytes = 4096;
+    increased.packets = 9;
+    std::size_t resetRows = 0;
+    const auto deltas = computeTrafficDeltas({increased}, previousTraffic, 1777777777, resetRows);
+    TrafficRow resetRow = traffic[0];
+    resetRow.bytes = 100;
+    resetRow.packets = 1;
+    const auto resetDeltas = computeTrafficDeltas({resetRow}, previousTraffic, 1777777777, resetRows);
+    check("流量采样增量计算", deltas.size() == 1 && deltas[0].row.bytes == 2048 &&
+                                  deltas[0].row.packets == 2 && resetDeltas.empty() && resetRows == 1);
+    check("本地时间分桶格式", isValidTrafficPeriodLabel(TrafficPeriodMode::Day, localDayStamp(std::time(nullptr))) &&
+                                  isValidTrafficPeriodLabel(TrafficPeriodMode::Month, localMonthStamp(std::time(nullptr))) &&
+                                  isValidTrafficPeriodLabel(TrafficPeriodMode::Year, localYearStamp(std::time(nullptr))) &&
+                                  !isValidTrafficPeriodLabel(TrafficPeriodMode::Day, "05-04"));
 
     const auto merged = mergeRanges({{10, 20}, {1, 5}, {6, 9}, {30, 40}});
     check("range 合并", merged.size() == 2 && merged[0].first == 1 && merged[0].second == 20 &&
@@ -6592,7 +7565,13 @@ inline int selfTest() {
     DashboardSnapshot renderOnlySnapshot;
     renderOnlySnapshot.tableEnabled = true;
     renderOnlySnapshot.defaultPolicies = collectDefaultFail2banPolicies(false);
-    check("仪表盘渲染不触发运行态采集", !buildDashboardBuffer(&renderOnlySnapshot, false, '|').lines().empty());
+    const auto dashboardLines = buildDashboardBuffer(&renderOnlySnapshot, false, '|').lines();
+    const bool dashboardAvoidsLiveProbe = std::none_of(dashboardLines.begin(), dashboardLines.end(), [](const std::string &line) {
+        return line.find("nft 可用") != std::string::npos ||
+               line.find("fail2ban-client 可用") != std::string::npos ||
+               line.find("统计表:") != std::string::npos;
+    });
+    check("仪表盘渲染不触发运行态采集", !dashboardLines.empty() && dashboardAvoidsLiveProbe);
     check("危险命令 helper", fail2banSetIpCommand("sshd", "banip", "1.2.3.4").find("fail2ban-client set 'sshd' banip '1.2.3.4'") != std::string::npos &&
                                ufwDenyFromCommand("1.2.3.4", "case").find("comment 'case'") != std::string::npos &&
                                ufwDeleteDenyFromCommand("1.2.3.4").find("--force delete deny") != std::string::npos);
@@ -6676,6 +7655,7 @@ inline void usage(const char *argv0) {
     std::cout << "选项:\n";
     std::cout << "  --status          打印仪表盘\n";
     std::cout << "  --ip-traffic      查看端口优先的流量排行\n";
+    std::cout << "  --traffic-snapshot 内部命令：记录一次流量历史采样\n";
     std::cout << "  --doctor          检查依赖\n";
     std::cout << "  --audit           查看日志摘要\n";
     std::cout << "  --f2b-audit       防护链路双日志核验\n";
@@ -6738,6 +7718,9 @@ inline int appMain(int argc, char **argv) {
         if (arg == "--ip-traffic") {
             showTrafficRanking();
             return 0;
+        }
+        if (arg == "--traffic-snapshot") {
+            return cliTrafficSnapshot();
         }
         if (arg == "--doctor" || arg == "--check-deps") {
             dependencyDoctor();

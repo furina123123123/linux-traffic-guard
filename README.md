@@ -39,12 +39,13 @@ git clone https://github.com/furina123123123/linux-traffic-guard.git && cd linux
 
 ## Features
 
-- Dashboard: port-grouped traffic, UFW blocked-source risk ranking, fail2ban/UFW state, and suggested operations.
-- Traffic accounting: nftables-based IPv4/IPv6 upload/download counters, grouped by port by default, with IP and IP+port drill-down views.
+- Dashboard: current-month port traffic from the local history store, clear empty states, and next-step guidance; live service and dependency probes are kept out of the first render for faster loading.
+- Traffic accounting: append/remove tracked ports without rebuilding by default, visible tracked-port lists, background snapshots every 5 minutes, and day/month/year views similar to `vnStat`.
 - Security center: daily workflows organized as overview, investigation, policy configuration, remediation, service checks, and diagnostics.
 - UFW analysis: parses UFW `BLOCK`/`AUDIT`/`ALLOW` events, aggregates by IP/port/time period, and supports IP tracing.
 - fail2ban effectiveness checks: verifies that jails are really loaded after repair and can run a reversible test ban to confirm UFW rule landing.
 - Cache: stores parsed UFW events in `/var/tmp/linux_traffic_guard_ufw_cache_v2/events.sqlite3` for faster repeated analysis.
+- Traffic history: stores sampled traffic deltas in `/var/tmp/linux_traffic_guard_traffic_history_v1/` with SQLite when available and a TSV fallback for no-SQLite builds.
 - Diagnostics: exports service status, rules, logs, nft counters, listeners, and connection snapshots to `/tmp`.
 
 ## Requirements
@@ -97,6 +98,7 @@ ltg --version
 ltg --self-test
 sudo ltg --status
 sudo ltg --ip-traffic
+sudo ltg --traffic-snapshot
 sudo ltg --ufw-analyze 24h
 sudo ltg --f2b-audit
 sudo ltg --doctor

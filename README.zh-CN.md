@@ -39,12 +39,13 @@ git clone https://github.com/furina123123123/linux-traffic-guard.git && cd linux
 
 ## 功能概览
 
-- 仪表盘：展示端口分组流量、UFW 拦截风险来源 Top、防护组件状态和建议动作。
-- 流量统计：基于 nftables 记录 IPv4/IPv6、上传/下载，默认按端口分组，并保留 IP 与 IP+端口明细。
+- 仪表盘：默认展示本月端口流量，来自本地历史库，并提供清晰空状态和下一步建议；实时服务和依赖探测不阻塞首屏。
+- 流量统计：默认不重建，支持追加/删除统计端口，展示已统计端口列表，后台每 5 分钟采样，支持类似 `vnStat` 的日/月/年视图。
 - 安全中心：按安全总览、分析追查、策略配置、处置修复、服务诊断组织日常运维路径。
 - 威胁分析：解析 UFW `BLOCK`/`AUDIT`/`ALLOW` 日志，按 IP、端口、时间段聚合，并支持指定 IP 下钻。
 - fail2ban 实效核验：策略安装/修复后检查 jail 是否真正加载，并可用临时测试 IP 验证 UFW deny 是否落地。
 - SQLite 缓存：使用 `/var/tmp/linux_traffic_guard_ufw_cache_v2/events.sqlite3` 缓存日志事件。
+- 流量历史：使用 `/var/tmp/linux_traffic_guard_traffic_history_v1/` 保存采样增量；有 SQLite 时使用 SQLite，无 SQLite 编译路径使用 TSV fallback。
 - 诊断导出：收集服务状态、规则、日志、nft 统计和连接快照到 `/tmp`。
 
 ## 支持环境
@@ -97,6 +98,7 @@ ltg --version
 ltg --self-test
 sudo ltg --status
 sudo ltg --ip-traffic
+sudo ltg --traffic-snapshot
 sudo ltg --ufw-analyze 24h
 sudo ltg --f2b-audit
 sudo ltg --doctor
