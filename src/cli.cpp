@@ -6259,11 +6259,16 @@ inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &no
             sqlite3_close(db);
             std::time_t cachedStart = 0;
             std::time_t cachedEnd = 0;
-            if (latestOverlappingRange(start, roundedEnd, ranges, cachedStart, cachedEnd) &&
-                collectUfwSourceTopSqlite(cachedStart, cachedEnd, hits)) {
-                note = "来自 UFW 分析缓存(" + dateTimeStamp(cachedStart) + " - " + dateTimeStamp(cachedEnd) +
+            if (rangeCovered(start, roundedEnd, ranges) &&
+                collectUfwSourceTopSqlite(start, roundedEnd, hits)) {
+                note = "来自 UFW 分析缓存(" + dateTimeStamp(start) + " - " + dateTimeStamp(roundedEnd) +
                        ")；进入“安全中心 -> 分析追查”可刷新。";
                 return true;
+            }
+            if (latestOverlappingRange(start, roundedEnd, ranges, cachedStart, cachedEnd)) {
+                note = "安全分析缓存只覆盖 " + dateTimeStamp(cachedStart) + " - " + dateTimeStamp(cachedEnd) +
+                       "，不足最近24小时。进入“安全中心 -> 分析追查”刷新后再显示摘要。";
+                return false;
             }
         }
     }
@@ -6271,10 +6276,10 @@ inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &no
     const auto ranges = readUfwCacheRanges();
     std::time_t cachedStart = 0;
     std::time_t cachedEnd = 0;
-    if (latestOverlappingRange(start, roundedEnd, ranges, cachedStart, cachedEnd)) {
+    if (rangeCovered(start, roundedEnd, ranges)) {
         std::map<std::string, UfwHit> grouped;
         std::map<std::string, std::map<std::string, std::uint64_t>> ports;
-        for (const auto &event : readUfwCacheEvents(cachedStart, cachedEnd)) {
+        for (const auto &event : readUfwCacheEvents(start, roundedEnd)) {
             if (event.action != "BLOCK" && event.action != "AUDIT") {
                 continue;
             }
@@ -6303,9 +6308,14 @@ inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &no
         if (hits.size() > 10) {
             hits.resize(10);
         }
-        note = "来自 UFW 分析缓存(" + dateTimeStamp(cachedStart) + " - " + dateTimeStamp(cachedEnd) +
+        note = "来自 UFW 分析缓存(" + dateTimeStamp(start) + " - " + dateTimeStamp(roundedEnd) +
                ")；进入“安全中心 -> 分析追查”可刷新。";
         return true;
+    }
+    if (latestOverlappingRange(start, roundedEnd, ranges, cachedStart, cachedEnd)) {
+        note = "安全分析缓存只覆盖 " + dateTimeStamp(cachedStart) + " - " + dateTimeStamp(cachedEnd) +
+               "，不足最近24小时。进入“安全中心 -> 分析追查”刷新后再显示摘要。";
+        return false;
     }
 #endif
     note = "暂无可用安全分析缓存。进入“安全中心 -> 分析追查”跑一次最近24小时/7天后，仪表盘会显示缓存摘要。";
@@ -9745,6 +9755,14 @@ inline int selfTest() {
     check("端口级vnStat聚合", periodPortRows.size() == 1 && periodPortRows[0].port == "443" &&
                                     periodPortRows[0].downloadBytes == 6144 &&
                                     periodPortRows[0].uploadBytes == 1024);
+    const auto periodPortTableLines = tableLines(trafficPeriodPortTable(periodPortRows, TrafficPeriodMode::Day));
+    check("端口级流量表不展示Top IP", !periodPortTableLines.empty() &&
+                                            joinWords(periodPortTableLines, "\n").find("Top IP") == std::string::npos);
+    Table cnTable({"日期", "入站", "出站"}, {12, 12, 12});
+    cnTable.add({"2026-05-04", "3.54 MiB", "45.59 MiB"});
+    const auto cnTableLines = tableLines(cnTable);
+    check("中文表格列宽对齐", cnTableLines.size() >= 3 &&
+                                  visibleWidth(cnTableLines[0]) == visibleWidth(cnTableLines[2]));
     std::map<std::string, TrafficRow> previousTraffic;
     previousTraffic[trafficKey(traffic[0])] = traffic[0];
     TrafficRow increased = traffic[0];
@@ -9784,6 +9802,9 @@ inline int selfTest() {
     check("缓存窗口重叠选择", latestOverlappingRange(100, 300, {{1, 90}, {120, 180}, {200, 260}}, overlapStart, overlapEnd) &&
                                   overlapStart == 200 && overlapEnd == 260 &&
                                   !latestOverlappingRange(100, 300, {{1, 90}, {301, 400}}, overlapStart, overlapEnd));
+    check("仪表盘安全缓存要求完整覆盖", latestOverlappingRange(100, 300, {{120, 180}, {200, 260}}, overlapStart, overlapEnd) &&
+                                                !rangeCovered(100, 300, {{120, 180}, {200, 260}}) &&
+                                                rangeCovered(100, 300, {{90, 180}, {180, 320}}));
 
     IniConfig ini;
     ini.loadString("[sshd]\nmaxretry = 5\n\n[DEFAULT]\nignoreip = 127.0.0.1\n");

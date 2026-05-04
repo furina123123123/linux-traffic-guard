@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.23 - 2026-05-04
+
+### Fixed
+
+- Fixed dashboard UFW security summaries so a partial cache overlap is no longer presented as a complete recent-24-hour summary.
+- Added regression coverage for traffic tables without Top IP columns and display-width alignment for Chinese table headers.
+
 ## 4.12.22 - 2026-05-04
 
 ### Changed
