@@ -2466,17 +2466,30 @@ inline std::string mmdbLookupString(const std::string &ip, const std::vector<std
     return parseMmdbLookupString(Shell::capture(command.str()).output);
 }
 
-inline std::string ipGeoLabel(const std::string &rawIp) {
-    static std::mutex mutex;
+inline std::map<std::string, std::string> &ipGeoLabelCache() {
     static std::map<std::string, std::string> cache;
+    return cache;
+}
+
+inline std::mutex &ipGeoLabelCacheMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+inline void clearIpGeoLabelCache() {
+    std::lock_guard<std::mutex> lock(ipGeoLabelCacheMutex());
+    ipGeoLabelCache().clear();
+}
+
+inline std::string ipGeoLabel(const std::string &rawIp) {
     std::string ip;
     if (!normalizePublicIpAddress(rawIp, ip)) {
         return "-";
     }
     {
-        std::lock_guard<std::mutex> lock(mutex);
-        const auto found = cache.find(ip);
-        if (found != cache.end()) {
+        std::lock_guard<std::mutex> lock(ipGeoLabelCacheMutex());
+        const auto found = ipGeoLabelCache().find(ip);
+        if (found != ipGeoLabelCache().end()) {
             return found->second;
         }
     }
@@ -2489,8 +2502,8 @@ inline std::string ipGeoLabel(const std::string &rawIp) {
         label = country;
     }
     {
-        std::lock_guard<std::mutex> lock(mutex);
-        cache[ip] = label;
+        std::lock_guard<std::mutex> lock(ipGeoLabelCacheMutex());
+        ipGeoLabelCache()[ip] = label;
     }
     return label;
 }
@@ -3013,12 +3026,41 @@ inline UfwAnalysisReport analyzeUfwEvents(const std::string &title,
         evidence.cacheCovered = true;
         evidence.cacheRanges = ufwRangesSummary(ranges);
     } else {
-        events = loadLiveUfwEvents(start, end, report.sourceNote, &evidence);
-        writeUfwCacheEvents(events);
-        ranges.push_back({start, end});
+        if (forceRefresh) {
+            clearUfwAnalysisCacheFiles();
+            ranges.clear();
+        }
+        const auto gaps = missingRanges(start, end, ranges);
+        std::vector<UfwLogEvent> loaded;
+        std::string liveNote;
+        UfwLogEvidence liveEvidence;
+        for (const auto &gap : gaps) {
+            std::string note;
+            UfwLogEvidence gapEvidence;
+            auto part = loadLiveUfwEvents(gap.first, gap.second, note, &gapEvidence);
+            liveEvidence.rawMatches += gapEvidence.rawMatches;
+            liveEvidence.validPublic += gapEvidence.validPublic;
+            liveEvidence.filteredSource += gapEvidence.filteredSource;
+            liveEvidence.noDpt += gapEvidence.noDpt;
+            liveEvidence.block += gapEvidence.block;
+            liveEvidence.audit += gapEvidence.audit;
+            liveEvidence.allow += gapEvidence.allow;
+            if (!gapEvidence.liveSource.empty()) {
+                liveEvidence.liveSource = gapEvidence.liveSource;
+            }
+            if (!note.empty() && liveNote.empty()) {
+                liveNote = note;
+            }
+            loaded.insert(loaded.end(), part.begin(), part.end());
+            ranges.push_back(gap);
+        }
+        writeUfwCacheEvents(loaded);
         writeUfwCacheRanges(ranges);
+        events = readUfwCacheEvents(start, end);
+        evidence = liveEvidence;
         evidence.cacheCovered = rangeCovered(start, end, ranges);
         evidence.cacheRanges = ufwRangesSummary(ranges);
+        report.sourceNote = liveNote.empty() ? "文本缓存(补缺口)" : liveNote + " -> 文本缓存";
     }
     touchUfwCacheActivity();
     if (report.sourceNote == "文本缓存") {
@@ -9102,6 +9144,8 @@ private:
         renderBusy("安装/更新 IP 国家库", "正在下载并验证 DB-IP Lite MMDB...");
         ScreenBuffer buffer = runCommandList({dbIpLiteDownloadCommand()});
         Shell::clearExistsCache();
+        clearIpGeoLabelCache();
+        cachedDashboardValid() = false;
         buffer.add("");
         buffer.add("数据库路径: " + kDbIpLiteMmdbPath);
         buffer.add("数据库大小: " + humanBytes(fileSizeBytes(kDbIpLiteMmdbPath)));
@@ -9111,6 +9155,7 @@ private:
         }
         buffer.add("鸣谢: " + kDbIpLiteAttribution);
         buffer.add("国家/地区会显示在 UFW 来源 Top 与流量 IP 明细表中；未命中时显示 -。");
+        buffer.add("已刷新国家/地区查询缓存。");
         pushResult("安装/更新 IP 国家库", buffer);
     }
 };
@@ -9688,6 +9733,9 @@ inline int selfTest() {
     check("Vim 风格滚动快捷键", vimDown && vimHalfDown && vimPageUp && vimBottom && vimScrollProbe > 0);
     check("MMDB 输出解析", parseMmdbLookupString("  \"美国\" <utf8_string>\n") == "美国" &&
                               parseMmdbLookupString("  \"Mountain View\" <utf8_string>\n") == "Mountain View");
+    ipGeoLabelCache()["8.8.8.8"] = "-";
+    clearIpGeoLabelCache();
+    check("MMDB 查询缓存清理", ipGeoLabelCache().empty());
     check("DB-IP Lite 下载命令", dbIpLiteDownloadCommand().find(kDbIpLiteDownloadPage) != std::string::npos &&
                                   dbIpLiteDownloadCommand().find(".mmdb.gz") != std::string::npos &&
                                   dbIpLiteDownloadCommand().find(kDbIpLiteMmdbPath) != std::string::npos);

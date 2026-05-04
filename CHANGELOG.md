@@ -10,6 +10,8 @@
 - Added Vim-style TUI navigation: `j/k`, `g/G`, `Ctrl-f/Ctrl-b`, and `Ctrl-d/Ctrl-u`.
 - Added optional DB-IP IP to City Lite MMDB support for source-IP country labels, with README attribution for the free CC BY 4.0 database.
 - Made repeated UFW threat analysis loads use a fast cache-gap path instead of rescanning rotated log files for tiny recent windows.
+- Made the no-SQLite UFW analysis cache fill only missing time ranges, matching the SQLite cache behavior instead of rescanning the full window.
+- Cleared in-process source-country lookup caches after installing or updating the DB-IP MMDB so refreshed data appears immediately.
 
 ## 4.12.15 - 2026-05-04
 
