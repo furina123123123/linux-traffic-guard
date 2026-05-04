@@ -194,6 +194,24 @@ struct TrafficPeriodTotal {
     }
 };
 
+struct TrafficPeriodPortRow {
+    std::string period;
+    std::string port;
+    std::uint64_t downloadBytes = 0;
+    std::uint64_t uploadBytes = 0;
+    std::uint64_t downloadPackets = 0;
+    std::uint64_t uploadPackets = 0;
+    std::string topIps;
+
+    std::uint64_t totalBytes() const {
+        return downloadBytes + uploadBytes;
+    }
+
+    std::uint64_t totalPackets() const {
+        return downloadPackets + uploadPackets;
+    }
+};
+
 enum class TrafficPeriodMode {
     Day,
     Month,
@@ -5295,6 +5313,16 @@ inline std::vector<TrafficSummaryRow> aggregateTrafficByIpPort(const std::vector
     return aggregateTraffic(rows, TrafficGroupMode::IpPort);
 }
 
+inline std::vector<TrafficRow> filterTrafficRowsByPort(const std::vector<TrafficRow> &rows, const std::string &port) {
+    std::vector<TrafficRow> out;
+    for (const auto &row : rows) {
+        if (row.port == port) {
+            out.push_back(row);
+        }
+    }
+    return out;
+}
+
 inline std::vector<TrafficSummaryRow> aggregateTrafficHistoryByPort(TrafficPeriodMode mode, const std::string &period) {
     return loadTrafficPortSummaryForPeriod(mode, period);
 }
@@ -5344,6 +5372,38 @@ inline std::string compactTrafficSummary(const std::vector<TrafficSummaryRow> &r
         items.push_back("+" + std::to_string(rows.size() - limit));
     }
     return joinWords(items, ", ");
+}
+
+inline std::string compactTrafficIpSummaryForPort(const std::vector<TrafficRow> &rows,
+                                                  const std::string &port,
+                                                  std::size_t limit) {
+    return compactTrafficSummary(aggregateTrafficByIp(filterTrafficRowsByPort(rows, port)), TrafficGroupMode::Ip, limit);
+}
+
+inline std::vector<TrafficPeriodPortRow> trafficPeriodPortRows(
+    const std::vector<TrafficPeriodTotal> &periods,
+    const std::map<std::string, std::vector<TrafficRow>> &details,
+    std::size_t perPeriodLimit) {
+    std::vector<TrafficPeriodPortRow> out;
+    for (const auto &period : periods) {
+        const auto found = details.find(period.period);
+        if (found == details.end()) {
+            continue;
+        }
+        const auto ports = aggregateTrafficByPort(found->second);
+        for (std::size_t i = 0; i < ports.size() && i < perPeriodLimit; ++i) {
+            TrafficPeriodPortRow row;
+            row.period = period.period;
+            row.port = ports[i].port;
+            row.downloadBytes = ports[i].downloadBytes;
+            row.uploadBytes = ports[i].uploadBytes;
+            row.downloadPackets = ports[i].downloadPackets;
+            row.uploadPackets = ports[i].uploadPackets;
+            row.topIps = compactTrafficIpSummaryForPort(found->second, ports[i].port, 3);
+            out.push_back(std::move(row));
+        }
+    }
+    return out;
 }
 
 inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, TrafficGroupMode mode) {
@@ -5399,6 +5459,23 @@ inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &row
                    std::to_string(row.totalPackets()),
                    topPorts,
                    topIpPorts});
+    }
+    return table;
+}
+
+inline Table trafficPeriodPortTable(const std::vector<TrafficPeriodPortRow> &rows, TrafficPeriodMode mode) {
+    const std::string label = trafficPeriodModeColumn(mode);
+    Table table({label, "端口", "服务", "上行", "下行", "合计", "包数", "Top IP"},
+                {12, 8, 16, 11, 11, 11, 8, 36});
+    for (const auto &row : rows) {
+        table.add({row.period,
+                   row.port,
+                   serviceNameForPort(row.port),
+                   humanBytes(row.uploadBytes),
+                   humanBytes(row.downloadBytes),
+                   humanBytes(row.totalBytes()),
+                   std::to_string(row.totalPackets()),
+                   row.topIps.empty() ? "-" : row.topIps});
     }
     return table;
 }
@@ -6589,12 +6666,12 @@ private:
     }
 
     void pushTrafficMenu() {
-        pushMenu("流量统计", "像 vnStat 一样按日/月/年查看，默认按端口聚合",
+        pushMenu("流量统计", "端口级 vnStat：按日/月/年看端口，并下钻 IP",
                  {
                      {"1", "开启/追加端口", "默认追加，不清空已有统计", true, [this] { actionInstallTraffic(); }},
-                     {"2", "日流量", "滚动最近N天，或指定某一天，均带端口/IP明细", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Day); }},
-                     {"3", "月流量", "滚动最近N个月，或指定某个月，均带端口/IP明细", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Month); }},
-                     {"4", "年流量", "滚动最近N年，或指定某一年，均带端口/IP明细", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Year); }},
+                     {"2", "日流量", "端口级 vnStat -d，带端口 Top IP", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Day); }},
+                     {"3", "月流量", "端口级 vnStat -m，带端口 Top IP", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Month); }},
+                     {"4", "年流量", "端口级 vnStat -y，带端口 Top IP", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Year); }},
                      {"5", "实时明细", "较慢，读取底层实时计数和 IP 明细", false, [this] { actionShowTrafficRanking(); }},
                      {"6", "删除统计端口", "停止统计指定端口，保留历史", true, [this] { actionRemoveTrafficPorts(); }},
                      {"7", "高级：删除全部统计规则", "高风险，删除底层统计规则", true, [this] { actionRemoveTrafficAccounting(); }},
@@ -7214,13 +7291,40 @@ private:
         return buffer;
     }
 
+    void addPortIpBreakdown(ScreenBuffer &buffer,
+                            const std::vector<TrafficRow> &rows,
+                            const std::vector<TrafficSummaryRow> &ports,
+                            std::size_t portLimit,
+                            std::size_t ipLimit) {
+        if (rows.empty() || ports.empty()) {
+            return;
+        }
+        const std::size_t shown = std::min(portLimit, ports.size());
+        buffer.add("> 端口 IP 明细");
+        buffer.add("下面按端口展开来源/目标 IP。下载表示进入本机该端口；上传表示本机从该端口发出。");
+        for (std::size_t i = 0; i < shown; ++i) {
+            const auto filtered = filterTrafficRowsByPort(rows, ports[i].port);
+            buffer.add("");
+            buffer.add("> 端口 " + ports[i].port + " " + serviceNameForPort(ports[i].port) +
+                       "  上行 " + humanBytes(ports[i].uploadBytes) +
+                       " / 下行 " + humanBytes(ports[i].downloadBytes) +
+                       " / 合计 " + humanBytes(ports[i].totalBytes()));
+            addTrafficSummaryTable(buffer, aggregateTrafficByIp(filtered), ipLimit, "该端口暂无 IP 明细", TrafficGroupMode::Ip);
+        }
+        if (ports.size() > shown) {
+            buffer.add("");
+            buffer.add(ansi::gray + std::string("还有 ") + std::to_string(ports.size() - shown) +
+                       " 个端口未展开；可用绝对时间查询或实时明细继续下钻。" + ansi::plain);
+        }
+    }
+
     void actionShowTrafficPeriod(TrafficPeriodMode mode, const std::string &period) {
         ScreenBuffer buffer;
         const std::string title = trafficPeriodModeDetailTitle(mode);
         const auto rows = loadTrafficDeltasForPeriod(mode, period);
         const auto byPort = aggregateTrafficByPort(rows);
         buffer.add("查询模式: 绝对时间。");
-        buffer.add("统计口径: 系统本地时间 " + period + "，按端口和 IP:端口聚合上行/下行。");
+        buffer.add("统计口径: 系统本地时间 " + period + "，端口级 vnStat 视图；每个端口可看到 IP 明细。");
         buffer.add("历史目录: " + kTrafficHistoryDir);
         if (rows.empty()) {
             buffer.add(ansi::yellow + std::string("该时间段还没有采样增量。") + ansi::plain);
@@ -7228,14 +7332,10 @@ private:
             buffer.add("想确认底层实时计数是否在增长，可返回“流量统计 -> 实时明细”。");
             buffer.add("");
         }
-        buffer.add("> 端口汇总");
-        addTrafficSummaryTable(buffer, byPort, 50, "暂无采样增量", TrafficGroupMode::Port);
+        buffer.add("> 端口级流量");
+        addTrafficSummaryTable(buffer, byPort, 80, "暂无采样增量", TrafficGroupMode::Port);
         buffer.add("");
-        buffer.add("> IP:端口明细");
-        addTrafficSummaryTable(buffer, aggregateTrafficByIpPort(rows), 80, "暂无采样增量", TrafficGroupMode::IpPort);
-        buffer.add("");
-        buffer.add("> IP 汇总");
-        addTrafficSummaryTable(buffer, aggregateTrafficByIp(rows), 50, "暂无采样增量", false);
+        addPortIpBreakdown(buffer, rows, byPort, 12, 12);
         pushResult(title + " " + period, buffer);
     }
 
@@ -7248,27 +7348,33 @@ private:
             periods.push_back(row.period);
         }
         const auto details = loadTrafficDeltasForPeriods(mode, periods);
+        const auto portRows = trafficPeriodPortRows(rows, details, 5);
         ScreenBuffer buffer;
         buffer.add("查询模式: " + queryNote);
-        buffer.add("统计口径: 保留 " + vnstat + " 的时间维度，但每行额外显示该周期的端口和 IP:端口 Top。");
-        buffer.add("每行是一个" + trafficPeriodModeColumn(mode) + "的采样增量。");
+        buffer.add("统计口径: 端口级 vnStat。保留 " + vnstat + " 的时间维度，但主表按“周期 + 端口”展示。");
+        buffer.add("每个周期最多展示 Top 5 端口，并给出该端口 Top IP；绝对时间查询会展开更多 IP 明细。");
         buffer.add("时间使用服务器系统本地时区；上行在前，下行在后。");
         buffer.add("历史目录: " + kTrafficHistoryDir);
         buffer.add("");
+        buffer.add("> 周期总览");
         buffer.addAll(tableLines(trafficPeriodTotalsTable(rows, mode, details),
                                  "暂无历史采样增量。开启/追加端口后，第一次采样会把已有底层计数纳入当前周期。"));
+        buffer.add("");
+        buffer.add("> 端口级 vnStat");
+        buffer.addAll(tableLines(trafficPeriodPortTable(portRows, mode),
+                                 "暂无端口级采样增量。开启/追加端口后等待下一轮采样。"));
         if (!rows.empty()) {
             const auto detailIt = details.find(rows.front().period);
             const std::vector<TrafficRow> latestRows = detailIt == details.end() ? std::vector<TrafficRow>{} : detailIt->second;
+            const auto latestPorts = aggregateTrafficByPort(latestRows);
             buffer.add("");
-            buffer.add("> 最新周期完整明细: " + rows.front().period);
-            buffer.add("端口明细和 IP:端口明细来自同一批采样增量，不是底层实时累计值。");
+            buffer.add("> 最新周期端口/IP 明细: " + rows.front().period);
+            buffer.add("端口和 IP 明细来自同一批采样增量，不是底层实时累计值。");
             buffer.add("");
-            buffer.add("> 端口汇总");
-            addTrafficSummaryTable(buffer, aggregateTrafficByPort(latestRows), 30, "暂无采样增量", TrafficGroupMode::Port);
+            buffer.add("> 最新周期端口汇总");
+            addTrafficSummaryTable(buffer, latestPorts, 30, "暂无采样增量", TrafficGroupMode::Port);
             buffer.add("");
-            buffer.add("> IP:端口明细");
-            addTrafficSummaryTable(buffer, aggregateTrafficByIpPort(latestRows), 50, "暂无采样增量", TrafficGroupMode::IpPort);
+            addPortIpBreakdown(buffer, latestRows, latestPorts, 8, 10);
         }
         pushResult(title, buffer);
     }
@@ -9599,6 +9705,13 @@ inline int selfTest() {
     check("端口流量分组", byPort.size() == 1 && byPort[0].port == "443" &&
                               byPort[0].downloadBytes == 6144 && byPort[0].uploadBytes == 1024 &&
                               byPort[0].totalBytes() == 7168);
+    TrafficPeriodTotal periodTotal;
+    periodTotal.period = "2026-05-04";
+    const auto periodPortRows = trafficPeriodPortRows({periodTotal}, {{"2026-05-04", bidirectionalTraffic}}, 5);
+    check("端口级vnStat聚合", periodPortRows.size() == 1 && periodPortRows[0].port == "443" &&
+                                    periodPortRows[0].downloadBytes == 6144 &&
+                                    periodPortRows[0].uploadBytes == 1024 &&
+                                    periodPortRows[0].topIps.find("5.6.7.8") != std::string::npos);
     std::map<std::string, TrafficRow> previousTraffic;
     previousTraffic[trafficKey(traffic[0])] = traffic[0];
     TrafficRow increased = traffic[0];

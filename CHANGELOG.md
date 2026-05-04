@@ -12,6 +12,7 @@
 - Made repeated UFW threat analysis loads use a fast cache-gap path instead of rescanning rotated log files for tiny recent windows.
 - Made the no-SQLite UFW analysis cache fill only missing time ranges, matching the SQLite cache behavior instead of rescanning the full window.
 - Cleared in-process source-country lookup caches after installing or updating the DB-IP MMDB so refreshed data appears immediately.
+- Reworked traffic day/month/year pages into port-level vnStat-style views with per-port Top IP drilldown.
 
 ## 4.12.15 - 2026-05-04
 
