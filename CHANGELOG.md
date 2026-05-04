@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.24 - 2026-05-04
+
+### Changed
+
+- Added restrained color accents to TUI menus, section headers, table headers, status badges, and traffic metric values.
+- Kept the color layer compatible with `NO_COLOR` and redirected output through the existing ANSI-stripping path.
+
 ## 4.12.23 - 2026-05-04
 
 ### Fixed

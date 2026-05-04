@@ -3264,6 +3264,30 @@ inline std::vector<UfwDeleteCandidate> findUfwAnomalyDeleteCandidates() {
 inline std::string fitLine(const std::string &line, int width);
 inline std::string padRightCells(const std::string &value, int width);
 
+inline std::string uiSection(const std::string &title) {
+    return ansi::bold + ansi::cyan + "> " + title + ansi::plain;
+}
+
+inline std::string uiGood(const std::string &text) {
+    return ansi::green + text + ansi::plain;
+}
+
+inline std::string uiWarn(const std::string &text) {
+    return ansi::yellow + text + ansi::plain;
+}
+
+inline std::string uiInbound(const std::string &text) {
+    return ansi::green + text + ansi::plain;
+}
+
+inline std::string uiOutbound(const std::string &text) {
+    return ansi::cyan + text + ansi::plain;
+}
+
+inline std::string uiTotal(const std::string &text) {
+    return ansi::bold + ansi::yellow + text + ansi::plain;
+}
+
 class Table {
 public:
     Table(std::vector<std::string> headers, std::vector<std::size_t> widths)
@@ -3312,7 +3336,7 @@ private:
         for (std::size_t i = 0; i < widths_.size(); ++i) {
             const std::string value = i < row.size() ? row[i] : "";
             if (strong && shouldUseColor()) {
-                std::cout << ansi::bold;
+                std::cout << ansi::bold << ansi::cyan;
             }
             std::cout << padRightCells(fitLine(value, static_cast<int>(widths_[i])), static_cast<int>(widths_[i]));
             if (strong && shouldUseColor()) {
@@ -3910,13 +3934,13 @@ inline std::string menuLine(const std::string &key,
                             bool selected) {
     std::ostringstream row;
     row << (selected ? "> " : "  ")
-        << padRightCells(key, 4)
-        << padRightCells(title, 24)
-        << detail;
+        << padRightCells(ansi::cyan + key + ansi::plain, 4)
+        << padRightCells(ansi::bold + title + ansi::plain, 24)
+        << (selected ? detail : ansi::gray + detail + ansi::plain);
     if (!selected) {
         return row.str();
     }
-    return ansi::inverse + ansi::cyan + row.str() + ansi::plain;
+    return ansi::inverse + row.str() + ansi::plain;
 }
 
 inline std::string bufferCell(const std::string &value, int width) {
@@ -5450,9 +5474,9 @@ inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std
                 cells.push_back(rows[i].port);
             }
         }
-        cells.push_back(humanBytes(rows[i].downloadBytes));
-        cells.push_back(humanBytes(rows[i].uploadBytes));
-        cells.push_back(humanBytes(rows[i].totalBytes()));
+        cells.push_back(uiInbound(humanBytes(rows[i].downloadBytes)));
+        cells.push_back(uiOutbound(humanBytes(rows[i].uploadBytes)));
+        cells.push_back(uiTotal(humanBytes(rows[i].totalBytes())));
         cells.push_back(std::to_string(rows[i].totalPackets()));
         table.add(std::move(cells));
     }
@@ -5484,9 +5508,9 @@ inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &row
             }
         }
         table.add({row.period,
-                   humanBytes(row.downloadBytes),
-                   humanBytes(row.uploadBytes),
-                   humanBytes(row.totalBytes()),
+                   uiInbound(humanBytes(row.downloadBytes)),
+                   uiOutbound(humanBytes(row.uploadBytes)),
+                   uiTotal(humanBytes(row.totalBytes())),
                    std::to_string(row.totalPackets()),
                    ports.empty() ? "-" : std::to_string(ports.size()),
                    ips.empty() ? "-" : std::to_string(ips.size())});
@@ -5502,9 +5526,9 @@ inline Table trafficPeriodPortTable(const std::vector<TrafficPeriodPortRow> &row
         table.add({row.period,
                    row.port,
                    serviceNameForPort(row.port),
-                   humanBytes(row.downloadBytes),
-                   humanBytes(row.uploadBytes),
-                   humanBytes(row.totalBytes()),
+                   uiInbound(humanBytes(row.downloadBytes)),
+                   uiOutbound(humanBytes(row.uploadBytes)),
+                   uiTotal(humanBytes(row.totalBytes())),
                    std::to_string(row.totalPackets())});
     }
     return table;
@@ -6377,7 +6401,7 @@ inline std::string dashboardFastHeaderLine() {
 }
 
 inline void addTrafficOnboarding(ScreenBuffer &buffer, bool configured, bool hasHistory) {
-    buffer.add("> 下一步");
+    buffer.add(uiSection("下一步"));
     if (!configured) {
         buffer.add("1. 进入“流量统计 -> 开启/追加端口”，输入要统计的服务端口。");
         buffer.add("2. 工具会保留已有计数，并启用 5 分钟一次的后台采样。");
@@ -6407,22 +6431,22 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
                                          bool loading,
                                          char spinner) {
     ScreenBuffer buffer;
-    buffer.add("  流量/端口优先的服务器防护仪表盘");
+    buffer.add(ansi::bold + ansi::cyan + std::string("  流量/端口优先的服务器防护仪表盘") + ansi::plain);
     buffer.add("");
     buffer.add(dashboardFastHeaderLine());
     buffer.add("");
     if (loading || snapshot == nullptr) {
-        buffer.add(std::string("> 最近31天端口流量  加载中 ") + spinner);
+        buffer.add(uiSection(std::string("最近31天端口流量  加载中 ") + spinner));
         buffer.add("  正在读取本地历史。实时检查放在对应页面执行。");
         buffer.add("");
-        buffer.add("> 下一步  加载中");
+        buffer.add(uiSection("下一步  加载中"));
         return buffer;
     }
 
-    buffer.add("> 最近31天端口流量 Top 10");
+    buffer.add(uiSection("最近31天端口流量 Top 10"));
     buffer.add("统计口径: 系统本地时间 " + (snapshot->trafficPeriodLabel.empty() ? recentTrafficDaysLabel(recentTrafficDayPeriods(kDashboardTrafficDays), kDashboardTrafficDays) : snapshot->trafficPeriodLabel) +
                "，按端口聚合入站/出站，只展示前10个端口。");
-    buffer.add(std::string("历史采样: ") + (snapshot->tableEnabled ? "[已初始化]" : "[未初始化]"));
+    buffer.add(std::string("历史采样: ") + (snapshot->tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
     buffer.add("统计端口: " + std::to_string(snapshot->trackedPorts.size()) + " 个  " + humanPortList(snapshot->trackedPorts));
     if (!snapshot->tableEnabled) {
         buffer.add("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。");
@@ -6432,7 +6456,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, kDashboardTrafficPortLimit, TrafficGroupMode::Port),
                              snapshot->tableEnabled ? "最近31天暂无采样增量" : "历史采样未初始化"));
     buffer.add("");
-    buffer.add("> 安全分析摘要");
+    buffer.add(uiSection("安全分析摘要"));
     if (!snapshot->ufwHitsNote.empty()) {
         buffer.add(snapshot->ufwHitsNote);
     }
@@ -6531,7 +6555,7 @@ private:
         for (std::size_t i = 0; i < widths.size(); ++i) {
             const std::string value = i < values.size() ? values[i] : "";
             if (strong) {
-                out << ansi::bold;
+                out << ansi::bold << ansi::cyan;
             }
             out << cell(value, widths[i]);
             if (strong) {
@@ -6570,9 +6594,9 @@ private:
                     cells.push_back(rows[i].port);
                 }
             }
-            cells.push_back(humanBytes(rows[i].downloadBytes));
-            cells.push_back(humanBytes(rows[i].uploadBytes));
-            cells.push_back(humanBytes(rows[i].totalBytes()));
+            cells.push_back(uiInbound(humanBytes(rows[i].downloadBytes)));
+            cells.push_back(uiOutbound(humanBytes(rows[i].uploadBytes)));
+            cells.push_back(uiTotal(humanBytes(rows[i].totalBytes())));
             cells.push_back(std::to_string(rows[i].totalPackets()));
             buffer.add(tableRow(cells, widths));
         }
@@ -6891,11 +6915,11 @@ private:
             return buffer;
         }
         ScreenBuffer buffer;
-        buffer.add("  " + page.subtitle);
+        buffer.add("  " + ansi::cyan + page.subtitle + ansi::plain);
         buffer.add("");
         buffer.add(ansi::gray + std::string("  ↑/↓、j/k 或滚轮移动，Ctrl-f/b 翻页，Ctrl-d/u 半页。当前选中项会高亮。") + ansi::plain);
         buffer.add("");
-        buffer.add(ansi::bold + std::string("  序号  操作                    说明") + ansi::plain);
+        buffer.add(ansi::bold + ansi::cyan + std::string("  序号  操作                    说明") + ansi::plain);
         buffer.add(ansi::gray + std::string("  --------------------------------------------------------------------------") + ansi::plain);
         for (std::size_t i = 0; i < page.items.size(); ++i) {
             const auto &item = page.items[i];
@@ -6913,22 +6937,22 @@ private:
         const char frames[] = {'|', '/', '-', '\\'};
         const char spinner = frames[page.frame % 4];
         ScreenBuffer buffer;
-        buffer.add("  " + page.subtitle);
+        buffer.add("  " + ansi::cyan + page.subtitle + ansi::plain);
         buffer.add("");
         buffer.add(dashboardFastHeaderLine());
         buffer.add("");
         if (snapshot == nullptr) {
-            buffer.add(std::string("> 最近31天端口流量  加载中 ") + spinner);
+            buffer.add(uiSection(std::string("最近31天端口流量  加载中 ") + spinner));
             buffer.add("  正在读取本地历史库。深度审计放在对应页面执行。");
             if (std::chrono::steady_clock::now() - page.started > std::chrono::seconds(2)) {
                 buffer.add("  仍在读取系统数据，可按 q 返回，或等待加载完成。");
             }
             buffer.add("");
-            buffer.add("> 下一步  加载中");
+            buffer.add(uiSection("下一步  加载中"));
             return buffer;
         }
 
-        buffer.add("> 最近31天端口流量 Top 10");
+        buffer.add(uiSection("最近31天端口流量 Top 10"));
         if (page.loading) {
             buffer.add(std::string("后台刷新中 ") + spinner + "  先显示上一份快照，刷新完成后自动更新。");
         }
@@ -6944,7 +6968,7 @@ private:
         }
         addTrafficSummaryTable(buffer, snapshot->totalRows, kDashboardTrafficPortLimit, snapshot->tableEnabled ? "最近31天暂无采样增量" : "历史采样未初始化", TrafficGroupMode::Port);
         buffer.add("");
-        buffer.add("> 安全分析摘要");
+        buffer.add(uiSection("安全分析摘要"));
         if (!snapshot->ufwHitsNote.empty()) {
             buffer.add(snapshot->ufwHitsNote);
         }
@@ -7340,15 +7364,15 @@ private:
             return;
         }
         const std::size_t shown = std::min(portLimit, ports.size());
-        buffer.add("> 端口 IP 明细");
+        buffer.add(uiSection("端口 IP 明细"));
         buffer.add("下面按端口展开来源/目标 IP。入站表示进入本机该端口；出站表示本机从该端口发出。");
         for (std::size_t i = 0; i < shown; ++i) {
             const auto filtered = filterTrafficRowsByPort(rows, ports[i].port);
             buffer.add("");
-            buffer.add("> 端口 " + ports[i].port + " " + serviceNameForPort(ports[i].port) +
-                       "  入站 " + humanBytes(ports[i].downloadBytes) +
-                       " / 出站 " + humanBytes(ports[i].uploadBytes) +
-                       " / 合计 " + humanBytes(ports[i].totalBytes()));
+            buffer.add(uiSection("端口 " + ports[i].port + " " + serviceNameForPort(ports[i].port)) +
+                       "  入站 " + uiInbound(humanBytes(ports[i].downloadBytes)) +
+                       " / 出站 " + uiOutbound(humanBytes(ports[i].uploadBytes)) +
+                       " / 合计 " + uiTotal(humanBytes(ports[i].totalBytes())));
             addTrafficSummaryTable(buffer, aggregateTrafficByIp(filtered), ipLimit, "该端口暂无 IP 明细", TrafficGroupMode::Ip);
         }
         if (ports.size() > shown) {
@@ -7372,7 +7396,7 @@ private:
             buffer.add("想确认底层实时计数是否在增长，可返回“流量统计 -> 实时明细”。");
             buffer.add("");
         }
-        buffer.add("> 端口级流量");
+        buffer.add(uiSection("端口级流量"));
         addTrafficSummaryTable(buffer, byPort, 80, "暂无采样增量", TrafficGroupMode::Port);
         buffer.add("");
         addPortIpBreakdown(buffer, rows, byPort, 12, 12);
@@ -7396,11 +7420,11 @@ private:
         buffer.add("时间使用服务器系统本地时区；入站在前，出站在后。");
         buffer.add("历史目录: " + kTrafficHistoryDir);
         buffer.add("");
-        buffer.add("> 周期总览");
+        buffer.add(uiSection("周期总览"));
         buffer.addAll(tableLines(trafficPeriodTotalsTable(rows, mode, details),
                                  "暂无历史采样增量。开启/追加端口后，第一次采样会把已有底层计数纳入当前周期。"));
         buffer.add("");
-        buffer.add("> 端口级 vnStat");
+        buffer.add(uiSection("端口级 vnStat"));
         buffer.addAll(tableLines(trafficPeriodPortTable(portRows, mode),
                                  "暂无端口级采样增量。开启/追加端口后等待下一轮采样。"));
         if (!rows.empty()) {
@@ -7408,10 +7432,10 @@ private:
             const std::vector<TrafficRow> latestRows = detailIt == details.end() ? std::vector<TrafficRow>{} : detailIt->second;
             const auto latestPorts = aggregateTrafficByPort(latestRows);
             buffer.add("");
-            buffer.add("> 最新周期端口/IP 明细: " + rows.front().period);
+            buffer.add(uiSection("最新周期端口/IP 明细: " + rows.front().period));
             buffer.add("端口和 IP 明细来自同一批采样增量，不是底层实时累计值。");
             buffer.add("");
-            buffer.add("> 最新周期端口汇总");
+            buffer.add(uiSection("最新周期端口汇总"));
             addTrafficSummaryTable(buffer, latestPorts, 30, "暂无采样增量", TrafficGroupMode::Port);
             buffer.add("");
             addPortIpBreakdown(buffer, latestRows, latestPorts, 8, 10);
@@ -9317,7 +9341,7 @@ inline void addSection(ScreenBuffer &buffer, const std::string &title) {
     if (!buffer.lines().empty()) {
         buffer.add("");
     }
-    buffer.add(ansi::cyan + "> " + title + ansi::plain);
+    buffer.add(uiSection(title));
 }
 
 inline void addTableLines(ScreenBuffer &buffer, const Table &table, const std::string &emptyMessage = "暂无数据") {
@@ -9349,7 +9373,7 @@ inline ScreenBuffer dependencyDoctorBuffer() {
     const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl", "systemctl", "awk", "grep", "mmdblookup"};
     Table table({"工具", "状态"}, {24, 14});
     for (const auto &tool : tools) {
-        table.add({tool, Shell::exists(tool) ? "可用" : "缺失"});
+        table.add({tool, Shell::exists(tool) ? uiGood("可用") : uiWarn("缺失")});
     }
     addSection(buffer, "依赖检查");
     addTableLines(buffer, table);
