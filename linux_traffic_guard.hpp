@@ -85,9 +85,10 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.12";
+inline const std::string kVersion = "4.12.13";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
+inline const std::string kLatestSha256Url = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/SHA256SUMS";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
 inline const std::string kTrafficHistoryDir = "/var/tmp/linux_traffic_guard_traffic_history_v1";
 inline const std::string kTrafficSnapshotService = "linux-traffic-guard-traffic-snapshot.service";
@@ -296,6 +297,33 @@ struct F2bEffectProbe {
     CommandResult unban;
     CommandResult ufwCleanup;
     F2bJailRuntimeInfo jailStatus;
+};
+
+enum class ReliabilityStatus {
+    Pass,
+    Fail,
+    Warning,
+    Skipped,
+    Permission
+};
+
+struct ReliabilityCheckResult {
+    std::string group;
+    std::string name;
+    ReliabilityStatus status = ReliabilityStatus::Skipped;
+    std::string summary;
+    std::string evidence;
+    std::string suggestion;
+};
+
+struct ReliabilityReport {
+    std::vector<ReliabilityCheckResult> results;
+
+    bool ok() const {
+        return std::none_of(results.begin(), results.end(), [](const ReliabilityCheckResult &result) {
+            return result.status == ReliabilityStatus::Fail || result.status == ReliabilityStatus::Permission;
+        });
+    }
 };
 
 struct DashboardSnapshot {
@@ -1266,6 +1294,42 @@ inline std::string humanBytes(std::uint64_t bytes) {
         out << std::fixed << std::setprecision(2) << value << " " << units[unit];
     }
     return out.str();
+}
+
+inline std::string firstNonEmptyLine(const std::string &text) {
+    for (const auto &line : splitLines(text)) {
+        const std::string value = trim(stripAnsi(line));
+        if (!value.empty()) {
+            return value;
+        }
+    }
+    return "";
+}
+
+inline std::string summarizeCommandResult(const CommandResult &result, std::size_t maxLen = 180) {
+    std::string summary = firstNonEmptyLine(result.output);
+    if (summary.empty()) {
+        summary = result.ok() ? "exit 0" : "exit " + std::to_string(result.exitCode);
+    }
+    return truncateText(summary, maxLen);
+}
+
+inline bool parseVersionTriplet(const std::string &text, std::array<int, 3> &version) {
+    const std::regex pattern(R"((\d+)\.(\d+)\.(\d+))");
+    std::smatch match;
+    if (!std::regex_search(text, match, pattern)) {
+        return false;
+    }
+    version = {std::stoi(match[1].str()), std::stoi(match[2].str()), std::stoi(match[3].str())};
+    return true;
+}
+
+inline int compareVersionTriplet(const std::array<int, 3> &a, const std::array<int, 3> &b) {
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i] < b[i]) return -1;
+        if (a[i] > b[i]) return 1;
+    }
+    return 0;
 }
 
 inline int normalizedExitCode(int raw) {
@@ -3225,6 +3289,12 @@ inline void adjustScroll(InputKind kind, int &scrollOffset, std::size_t lineCoun
     scrollOffset = std::max(0, std::min(scrollOffset, maxOffset));
 }
 
+inline std::string cursorMoveSequence(int row, int col) {
+    std::ostringstream out;
+    out << "\033[" << std::max(1, row) << ";" << std::max(1, col) << "H\033[?25h";
+    return out.str();
+}
+
 inline void adjustSelection(InputKind kind, int &selected, int count) {
     if (count <= 0) {
         selected = 0;
@@ -4442,6 +4512,20 @@ inline std::set<int> detectExistingTrafficPorts() {
     return ports;
 }
 
+inline std::set<int> nftTrackedTrafficPorts() {
+    std::set<int> ports;
+    if (!Shell::exists("nft")) {
+        return ports;
+    }
+    const CommandResult tracked = Shell::capture("nft list set inet " + kIpTrafficTable + " tracked_ports 2>/dev/null || true");
+    const std::regex elementsPattern(R"(elements\s*=\s*\{([^}]*)\})");
+    std::smatch match;
+    if (std::regex_search(tracked.output, match, elementsPattern)) {
+        parseNftPortListInto(match[1].str(), ports);
+    }
+    return ports;
+}
+
 inline TrafficSnapshotResult recordTrafficSnapshot() {
     TrafficSnapshotResult result;
     result.sampledAt = std::time(nullptr);
@@ -4473,6 +4557,45 @@ inline TrafficSnapshotResult recordTrafficSnapshot() {
     result.resetRows = resetRows;
     result.message = seedExistingCounters ? "采样完成，已把旧版本首轮快照中的已有计数纳入当前周期。" : "采样完成。";
     return result;
+}
+
+inline std::time_t latestTrafficSnapshotTime() {
+#if LTG_HAS_SQLITE
+    if (!fileExists(trafficHistoryDbPath())) {
+        return 0;
+    }
+    std::string error;
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return 0;
+    }
+    sqlite3_stmt *stmt = nullptr;
+    std::time_t out = 0;
+    if (sqlite3_prepare_v2(db, "select max(sampled_at) from traffic_snapshot;", -1, &stmt, nullptr) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW) {
+        out = static_cast<std::time_t>(sqlite3_column_int64(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return out;
+#else
+    std::ifstream input(trafficHistoryPath("snapshot.tsv"), std::ios::binary);
+    std::string line;
+    std::time_t latest = 0;
+    while (std::getline(input, line)) {
+        const auto parts = splitByChar(line, '\t');
+        if (parts.size() != 7) {
+            continue;
+        }
+        try {
+            const long long value = std::stoll(parts[0]);
+            latest = std::max<std::time_t>(latest, static_cast<std::time_t>(value));
+        } catch (...) {
+            continue;
+        }
+    }
+    return latest;
+#endif
 }
 
 inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<TrafficRow> &rows, TrafficGroupMode mode) {
@@ -4619,6 +4742,357 @@ inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &row
                    topIpPorts});
     }
     return table;
+}
+
+inline std::string reliabilityStatusLabel(ReliabilityStatus status) {
+    switch (status) {
+    case ReliabilityStatus::Pass:
+        return ansi::green + std::string("通过") + ansi::plain;
+    case ReliabilityStatus::Fail:
+        return ansi::red + std::string("失败") + ansi::plain;
+    case ReliabilityStatus::Warning:
+        return ansi::yellow + std::string("警告") + ansi::plain;
+    case ReliabilityStatus::Permission:
+        return ansi::yellow + std::string("权限不足") + ansi::plain;
+    case ReliabilityStatus::Skipped:
+    default:
+        return ansi::gray + std::string("跳过") + ansi::plain;
+    }
+}
+
+inline void addReliabilityResult(ReliabilityReport &report,
+                                 const std::string &group,
+                                 const std::string &name,
+                                 ReliabilityStatus status,
+                                 const std::string &summary,
+                                 const std::string &evidence = "",
+                                 const std::string &suggestion = "") {
+    report.results.push_back({group, name, status, summary, evidence, suggestion});
+}
+
+inline std::string dependencyPackageForTool(const std::string &tool) {
+    if (tool == "nft") return "nftables";
+    if (tool == "ss") return "iproute2";
+    if (tool == "awk") return "gawk";
+    if (tool == "fail2ban-client") return "fail2ban";
+    if (tool == "curl" || tool == "wget") return tool;
+    return tool;
+}
+
+inline void verifyDependencyChain(ReliabilityReport &report) {
+    Shell::clearExistsCache();
+    const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "systemctl", "journalctl", "ss", "conntrack", "awk", "grep"};
+    for (const auto &tool : tools) {
+        const bool ok = Shell::exists(tool);
+        addReliabilityResult(report, "依赖链路", tool, ok ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                             ok ? "命令可执行" : "命令不可用",
+                             "apt 包: " + dependencyPackageForTool(tool),
+                             ok ? "" : "执行“安装常见依赖”，或 apt install -y " + dependencyPackageForTool(tool));
+    }
+    const bool downloader = Shell::exists("curl") || Shell::exists("wget");
+    addReliabilityResult(report, "依赖链路", "curl/wget", downloader ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         downloader ? "至少一个下载工具可用" : "更新链路缺少下载工具",
+                         std::string("curl=") + (Shell::exists("curl") ? "yes" : "no") +
+                             " wget=" + (Shell::exists("wget") ? "yes" : "no"),
+                         downloader ? "" : "apt install -y curl");
+}
+
+inline void verifyUpdateChainReadiness(ReliabilityReport &report) {
+#ifdef _WIN32
+    addReliabilityResult(report, "更新链路", "平台", ReliabilityStatus::Skipped, "Windows 不支持发布二进制自更新");
+#else
+    const std::string target = currentExecutablePath(nullptr);
+    addReliabilityResult(report, "更新链路", "当前可执行文件", fileExists(target) ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         fileExists(target) ? "目标文件存在" : "无法定位当前可执行文件", target,
+                         fileExists(target) ? "" : "请确认从真实 ltg 二进制启动");
+    std::array<int, 3> current{};
+    addReliabilityResult(report, "更新链路", "当前版本解析", parseVersionTriplet(kVersion, current) ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         parseVersionTriplet(kVersion, current) ? "版本号格式正确" : "版本号无法解析", kVersion);
+    if (Shell::exists("curl")) {
+        const CommandResult head = Shell::capture("curl -fsIL --max-time 12 " + shellQuote(kLatestBinaryUrl) + " | head -20");
+        addReliabilityResult(report, "更新链路", "Release 资产可达", head.ok() ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
+                             head.ok() ? "latest 二进制下载地址可访问" : "无法确认 latest 二进制地址",
+                             summarizeCommandResult(head),
+                             head.ok() ? "" : "检查网络或手动访问 GitHub Release");
+    } else if (Shell::exists("wget")) {
+        const CommandResult spider = Shell::capture("wget --spider -S -T 12 " + shellQuote(kLatestBinaryUrl) + " 2>&1 | head -20");
+        addReliabilityResult(report, "更新链路", "Release 资产可达", spider.ok() ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
+                             spider.ok() ? "latest 二进制下载地址可访问" : "无法确认 latest 二进制地址",
+                             summarizeCommandResult(spider),
+                             spider.ok() ? "" : "检查网络或手动访问 GitHub Release");
+    } else {
+        addReliabilityResult(report, "更新链路", "Release 资产可达", ReliabilityStatus::Skipped,
+                             "缺少 curl/wget，无法检查远端资产", "", "先安装 curl");
+    }
+    addReliabilityResult(report, "更新链路", "覆盖权限", isRoot() ? ReliabilityStatus::Pass : ReliabilityStatus::Permission,
+                         isRoot() ? "当前权限可覆盖安装" : "需要 sudo 才能覆盖当前 ltg",
+                         target,
+                         isRoot() ? "" : "使用 sudo ltg update");
+#endif
+}
+
+inline void verifyFail2banUfwChain(ReliabilityReport &report, bool allowActiveProbe) {
+    if (!Shell::exists("fail2ban-client")) {
+        addReliabilityResult(report, "防护链路", "fail2ban-client", ReliabilityStatus::Fail,
+                             "命令不可用", "", "安装 fail2ban");
+        return;
+    }
+    const CommandResult ping = Shell::capture("fail2ban-client ping");
+    const bool pingOk = ping.ok() && lowerCopy(ping.output).find("pong") != std::string::npos;
+    addReliabilityResult(report, "防护链路", "fail2ban ping", pingOk ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         pingOk ? "fail2ban socket 可用" : "fail2ban socket 不可用",
+                         summarizeCommandResult(ping),
+                         pingOk ? "" : "检查 systemctl status fail2ban 和 root 权限");
+
+    const CommandResult sshStatus = Shell::capture("fail2ban-client status " + shellQuote(kRule1Jail));
+    const F2bJailRuntimeInfo ssh = parseFail2banJailStatus(kRule1Jail, sshStatus.output, true);
+    addReliabilityResult(report, "防护链路", "sshd jail", ssh.loaded() ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         ssh.loaded() ? "jail 已加载" : "jail 未加载",
+                         ssh.label + " / " + summarizeCommandResult(sshStatus),
+                         ssh.loaded() ? "" : "执行“策略安装/修复”并查看 fail2ban-client -t");
+
+    const CommandResult rule2Status = Shell::capture("fail2ban-client status " + shellQuote(kRule2Jail));
+    const F2bJailRuntimeInfo rule2 = parseFail2banJailStatus(kRule2Jail, rule2Status.output, true);
+    addReliabilityResult(report, "防护链路", "规则2 jail", rule2.loaded() ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         rule2.loaded() ? "ufw-slowscan-global 已加载" : "规则2未加载，未真正生效",
+                         rule2.label + " / " + summarizeCommandResult(rule2Status),
+                         rule2.loaded() ? "" : "执行“策略安装/修复”，修复 UnknownJail 或权限问题");
+
+    if (!allowActiveProbe) {
+        addReliabilityResult(report, "防护链路", "临时 ban 落地", ReliabilityStatus::Skipped,
+                             "默认自检不修改 fail2ban/UFW", "active probes 关闭",
+                             "TUI 中确认主动探测，或运行 --reliability-check --active-probes");
+        return;
+    }
+    if (!rule2.loaded()) {
+        addReliabilityResult(report, "防护链路", "临时 ban 落地", ReliabilityStatus::Skipped,
+                             "规则2未加载，跳过主动探测", rule2.label);
+        return;
+    }
+
+    const CommandResult ban = Shell::capture(fail2banSetIpCommandStrict(kRule2Jail, "banip", kFail2banEffectProbeIp));
+    Shell::capture("sleep 1");
+    const CommandResult after = Shell::capture("fail2ban-client status " + shellQuote(kRule2Jail));
+    const F2bJailRuntimeInfo afterInfo = parseFail2banJailStatus(kRule2Jail, after.output, true);
+    const bool banListed = afterInfo.bannedIps.count(kFail2banEffectProbeIp) > 0;
+    addReliabilityResult(report, "防护链路", "banip 进入列表", ban.ok() && banListed ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         ban.ok() && banListed ? "测试 IP 已进入 fail2ban 列表" : "banip 未进入 fail2ban 列表",
+                         summarizeCommandResult(ban) + " / " + summarizeCommandResult(after),
+                         ban.ok() && banListed ? "" : "检查 fail2ban-client set 输出和 jail 状态");
+
+    const CommandResult ufw = Shell::capture("ufw status numbered");
+    const bool ufwLanded = ufw.output.find(kFail2banEffectProbeIp) != std::string::npos;
+    addReliabilityResult(report, "防护链路", "UFW deny 落地", ufwLanded ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         ufwLanded ? "UFW 中找到测试 deny 规则" : "fail2ban ban 后 UFW 未出现 deny",
+                         summarizeCommandResult(ufw),
+                         ufwLanded ? "" : "检查 ufw-drop action 和 UFW 状态");
+
+    const CommandResult unban = Shell::capture(fail2banSetIpCommandStrict(kRule2Jail, "unbanip", kFail2banEffectProbeIp));
+    const CommandResult cleanup = Shell::capture("(ufw --force delete deny from " + shellQuote(kFail2banEffectProbeIp) + " || true)");
+    const CommandResult post = Shell::capture("ufw status numbered 2>/dev/null || true");
+    const bool cleaned = post.output.find(kFail2banEffectProbeIp) == std::string::npos;
+    addReliabilityResult(report, "防护链路", "测试痕迹清理", unban.ok() && cleanup.ok() && cleaned ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         unban.ok() && cleanup.ok() && cleaned ? "unban 和 UFW 残留清理完成" : "测试 IP 可能有残留",
+                         summarizeCommandResult(unban) + " / " + summarizeCommandResult(cleanup),
+                         cleaned ? "" : "手动执行 ufw status numbered 并删除测试 IP 规则");
+}
+
+inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSnapshotProbe) {
+    if (!Shell::exists("nft")) {
+        addReliabilityResult(report, "流量统计链路", "nft", ReliabilityStatus::Fail,
+                             "nft 命令不可用", "", "安装 nftables");
+        return;
+    }
+    const CommandResult table = Shell::capture("nft list table inet " + kIpTrafficTable);
+    addReliabilityResult(report, "流量统计链路", "底层表", table.ok() ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         table.ok() ? "统计表存在" : "统计表不存在",
+                         summarizeCommandResult(table),
+                         table.ok() ? "" : "进入“流量统计 -> 开启/追加端口”");
+    if (!table.ok()) {
+        return;
+    }
+    const std::string body = table.output;
+    const std::vector<std::string> sets = {"tracked_ports", "ipv4_download", "ipv4_upload", "ipv6_download", "ipv6_upload"};
+    for (const auto &setName : sets) {
+        const bool found = body.find("set " + setName) != std::string::npos;
+        addReliabilityResult(report, "流量统计链路", "set " + setName,
+                             found ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                             found ? "counter set 存在" : "counter set 缺失", "",
+                             found ? "" : "重新执行“开启/追加端口”，迁移到底层端口集合规则");
+    }
+    const std::vector<std::string> chains = {"input_account", "output_account", "forward_account"};
+    for (const auto &chain : chains) {
+        const bool found = body.find("chain " + chain) != std::string::npos;
+        addReliabilityResult(report, "流量统计链路", "chain " + chain,
+                             found ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                             found ? "管理链存在" : "管理链缺失", "",
+                             found ? "" : "重新执行“开启/追加端口”");
+    }
+
+    const std::set<int> historyPorts = loadTrackedTrafficPorts();
+    const std::set<int> nftPorts = nftTrackedTrafficPorts();
+    const std::set<int> onlyHistory = setDifference(historyPorts, nftPorts);
+    const std::set<int> onlyNft = setDifference(nftPorts, historyPorts);
+    ReliabilityStatus portStatus = ReliabilityStatus::Pass;
+    std::string summary = "历史库和 nft 端口集合一致";
+    std::string suggestion;
+    if (!onlyHistory.empty() || !onlyNft.empty()) {
+        portStatus = ReliabilityStatus::Fail;
+        summary = "历史库和 nft 端口集合不一致";
+        suggestion = "重新执行“开启/追加端口”，只更新 tracked_ports 集合";
+    } else if (historyPorts.empty() && nftPorts.empty()) {
+        portStatus = ReliabilityStatus::Warning;
+        summary = "尚未配置统计端口";
+        suggestion = "进入“流量统计 -> 开启/追加端口”";
+    }
+    addReliabilityResult(report, "流量统计链路", "统计端口一致性", portStatus, summary,
+                         "历史端口: " + humanPortList(historyPorts) + " / nft端口: " + humanPortList(nftPorts) +
+                             (onlyHistory.empty() ? "" : " / 仅历史: " + humanPortList(onlyHistory)) +
+                             (onlyNft.empty() ? "" : " / 仅nft: " + humanPortList(onlyNft)),
+                         suggestion);
+
+    const std::string servicePath = "/etc/systemd/system/" + kTrafficSnapshotService;
+    const std::string timerPath = "/etc/systemd/system/" + kTrafficSnapshotTimer;
+    std::string serviceContent;
+    const bool serviceReadable = readTextFile(servicePath, serviceContent);
+    const bool timerExists = fileExists(timerPath);
+    addReliabilityResult(report, "流量统计链路", "snapshot systemd unit",
+                         serviceReadable && timerExists ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
+                         serviceReadable && timerExists ? "service/timer 文件存在" : "后台采样 unit 不完整",
+                         servicePath + " / " + timerPath,
+                         serviceReadable && timerExists ? "" : "重新执行“开启/追加端口”安装 timer");
+    if (serviceReadable) {
+        const std::string exe = currentExecutablePath(nullptr);
+        const bool pointsHere = serviceContent.find(exe + " --traffic-snapshot") != std::string::npos;
+        addReliabilityResult(report, "流量统计链路", "snapshot ExecStart",
+                             pointsHere ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
+                             pointsHere ? "ExecStart 指向当前 ltg" : "ExecStart 与当前 ltg 路径不同",
+                             firstNonEmptyLine(serviceContent),
+                             pointsHere ? "" : "重新执行“开启/追加端口”刷新 systemd unit");
+    }
+    if (Shell::exists("systemctl")) {
+        const CommandResult enabled = Shell::capture("systemctl is-enabled " + kTrafficSnapshotTimer + " 2>&1");
+        const CommandResult active = Shell::capture("systemctl is-active " + kTrafficSnapshotTimer + " 2>&1");
+        addReliabilityResult(report, "流量统计链路", "snapshot timer 状态",
+                             enabled.ok() && active.ok() ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
+                             "enabled=" + trim(enabled.output) + " active=" + trim(active.output),
+                             summarizeCommandResult(enabled) + " / " + summarizeCommandResult(active),
+                             enabled.ok() && active.ok() ? "" : "systemctl enable --now " + kTrafficSnapshotTimer);
+    }
+
+    const std::time_t latest = latestTrafficSnapshotTime();
+    const auto monthRows = aggregateTrafficHistoryByPort(TrafficPeriodMode::Month, currentTrafficPeriodLabel(TrafficPeriodMode::Month));
+    const auto dayTotals = loadTrafficPeriodTotals(TrafficPeriodMode::Day, 1);
+    const auto monthTotals = loadTrafficPeriodTotals(TrafficPeriodMode::Month, 1);
+    const auto yearTotals = loadTrafficPeriodTotals(TrafficPeriodMode::Year, 1);
+    addReliabilityResult(report, "流量统计链路", "历史采样状态",
+                         latest > 0 ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
+                         latest > 0 ? "存在历史快照" : "尚无历史快照",
+                         "最近采样: " + (latest > 0 ? dateTimeStamp(latest) : std::string("无")) +
+                             " / 本月端口行: " + std::to_string(monthRows.size()) +
+                             " / 日月年周期: " + std::to_string(dayTotals.size()) + "/" +
+                             std::to_string(monthTotals.size()) + "/" + std::to_string(yearTotals.size()),
+                         latest > 0 ? "" : "执行 sudo ltg --traffic-snapshot 或等待 timer");
+    if (!allowSnapshotProbe) {
+        addReliabilityResult(report, "流量统计链路", "主动采样", ReliabilityStatus::Skipped,
+                             "默认自检不写入采样历史", "", "使用 --active-probes 执行一次真实采样");
+    } else {
+        const TrafficSnapshotResult snapshot = recordTrafficSnapshot();
+        addReliabilityResult(report, "流量统计链路", "主动采样", snapshot.ok ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                             snapshot.ok ? "采样命令成功" : "采样命令失败",
+                             "实时行数: " + std::to_string(snapshot.liveRows) +
+                                 " / 增量行数: " + std::to_string(snapshot.deltaRows) +
+                                 " / 说明: " + snapshot.message,
+                             snapshot.ok ? (snapshot.deltaRows == 0 ? "无新增流量时 delta 为 0 是正常现象" : "") : "查看底层 nft 规则和历史目录权限");
+    }
+}
+
+inline std::string diagnosticReportCommand(const std::string &out) {
+    std::ostringstream cmd;
+    cmd << "{ "
+        << "echo '### time'; date; "
+        << "echo; echo '### services'; systemctl status fail2ban --no-pager -l 2>/dev/null | sed -n '1,60p'; "
+        << "echo; echo '### fail2ban'; fail2ban-client status 2>&1; fail2ban-client status " << kRule1Jail << " 2>&1; fail2ban-client status " << kRule2Jail << " 2>&1; "
+        << "echo; echo '### ufw'; ufw status verbose 2>/dev/null; "
+        << "echo; echo '### listeners'; ss -tulpen 2>/dev/null | head -160; "
+        << "echo; echo '### accounting'; nft list table inet " << kIpTrafficTable << " 2>/dev/null; "
+        << "echo; echo '### conntrack'; conntrack -L -o extended 2>/dev/null | head -180; "
+        << "echo; echo '### fail2ban log'; tail -n 220 /var/log/fail2ban.log 2>/dev/null; "
+        << "echo; echo '### ufw log'; journalctl -k --no-pager -n 220 2>/dev/null | grep -i 'ufw' || true; "
+        << "} > " << shellQuote(out);
+    return cmd.str();
+}
+
+inline bool diagnosticReportHasRequiredSections(const std::string &content) {
+    return content.find("### fail2ban") != std::string::npos &&
+           content.find("### ufw") != std::string::npos &&
+           content.find("### accounting") != std::string::npos;
+}
+
+inline void verifyDiagnosticExportChain(ReliabilityReport &report, bool allowWriteProbe) {
+    const CommandResult tmp = Shell::capture("test -d /tmp && test -w /tmp");
+    addReliabilityResult(report, "诊断链路", "/tmp 可写", tmp.ok() ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         tmp.ok() ? "/tmp 可写" : "/tmp 不可写",
+                         summarizeCommandResult(tmp),
+                         tmp.ok() ? "" : "检查 /tmp 权限或磁盘状态");
+    if (!allowWriteProbe) {
+        addReliabilityResult(report, "诊断链路", "报告写入", ReliabilityStatus::Skipped,
+                             "默认自检不写入诊断报告", "", "使用 --active-probes 验证真实导出");
+        return;
+    }
+    const std::string out = "/tmp/linux-traffic-guard-reliability-" + nowStamp() + ".log";
+    const CommandResult write = Shell::capture(diagnosticReportCommand(out));
+    std::string content;
+    const bool readable = readTextFile(out, content);
+    const bool hasSections = readable && diagnosticReportHasRequiredSections(content);
+    addReliabilityResult(report, "诊断链路", "报告写入", write.ok() && readable && fileSizeBytes(out) > 0 && hasSections ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         write.ok() && readable && hasSections ? "报告已写入且包含关键 section" : "报告写入或 section 检查失败",
+                         out + " / size=" + std::to_string(fileSizeBytes(out)),
+                         hasSections ? "" : "检查导出命令输出和系统工具权限");
+}
+
+inline void verifyTuiTerminalChain(ReliabilityReport &report) {
+    addReliabilityResult(report, "TUI 终端状态", "alternate screen", ReliabilityStatus::Pass,
+                         "退出路径会恢复 ?25h/?1049l", "restoreTerminalDisplay()");
+    addReliabilityResult(report, "TUI 终端状态", "输入光标", ReliabilityStatus::Pass,
+                         "输入页渲染后移动到输入末尾并显示光标", "promptLine cursor move");
+}
+
+inline ReliabilityReport runReliabilitySelfCheck(bool allowActiveProbes) {
+    ReliabilityReport report;
+    verifyDependencyChain(report);
+    verifyUpdateChainReadiness(report);
+    verifyFail2banUfwChain(report, allowActiveProbes);
+    verifyTrafficAccountingChain(report, allowActiveProbes);
+    verifyDiagnosticExportChain(report, allowActiveProbes);
+    verifyTuiTerminalChain(report);
+    return report;
+}
+
+inline ScreenBuffer reliabilityReportBuffer(const ReliabilityReport &report, bool allowActiveProbes) {
+    ScreenBuffer buffer;
+    buffer.add(std::string("主动探测: ") + (allowActiveProbes ? "已启用，会执行临时 ban/采样/诊断写入" : "未启用，只做非破坏检查"));
+    buffer.add(std::string("总体结果: ") + (report.ok() ? ansi::green + std::string("通过") + ansi::plain
+                                                        : ansi::yellow + std::string("存在失败项") + ansi::plain));
+    buffer.add("");
+    std::string currentGroup;
+    const std::vector<int> widths = {22, 10, 32, 42};
+    for (const auto &item : report.results) {
+        if (item.group != currentGroup) {
+            currentGroup = item.group;
+            buffer.add("");
+            buffer.add(ansi::cyan + std::string("> ") + currentGroup + ansi::plain);
+            buffer.add(bufferTableRow({"检查项", "状态", "结论", "证据/建议"}, widths, true));
+            buffer.add(bufferTableRule(widths));
+        }
+        std::string detail = item.evidence;
+        if (!item.suggestion.empty()) {
+            detail += (detail.empty() ? "" : " / ");
+            detail += "建议: " + item.suggestion;
+        }
+        buffer.add(bufferTableRow({item.name, reliabilityStatusLabel(item.status), item.summary, detail}, widths));
+    }
+    return buffer;
 }
 
 inline void enrichUfwHit(UfwHit &hit) {
@@ -5236,10 +5710,11 @@ private:
         pushMenu("安全中心", "总览、分析、策略、处置、诊断按同一条防护链路组织",
                  {
                      {"1", "安全总览", "一屏看服务、策略、封禁和下一步", false, [this] { actionSecurityStatus(); }},
-                     {"2", "分析追查", "来源 Top、端口扫描、IP 下钻、缓存", false, [this] { pushUfwAnalyzeMenu(); }},
-                     {"3", "策略配置", "SSH 防护、扫描升级、白名单", true, [this] { pushFail2banPanel(); }},
-                     {"4", "处置修复", "封禁/解封、端口规则、核验、同步", true, [this] { pushSecurityOpsMenu(); }},
-                     {"5", "服务诊断", "服务控制、依赖、日志和报告", false, [this] { pushSecurityServiceMenu(); }},
+                     {"2", "可靠性自检", "验证依赖、更新、防护、统计、诊断是否真落地", true, [this] { actionReliabilitySelfCheck(); }},
+                     {"3", "分析追查", "来源 Top、端口扫描、IP 下钻、缓存", false, [this] { pushUfwAnalyzeMenu(); }},
+                     {"4", "策略配置", "SSH 防护、扫描升级、白名单", true, [this] { pushFail2banPanel(); }},
+                     {"5", "处置修复", "封禁/解封、端口规则、核验、同步", true, [this] { pushSecurityOpsMenu(); }},
+                     {"6", "服务诊断", "服务控制、依赖、日志和报告", false, [this] { pushSecurityServiceMenu(); }},
                  });
     }
 
@@ -5643,6 +6118,20 @@ private:
         }
     }
 
+    void movePromptCursor(std::size_t bodyLineCount,
+                          int scrollOffset,
+                          const std::string &label,
+                          const std::string &value) const {
+        const int inputLine = static_cast<int>(bodyLineCount) + 2;
+        const int screenRow = 3 + inputLine - scrollOffset;
+        if (screenRow < 3 || screenRow > terminalRows() - 2) {
+            return;
+        }
+        const int col = 1 + static_cast<int>(visibleWidth(label) + visibleWidth(value));
+        std::cout << cursorMoveSequence(screenRow, col);
+        std::cout.flush();
+    }
+
     PromptAnswer promptLine(const std::string &title,
                             const std::vector<std::string> &body,
                             const std::string &label,
@@ -5655,6 +6144,7 @@ private:
             buffer.add("");
             buffer.add(ansi::cyan + label + ansi::plain + value);
             viewport_.render(title, buffer, scrollOffset, "Enter 确认  Backspace 删除  Esc/q 取消");
+            movePromptCursor(body.size(), scrollOffset, label, value);
             const InputEvent event = inputReader().readEvent(120);
             if (event.kind == InputKind::CtrlC) {
                 std::raise(SIGINT);
@@ -7048,6 +7538,11 @@ private:
             {kRule1Jail, sshRuntime.label},
             {kRule2Jail, scanRuntime.label},
         });
+        ReliabilityReport readonlyReport;
+        verifyFail2banUfwChain(readonlyReport, false);
+        buffer.add("");
+        buffer.add("> 统一可靠性口径");
+        buffer.addAll(reliabilityReportBuffer(readonlyReport, false).lines());
         if (!scanRuntime.loaded()) {
             ScreenBuffer result;
             result.add(ansi::yellow + std::string("规则2未加载，未真正生效。") + ansi::plain);
@@ -7513,6 +8008,26 @@ private:
         pushResult("依赖检查", buffer);
     }
 
+    void actionReliabilitySelfCheck() {
+        ScreenBuffer intro;
+        intro.add("默认只做只读检查，不修改 fail2ban、UFW、nftables 或诊断文件。");
+        intro.add("");
+        intro.add("输入 ACTIVE 会启用主动探测:");
+        intro.add("- 临时 ban 测试 IP " + kFail2banEffectProbeIp + "，随后 unban 并清理 UFW 残留。");
+        intro.add("- 执行一次流量采样，写入历史快照。");
+        intro.add("- 在 /tmp 写入一份诊断报告并检查关键 section。");
+        intro.add("");
+        intro.add("直接按 Enter: 只读自检。");
+        PromptAnswer mode = promptLine("可靠性自检", intro.lines(), "模式: ");
+        if (!mode.ok) {
+            return;
+        }
+        const bool active = trim(mode.value) == "ACTIVE";
+        renderBusy("可靠性自检", active ? "正在执行全链路主动验证..." : "正在执行只读链路验证...");
+        const ReliabilityReport report = runReliabilitySelfCheck(active);
+        pushResult("可靠性自检", reliabilityReportBuffer(report, active));
+    }
+
     void actionLogSummary() {
         renderBusy("日志摘要", "正在读取日志...");
         pushResult("日志摘要", runCommandList({
@@ -7530,20 +8045,8 @@ private:
             pushResult("导出诊断报告", buffer);
             return;
         }
-        std::ostringstream cmd;
-        cmd << "{ "
-            << "echo '### time'; date; "
-            << "echo; echo '### services'; systemctl status fail2ban --no-pager -l 2>/dev/null | sed -n '1,60p'; "
-            << "echo; echo '### fail2ban'; fail2ban-client status 2>&1; fail2ban-client status " << kRule1Jail << " 2>&1; fail2ban-client status " << kRule2Jail << " 2>&1; "
-            << "echo; echo '### ufw'; ufw status verbose 2>/dev/null; "
-            << "echo; echo '### listeners'; ss -tulpen 2>/dev/null | head -160; "
-            << "echo; echo '### accounting'; nft list table inet " << kIpTrafficTable << " 2>/dev/null; "
-            << "echo; echo '### conntrack'; conntrack -L -o extended 2>/dev/null | head -180; "
-            << "echo; echo '### fail2ban log'; tail -n 220 /var/log/fail2ban.log 2>/dev/null; "
-            << "echo; echo '### ufw log'; journalctl -k --no-pager -n 220 2>/dev/null | grep -i 'ufw' || true; "
-            << "} > " << shellQuote(out);
         renderBusy("导出诊断报告", "正在写入报告...");
-        ScreenBuffer buffer = runCommandList({cmd.str()});
+        ScreenBuffer buffer = runCommandList({diagnosticReportCommand(out)});
         buffer.add("报告路径: " + out);
         pushResult("导出诊断报告", buffer);
     }
@@ -7702,6 +8205,12 @@ inline int cliTrafficSnapshot() {
     return result.ok ? 0 : 1;
 }
 
+inline int cliReliabilityCheck(bool allowActiveProbes) {
+    const ReliabilityReport report = runReliabilitySelfCheck(allowActiveProbes);
+    printScreenBuffer(reliabilityReportBuffer(report, allowActiveProbes));
+    return report.ok() ? 0 : 1;
+}
+
 inline void dependencyDoctor() {
     printScreenBuffer(dependencyDoctorBuffer());
 }
@@ -7715,19 +8224,7 @@ inline void logSummary() {
 
 inline void exportDiagnosticReport() {
     const std::string out = "/tmp/linux-traffic-guard-" + nowStamp() + ".log";
-    std::ostringstream cmd;
-    cmd << "{ "
-        << "echo '### time'; date; "
-        << "echo; echo '### services'; systemctl status fail2ban --no-pager -l 2>/dev/null | sed -n '1,60p'; "
-        << "echo; echo '### fail2ban'; fail2ban-client status 2>&1; fail2ban-client status " << kRule1Jail << " 2>&1; fail2ban-client status " << kRule2Jail << " 2>&1; "
-        << "echo; echo '### ufw'; ufw status verbose 2>/dev/null; "
-        << "echo; echo '### listeners'; ss -tulpen 2>/dev/null | head -160; "
-        << "echo; echo '### accounting'; nft list table inet " << kIpTrafficTable << " 2>/dev/null; "
-        << "echo; echo '### conntrack'; conntrack -L -o extended 2>/dev/null | head -180; "
-        << "echo; echo '### fail2ban log'; tail -n 220 /var/log/fail2ban.log 2>/dev/null; "
-        << "echo; echo '### ufw log'; journalctl -k --no-pager -n 220 2>/dev/null | grep -i 'ufw' || true; "
-        << "} > " << shellQuote(out);
-    ScreenBuffer buffer = commandListBuffer({cmd.str()});
+    ScreenBuffer buffer = commandListBuffer({diagnosticReportCommand(out)});
     buffer.add("报告路径: " + out);
     printScreenBuffer(buffer);
 }
@@ -7743,6 +8240,7 @@ inline int updateFromRelease(const char *argv0) {
     }
     const std::string target = currentExecutablePath(argv0);
     const std::string temp = "/tmp/ltg-update-" + nowStamp();
+    const std::string tempSha = temp + ".SHA256SUMS";
     ScreenBuffer buffer;
     addSection(buffer, "更新 Linux Traffic Guard");
     buffer.add("目标文件: " + target);
@@ -7790,8 +8288,6 @@ inline int updateFromRelease(const char *argv0) {
     const std::vector<std::string> commands = {
         downloadCommand,
         "chmod +x " + shellQuote(temp),
-        shellQuote(temp) + " --version",
-        "install -Dm755 " + shellQuote(temp) + " " + shellQuote(target),
     };
     for (const auto &command : commands) {
         if (!runStep(command)) {
@@ -7801,9 +8297,69 @@ inline int updateFromRelease(const char *argv0) {
             return 1;
         }
     }
-    runStep("rm -f " + shellQuote(temp));
+
+    std::string shaDownload;
+    if (Shell::exists("curl")) {
+        shaDownload = "curl -fL " + shellQuote(kLatestSha256Url) + " -o " + shellQuote(tempSha);
+    } else {
+        shaDownload = "wget -O " + shellQuote(tempSha) + " " + shellQuote(kLatestSha256Url);
+    }
+    if (runStep(shaDownload) && Shell::exists("sha256sum") && Shell::exists("grep") && Shell::exists("sed")) {
+        const std::string verify = "grep ' ltg-linux-x86_64$' " + shellQuote(tempSha) +
+                                   " | sed 's# ltg-linux-x86_64# " + temp + "#' | sha256sum -c -";
+        if (!runStep(verify)) {
+            runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+            buffer.add(ansi::yellow + std::string("SHA256 校验失败，已停止覆盖安装。") + ansi::plain);
+            printScreenBuffer(buffer);
+            return 1;
+        }
+    } else {
+        buffer.add(ansi::yellow + std::string("未能读取或执行 SHA256SUMS 校验，继续使用版本检查保护。") + ansi::plain);
+        buffer.add("");
+    }
+
+    const CommandResult downloadedVersion = Shell::capture(shellQuote(temp) + " --version");
+    buffer.add(ansi::gray + std::string("$ ") + shellQuote(temp) + " --version" + ansi::plain);
+    buffer.add(downloadedVersion.ok() ? ansi::green + std::string("exit 0") + ansi::plain
+                                      : ansi::yellow + "exit " + std::to_string(downloadedVersion.exitCode) + ansi::plain);
+    buffer.addAll(splitLines(trim(downloadedVersion.output)));
     buffer.add("");
-    buffer.add("更新完成后可执行: ltg --version");
+    std::array<int, 3> currentVersion{};
+    std::array<int, 3> newVersion{};
+    if (!downloadedVersion.ok() || !parseVersionTriplet(kVersion, currentVersion) ||
+        !parseVersionTriplet(downloadedVersion.output, newVersion) ||
+        compareVersionTriplet(newVersion, currentVersion) < 0) {
+        runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+        buffer.add(ansi::yellow + std::string("下载到的版本无法确认，或低于当前版本，已停止覆盖安装。") + ansi::plain);
+        printScreenBuffer(buffer);
+        return 1;
+    }
+
+    if (!runStep("install -Dm755 " + shellQuote(temp) + " " + shellQuote(target))) {
+        runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+        buffer.add(ansi::yellow + std::string("覆盖安装失败，请查看上方输出。") + ansi::plain);
+        printScreenBuffer(buffer);
+        return 1;
+    }
+
+    const CommandResult installedVersion = Shell::capture(shellQuote(target) + " --version");
+    buffer.add(ansi::gray + std::string("$ ") + shellQuote(target) + " --version" + ansi::plain);
+    buffer.add(installedVersion.ok() ? ansi::green + std::string("exit 0") + ansi::plain
+                                     : ansi::yellow + "exit " + std::to_string(installedVersion.exitCode) + ansi::plain);
+    buffer.addAll(splitLines(trim(installedVersion.output)));
+    buffer.add("");
+    std::array<int, 3> installed{};
+    if (!installedVersion.ok() || !parseVersionTriplet(installedVersion.output, installed) ||
+        compareVersionTriplet(installed, newVersion) != 0) {
+        runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+        buffer.add(ansi::yellow + std::string("覆盖后版本复查失败，请确认目标路径是否被正确替换。") + ansi::plain);
+        printScreenBuffer(buffer);
+        return 1;
+    }
+
+    runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+    buffer.add("");
+    buffer.add("更新完成，目标文件版本已复查。");
     printScreenBuffer(buffer);
     return 0;
 #endif
@@ -7987,6 +8543,21 @@ inline int selfTest() {
     check("危险命令 helper", fail2banSetIpCommand("sshd", "banip", "1.2.3.4").find("fail2ban-client set 'sshd' banip '1.2.3.4'") != std::string::npos &&
                                ufwDenyFromCommand("1.2.3.4", "case").find("comment 'case'") != std::string::npos &&
                                ufwDeleteDenyFromCommand("1.2.3.4").find("--force delete deny") != std::string::npos);
+    std::array<int, 3> parsedVersion{};
+    std::array<int, 3> olderVersion{};
+    check("update 版本解析", parseVersionTriplet("Linux 流量守卫 4.12.13", parsedVersion) &&
+                                 parseVersionTriplet("4.12.12", olderVersion) &&
+                                 compareVersionTriplet(parsedVersion, olderVersion) > 0 &&
+                                 !parseVersionTriplet("version unknown", olderVersion));
+    ReliabilityReport reliabilityReport;
+    addReliabilityResult(reliabilityReport, "测试链路", "通过项", ReliabilityStatus::Pass, "ok");
+    check("可靠性结果聚合", reliabilityReport.ok());
+    addReliabilityResult(reliabilityReport, "测试链路", "失败项", ReliabilityStatus::Fail, "bad");
+    check("可靠性失败聚合", !reliabilityReport.ok() &&
+                              reliabilityReportBuffer(reliabilityReport, false).lines().size() > 3);
+    check("诊断报告 section 检查", diagnosticReportHasRequiredSections("### fail2ban\n...\n### ufw\n...\n### accounting\n") &&
+                                      !diagnosticReportHasRequiredSections("### fail2ban\n### ufw\n"));
+    check("输入光标移动序列", cursorMoveSequence(4, 12) == "\033[4;12H\033[?25h");
 
 #if LTG_HAS_SQLITE
     check("SQLite 编译模式", true, "LTG_HAS_SQLITE=1");
@@ -8069,6 +8640,7 @@ inline void usage(const char *argv0) {
     std::cout << "  --ip-traffic      查看端口优先的流量排行\n";
     std::cout << "  --traffic-snapshot 内部命令：记录一次流量历史采样\n";
     std::cout << "  --doctor          检查依赖\n";
+    std::cout << "  --reliability-check [--active-probes]  全链路可靠性自检\n";
     std::cout << "  --audit           查看日志摘要\n";
     std::cout << "  --f2b-audit       防护链路双日志核验\n";
     std::cout << "  --ufw-analyze P   分析 UFW 日志，P=24h|7d|28d\n";
@@ -8137,6 +8709,10 @@ inline int appMain(int argc, char **argv) {
         if (arg == "--doctor" || arg == "--check-deps") {
             dependencyDoctor();
             return 0;
+        }
+        if (arg == "--reliability-check") {
+            const bool active = argc > 2 && std::string(argv[2]) == "--active-probes";
+            return cliReliabilityCheck(active);
         }
         if (arg == "--audit") {
             logSummary();

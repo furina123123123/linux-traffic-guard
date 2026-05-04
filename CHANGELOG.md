@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.12.13 - 2026-05-04
+
+### Added
+
+- Added a full-chain reliability self-check for dependencies, update readiness, fail2ban/UFW effectiveness, traffic accounting, diagnostic export, and TUI terminal state.
+- Added `--reliability-check` with optional `--active-probes` for explicit temporary ban, traffic snapshot, and diagnostic write probes.
+
+### Changed
+
+- Hardened `ltg update` with downloaded-version validation, optional `SHA256SUMS` verification, and post-install version recheck.
+- Moved prompt cursors to the actual input position after each full-screen render so typed fields show a visible blinking cursor.
+
 ## 4.12.12 - 2026-05-04
 
 ### Changed
