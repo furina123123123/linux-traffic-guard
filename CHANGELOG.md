@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.8 - 2026-05-04
+
+### Changed
+
+- Split bilingual documentation into an English default `README.md` and a separate Simplified Chinese `README.zh-CN.md`.
+- Included `README.zh-CN.md` in the source release archive.
+
 ## 4.12.7 - 2026-05-04
 
 ### Changed
