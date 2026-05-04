@@ -3799,7 +3799,7 @@ public:
         }
 
         std::ostringstream frame;
-        frame << "\033[?25l";
+        frame << "\033[" << rows << ";1H\033[?25l";
         if (resized || !painted_) {
             frame << "\033[H\033[2J";
         }
@@ -3937,14 +3937,18 @@ inline std::string menuLine(const std::string &key,
                             const std::string &detail,
                             bool selected) {
     std::ostringstream row;
-    row << (selected ? "> " : "  ")
+    if (selected) {
+        row << "> "
+            << padRightCells(key, 4)
+            << padRightCells(title, 24)
+            << detail;
+        return ansi::inverse + ansi::cyan + row.str() + ansi::plain;
+    }
+    row << "  "
         << padRightCells(ansi::cyan + key + ansi::plain, 4)
         << padRightCells(ansi::bold + title + ansi::plain, 24)
-        << (selected ? detail : ansi::gray + detail + ansi::plain);
-    if (!selected) {
-        return row.str();
-    }
-    return ansi::inverse + row.str() + ansi::plain;
+        << ansi::gray + detail + ansi::plain;
+    return row.str();
 }
 
 inline std::string bufferCell(const std::string &value, int width) {
@@ -9916,6 +9920,10 @@ inline int selfTest() {
                               drawLine.find("\033[2K") == std::string::npos);
     check("输入软件光标闪烁渲染", promptInputLine("端口> ", "443", true).find(ansi::inverse) != std::string::npos &&
                                       promptInputLine("端口> ", "443", false).find(ansi::inverse) == std::string::npos);
+    const std::string selectedMenuLine = menuLine("2", "流量统计", "开启/追加端口", true);
+    check("菜单选中行高亮不中断", selectedMenuLine.rfind(ansi::plain) == selectedMenuLine.size() - ansi::plain.size() &&
+                                          selectedMenuLine.find(ansi::plain) == selectedMenuLine.rfind(ansi::plain) &&
+                                          selectedMenuLine.find(ansi::inverse) == 0);
     Viewport cursorViewport;
     ScreenBuffer cursorBuffer;
     cursorBuffer.add("菜单行");
@@ -9927,7 +9935,8 @@ inline int selfTest() {
     const std::string hiddenAtFooter = "\033[" + std::to_string(terminalRows()) + ";1H\033[?25l";
     check("非输入页隐藏硬件光标", cursorFrameText.size() >= 6 &&
                                       cursorFrameText.rfind("\033[?25l") == cursorFrameText.size() - 6 &&
-                                      cursorFrameText.find(hiddenAtFooter) != std::string::npos);
+                                      cursorFrameText.find(hiddenAtFooter) == 0 &&
+                                      cursorFrameText.rfind(hiddenAtFooter) != std::string::npos);
     int scrollProbe = 0;
     const bool topScrollChanged = adjustScroll(InputKind::Up, scrollProbe, 100);
     const bool downScrollChanged = adjustScroll(InputKind::Down, scrollProbe, 100);
