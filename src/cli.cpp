@@ -5444,9 +5444,9 @@ inline std::vector<TrafficPeriodPortRow> trafficPeriodPortRows(
 }
 
 inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, TrafficGroupMode mode) {
-    Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "国家/地区", "端口", "出站(上行)", "入站(下行)", "合计", "包数"}
-                : mode == TrafficGroupMode::Port ? std::vector<std::string>{"序号", "端口", "服务", "出站(上行)", "入站(下行)", "合计", "包数"}
-                                                  : std::vector<std::string>{"序号", "IP", "国家/地区", "出站(上行)", "入站(下行)", "合计", "包数"},
+    Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "国家/地区", "端口", "入站(下行)", "出站(上行)", "合计", "包数"}
+                : mode == TrafficGroupMode::Port ? std::vector<std::string>{"序号", "端口", "服务", "入站(下行)", "出站(上行)", "合计", "包数"}
+                                                  : std::vector<std::string>{"序号", "IP", "国家/地区", "入站(下行)", "出站(上行)", "合计", "包数"},
                 mode == TrafficGroupMode::IpPort ? std::vector<std::size_t>{6, 28, 18, 8, 12, 12, 12, 10}
                 : mode == TrafficGroupMode::Port ? std::vector<std::size_t>{6, 8, 18, 12, 12, 12, 10}
                                                   : std::vector<std::size_t>{6, 28, 18, 12, 12, 12, 10});
@@ -5462,8 +5462,8 @@ inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std
                 cells.push_back(rows[i].port);
             }
         }
-        cells.push_back(humanBytes(rows[i].uploadBytes));
         cells.push_back(humanBytes(rows[i].downloadBytes));
+        cells.push_back(humanBytes(rows[i].uploadBytes));
         cells.push_back(humanBytes(rows[i].totalBytes()));
         cells.push_back(std::to_string(rows[i].totalPackets()));
         table.add(std::move(cells));
@@ -5479,7 +5479,7 @@ inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &row
                                       TrafficPeriodMode mode,
                                       const std::map<std::string, std::vector<TrafficRow>> &details = {}) {
     const std::string label = mode == TrafficPeriodMode::Day ? "日期" : mode == TrafficPeriodMode::Year ? "年份" : "月份";
-    Table table({label, "出站(上行)", "入站(下行)", "合计", "包数", "Top端口", "Top IP:端口"},
+    Table table({label, "入站(下行)", "出站(上行)", "合计", "包数", "Top端口", "Top IP:端口"},
                 {12, 11, 11, 11, 8, 26, 34});
     for (const auto &row : rows) {
         std::string topPorts = "-";
@@ -5490,8 +5490,8 @@ inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &row
             topIpPorts = compactTrafficSummary(aggregateTrafficByIpPort(detailIt->second), TrafficGroupMode::IpPort, 3);
         }
         table.add({row.period,
-                   humanBytes(row.uploadBytes),
                    humanBytes(row.downloadBytes),
+                   humanBytes(row.uploadBytes),
                    humanBytes(row.totalBytes()),
                    std::to_string(row.totalPackets()),
                    topPorts,
@@ -5502,14 +5502,14 @@ inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &row
 
 inline Table trafficPeriodPortTable(const std::vector<TrafficPeriodPortRow> &rows, TrafficPeriodMode mode) {
     const std::string label = trafficPeriodModeColumn(mode);
-    Table table({label, "端口", "服务", "出站(上行)", "入站(下行)", "合计", "包数", "Top IP"},
+    Table table({label, "端口", "服务", "入站(下行)", "出站(上行)", "合计", "包数", "Top IP"},
                 {12, 8, 16, 11, 11, 11, 8, 36});
     for (const auto &row : rows) {
         table.add({row.period,
                    row.port,
                    serviceNameForPort(row.port),
-                   humanBytes(row.uploadBytes),
                    humanBytes(row.downloadBytes),
+                   humanBytes(row.uploadBytes),
                    humanBytes(row.totalBytes()),
                    std::to_string(row.totalPackets()),
                    row.topIps.empty() ? "-" : row.topIps});
@@ -6418,7 +6418,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
 
     buffer.add("> 最近31天端口流量 Top 10");
     buffer.add("统计口径: 系统本地时间 " + (snapshot->trafficPeriodLabel.empty() ? recentTrafficDaysLabel(recentTrafficDayPeriods(kDashboardTrafficDays), kDashboardTrafficDays) : snapshot->trafficPeriodLabel) +
-               "，按端口聚合出站(上行)/入站(下行)，只展示前10个端口。");
+               "，按端口聚合入站(下行)/出站(上行)，只展示前10个端口。");
     buffer.add(std::string("历史采样: ") + (snapshot->tableEnabled ? "[已初始化]" : "[未初始化]"));
     buffer.add("统计端口: " + std::to_string(snapshot->trackedPorts.size()) + " 个  " + humanPortList(snapshot->trackedPorts));
     if (!snapshot->tableEnabled) {
@@ -6547,9 +6547,9 @@ private:
         const std::vector<int> widths = mode == TrafficGroupMode::IpPort ? std::vector<int>{6, 26, 18, 8, 14, 14, 14, 10}
                                       : mode == TrafficGroupMode::Port ? std::vector<int>{6, 8, 20, 14, 14, 14, 10}
                                                                        : std::vector<int>{6, 26, 18, 14, 14, 14, 10};
-        buffer.add(mode == TrafficGroupMode::IpPort ? tableRow({"序号", "IP", "国家/地区", "端口", "出站(上行)", "入站(下行)", "合计", "包数"}, widths, true)
-                   : mode == TrafficGroupMode::Port ? tableRow({"序号", "端口", "服务", "出站(上行)", "入站(下行)", "合计", "包数"}, widths, true)
-                                                     : tableRow({"序号", "IP", "国家/地区", "出站(上行)", "入站(下行)", "合计", "包数"}, widths, true));
+        buffer.add(mode == TrafficGroupMode::IpPort ? tableRow({"序号", "IP", "国家/地区", "端口", "入站(下行)", "出站(上行)", "合计", "包数"}, widths, true)
+                   : mode == TrafficGroupMode::Port ? tableRow({"序号", "端口", "服务", "入站(下行)", "出站(上行)", "合计", "包数"}, widths, true)
+                                                     : tableRow({"序号", "IP", "国家/地区", "入站(下行)", "出站(上行)", "合计", "包数"}, widths, true));
         buffer.add(tableRule(widths));
         if (rows.empty()) {
             buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
@@ -6567,8 +6567,8 @@ private:
                     cells.push_back(rows[i].port);
                 }
             }
-            cells.push_back(humanBytes(rows[i].uploadBytes));
             cells.push_back(humanBytes(rows[i].downloadBytes));
+            cells.push_back(humanBytes(rows[i].uploadBytes));
             cells.push_back(humanBytes(rows[i].totalBytes()));
             cells.push_back(std::to_string(rows[i].totalPackets()));
             buffer.add(tableRow(cells, widths));
@@ -6930,7 +6930,7 @@ private:
             buffer.add(std::string("后台刷新中 ") + spinner + "  先显示上一份快照，刷新完成后自动更新。");
         }
         buffer.add("统计口径: 系统本地时间 " + (snapshot->trafficPeriodLabel.empty() ? recentTrafficDaysLabel(recentTrafficDayPeriods(kDashboardTrafficDays), kDashboardTrafficDays) : snapshot->trafficPeriodLabel) +
-                   "，按端口聚合出站(上行)/入站(下行)，只展示前10个端口。");
+                   "，按端口聚合入站(下行)/出站(上行)，只展示前10个端口。");
         buffer.add(std::string("历史采样: ") +
                    (snapshot->tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
         buffer.add("统计端口: " + std::to_string(snapshot->trackedPorts.size()) + " 个  " + humanPortList(snapshot->trackedPorts));
@@ -7343,8 +7343,8 @@ private:
             const auto filtered = filterTrafficRowsByPort(rows, ports[i].port);
             buffer.add("");
             buffer.add("> 端口 " + ports[i].port + " " + serviceNameForPort(ports[i].port) +
-                       "  出站(上行) " + humanBytes(ports[i].uploadBytes) +
-                       " / 入站(下行) " + humanBytes(ports[i].downloadBytes) +
+                       "  入站(下行) " + humanBytes(ports[i].downloadBytes) +
+                       " / 出站(上行) " + humanBytes(ports[i].uploadBytes) +
                        " / 合计 " + humanBytes(ports[i].totalBytes()));
             addTrafficSummaryTable(buffer, aggregateTrafficByIp(filtered), ipLimit, "该端口暂无 IP 明细", TrafficGroupMode::Ip);
         }
@@ -7390,7 +7390,7 @@ private:
         buffer.add("查询模式: " + queryNote);
         buffer.add("统计口径: 端口级 vnStat。保留 " + vnstat + " 的时间维度，但主表按“周期 + 端口”展示。");
         buffer.add("每个周期最多展示 Top 5 端口，并给出该端口 Top IP；绝对时间查询会展开更多 IP 明细。");
-        buffer.add("时间使用服务器系统本地时区；出站(上行)在前，入站(下行)在后。");
+        buffer.add("时间使用服务器系统本地时区；入站(下行)在前，出站(上行)在后。");
         buffer.add("历史目录: " + kTrafficHistoryDir);
         buffer.add("");
         buffer.add("> 周期总览");
@@ -7518,8 +7518,8 @@ private:
         std::vector<std::string> intro = {
             "默认追加到现有端口，不清空已有统计。",
             "当前统计端口: " + std::to_string(knownPorts.size()) + " 个  " + humanPortList(knownPorts),
-            "本月流量(" + month + "): 出站(上行) " + humanBytes(monthTotal.uploadBytes) +
-                " / 入站(下行) " + humanBytes(monthTotal.downloadBytes) +
+            "本月流量(" + month + "): 入站(下行) " + humanBytes(monthTotal.downloadBytes) +
+                " / 出站(上行) " + humanBytes(monthTotal.uploadBytes) +
                 " / 合计 " + humanBytes(monthTotal.totalBytes()),
         };
         if (monthRows.empty()) {
@@ -9372,7 +9372,7 @@ inline ScreenBuffer dashboardBufferForCli() {
     const std::string trafficLabel = recentTrafficDaysLabel(trafficPeriods, kDashboardTrafficDays);
 
     addSection(buffer, "最近31天端口流量 Top 10");
-    buffer.add("统计口径: 系统本地时间 " + trafficLabel + "，按端口聚合出站(上行)/入站(下行)，只展示前10个端口。");
+    buffer.add("统计口径: 系统本地时间 " + trafficLabel + "，按端口聚合入站(下行)/出站(上行)，只展示前10个端口。");
     buffer.add(std::string("历史采样: ") +
                (tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
     buffer.add("统计端口: " + std::to_string(trackedPorts.size()) + " 个  " + humanPortList(trackedPorts));

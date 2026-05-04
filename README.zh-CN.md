@@ -72,7 +72,7 @@ LTG 的流量统计目标是“端口级 vnStat + IP 明细”：
 - 追加新端口时保留已有历史日/月/年数据。
 - 通过 systemd timer 每 5 分钟采样 nftables counter。
 - 日/月/年支持滚动窗口和绝对时间两种查询。
-- 每个周期按 `周期 + 端口` 展示出站(上行)、入站(下行)、合计、包数、Top IP。
+- 每个周期按 `周期 + 端口` 展示入站(下行)、出站(上行)、合计、包数、Top IP。
 - 可以从端口继续展开 IP 级出站/入站明细。
 
 TUI 路径示例：
@@ -280,8 +280,8 @@ GitHub Actions 会自动编译并上传：
 维护者发布新版本时，先更新 `include/ltg/version.hpp`、实现文件和 `CHANGELOG.md`，再推送 tag：
 
 ```bash
-git tag v4.12.19
-git push origin v4.12.19
+git tag v4.12.20
+git push origin v4.12.20
 ```
 
 ## 安全说明

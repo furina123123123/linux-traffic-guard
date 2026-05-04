@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.12.20 - 2026-05-04
+
+### Changed
+
+- Reordered traffic tables and summaries to show host inbound/download before host outbound/upload.
+
 ## 4.12.19 - 2026-05-04
 
 ### Changed
