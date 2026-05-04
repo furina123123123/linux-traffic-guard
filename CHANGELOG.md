@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.16 - 2026-05-04
+
+### Changed
+
+- Reduced TUI scroll flicker by buffering full-screen renders and skipping redraws for no-op scroll or selection input.
+- Made prompt input feedback more obvious with a software blinking cursor that updates only when needed.
+
 ## 4.12.15 - 2026-05-04
 
 ### Changed

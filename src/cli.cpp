@@ -3325,11 +3325,12 @@ public:
         footerLine << footer << "  |  页 " << currentPage << "/" << totalPages
                    << "  行 " << fromLine << "-" << toLine << "/" << lines.size();
 
+        std::ostringstream frame;
         const auto draw = [&](int row, const std::string &text) {
-            std::cout << "\033[" << row << ";1H\033[2K" << fitLine(text, cols);
+            frame << "\033[" << row << ";1H\033[2K" << fitLine(text, cols);
         };
 
-        std::cout << "\033[?25h\033[H";
+        frame << "\033[?25l\033[H";
         draw(1, ansi::bold + title + ansi::plain);
         draw(2, ansi::gray + std::string(std::max(1, std::min(cols, 140)), '-') + ansi::plain);
         for (int i = 0; i < bodyRows; ++i) {
@@ -3342,11 +3343,14 @@ public:
         }
         draw(rows - 1, ansi::gray + std::string(std::max(1, std::min(cols, 140)), '-') + ansi::plain);
         draw(rows, footerLine.str());
+        frame << "\033[?25h";
+        std::cout << frame.str();
         std::cout.flush();
     }
 };
 
-inline void adjustScroll(InputKind kind, int &scrollOffset, std::size_t lineCount) {
+inline bool adjustScroll(InputKind kind, int &scrollOffset, std::size_t lineCount) {
+    const int before = scrollOffset;
     const int bodyRows = std::max(3, terminalRows() - 4);
     const int maxOffset = std::max(0, static_cast<int>(lineCount) - bodyRows);
     if (kind == InputKind::Up || kind == InputKind::MouseUp) scrollOffset -= 3;
@@ -3356,6 +3360,7 @@ inline void adjustScroll(InputKind kind, int &scrollOffset, std::size_t lineCoun
     else if (kind == InputKind::Home) scrollOffset = 0;
     else if (kind == InputKind::End) scrollOffset = maxOffset;
     scrollOffset = std::max(0, std::min(scrollOffset, maxOffset));
+    return scrollOffset != before;
 }
 
 inline std::string cursorMoveSequence(int row, int col) {
@@ -3364,10 +3369,16 @@ inline std::string cursorMoveSequence(int row, int col) {
     return out.str();
 }
 
-inline void adjustSelection(InputKind kind, int &selected, int count) {
+inline std::string promptInputLine(const std::string &label, const std::string &value, bool cursorOn) {
+    return ansi::cyan + label + ansi::plain + value +
+           (cursorOn ? ansi::inverse + std::string(" ") + ansi::plain : " ");
+}
+
+inline bool adjustSelection(InputKind kind, int &selected, int count) {
+    const int before = selected;
     if (count <= 0) {
         selected = 0;
-        return;
+        return selected != before;
     }
     if (kind == InputKind::Up || kind == InputKind::MouseUp) {
         selected = (selected + count - 1) % count;
@@ -3378,6 +3389,7 @@ inline void adjustSelection(InputKind kind, int &selected, int count) {
     } else if (kind == InputKind::End) {
         selected = count - 1;
     }
+    return selected != before;
 }
 
 inline void ensureLineVisible(int line, int &scrollOffset, std::size_t lineCount) {
@@ -5519,8 +5531,9 @@ public:
             if (event.kind == InputKind::None) {
                 continue;
             }
-            dispatch(event);
-            dirty = true;
+            if (dispatch(event)) {
+                dirty = true;
+            }
         }
     }
 
@@ -6038,13 +6051,13 @@ private:
         return false;
     }
 
-    void dispatch(const InputEvent &event) {
+    bool dispatch(const InputEvent &event) {
         if (event.kind == InputKind::CtrlC) {
             std::raise(SIGINT);
-            return;
+            return false;
         }
         if (pages_.empty() || event.kind == InputKind::None) {
-            return;
+            return false;
         }
         Page &page = pages_.back();
         const bool rootExitKey =
@@ -6060,101 +6073,105 @@ private:
 #else
             std::exit(0);
 #endif
-            return;
+            return true;
         }
         if (page.kind == PageKind::Menu) {
-            handleMenu(event, page);
+            return handleMenu(event, page);
         } else if (page.kind == PageKind::Dashboard) {
-            handleDashboard(event, page);
+            return handleDashboard(event, page);
         } else {
-            handleScrollable(event, page);
+            return handleScrollable(event, page);
         }
     }
 
-    void handleMenu(const InputEvent &event, Page &page) {
+    bool handleMenu(const InputEvent &event, Page &page) {
         const int selectableCount = static_cast<int>(page.items.size()) + 1;
         ScreenBuffer buffer = renderPage(page);
         if (event.kind == InputKind::Up || event.kind == InputKind::Down ||
             event.kind == InputKind::MouseUp || event.kind == InputKind::MouseDown ||
             event.kind == InputKind::Home || event.kind == InputKind::End) {
-            adjustSelection(event.kind, page.selected, selectableCount);
+            const int beforeScroll = page.scrollOffset;
+            const bool selectedChanged = adjustSelection(event.kind, page.selected, selectableCount);
             ensureLineVisible(6 + page.selected, page.scrollOffset, buffer.size());
-            return;
+            return selectedChanged || page.scrollOffset != beforeScroll;
         }
         if (event.kind == InputKind::PageUp || event.kind == InputKind::PageDown) {
-            adjustScroll(event.kind, page.scrollOffset, buffer.size());
-            return;
+            return adjustScroll(event.kind, page.scrollOffset, buffer.size());
         }
         if (event.kind == InputKind::Escape) {
             popPage();
-            return;
+            return true;
         }
         if (event.kind != InputKind::Character) {
-            return;
+            return false;
         }
         if (event.ch == 'q' || event.ch == 'Q') {
             popPage();
-            return;
+            return true;
         }
         if (event.ch == '\n') {
             activateSelected(page);
-            return;
+            return true;
         }
         if (event.ch == '0') {
             popPage();
-            return;
+            return true;
         }
         for (std::size_t i = 0; i < page.items.size(); ++i) {
             if (!page.items[i].key.empty() && event.ch == page.items[i].key[0]) {
                 page.selected = static_cast<int>(i);
                 activateSelected(page);
-                return;
+                return true;
             }
         }
+        return false;
     }
 
-    void handleDashboard(const InputEvent &event, Page &page) {
+    bool handleDashboard(const InputEvent &event, Page &page) {
         ScreenBuffer buffer = renderPage(page);
         if (event.kind == InputKind::Up || event.kind == InputKind::Down ||
             event.kind == InputKind::MouseUp || event.kind == InputKind::MouseDown ||
             event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
             event.kind == InputKind::Home || event.kind == InputKind::End) {
-            adjustScroll(event.kind, page.scrollOffset, buffer.size());
-            return;
+            return adjustScroll(event.kind, page.scrollOffset, buffer.size());
         }
         if (event.kind == InputKind::Escape) {
             popPage();
-            return;
+            return true;
         }
         if (event.kind != InputKind::Character) {
-            return;
+            return false;
         }
         if (event.ch == 'q' || event.ch == 'Q') {
             popPage();
+            return true;
         } else if (event.ch == 'r' || event.ch == 'R') {
             cachedDashboardSnapshot() = loadDashboardSnapshot();
             cachedDashboardValid() = true;
             page.loading = false;
             page.scrollOffset = 0;
+            return true;
         }
+        return false;
     }
 
-    void handleScrollable(const InputEvent &event, Page &page) {
+    bool handleScrollable(const InputEvent &event, Page &page) {
         ScreenBuffer buffer = renderPage(page);
         if (event.kind == InputKind::Up || event.kind == InputKind::Down ||
             event.kind == InputKind::MouseUp || event.kind == InputKind::MouseDown ||
             event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
             event.kind == InputKind::Home || event.kind == InputKind::End) {
-            adjustScroll(event.kind, page.scrollOffset, buffer.size());
-            return;
+            return adjustScroll(event.kind, page.scrollOffset, buffer.size());
         }
         if (event.kind == InputKind::Escape) {
             popPage();
-            return;
+            return true;
         }
         if (event.kind == InputKind::Character && (event.ch == 'q' || event.ch == 'Q')) {
             popPage();
+            return true;
         }
+        return false;
     }
 
     void activateSelected(Page &page) {
@@ -6205,14 +6222,26 @@ private:
                             const std::string &initial = "") {
         std::string value = initial;
         int scrollOffset = 0;
+        bool dirty = true;
+        bool cursorOn = true;
+        auto lastBlink = std::chrono::steady_clock::now();
         while (true) {
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBlink).count() >= 360) {
+                cursorOn = !cursorOn;
+                lastBlink = now;
+                dirty = true;
+            }
             ScreenBuffer buffer;
             buffer.addAll(body);
             buffer.add("");
-            buffer.add(ansi::cyan + label + ansi::plain + value);
-            viewport_.render(title, buffer, scrollOffset, "Enter 确认  Backspace 删除  Esc/q 取消");
-            movePromptCursor(body.size(), scrollOffset, label, value);
-            const InputEvent event = inputReader().readEvent(120);
+            buffer.add(promptInputLine(label, value, cursorOn));
+            if (dirty) {
+                viewport_.render(title, buffer, scrollOffset, "Enter 确认  Backspace 删除  Esc/q 取消");
+                movePromptCursor(body.size(), scrollOffset, label, value);
+                dirty = false;
+            }
+            const InputEvent event = inputReader().readEvent(80);
             if (event.kind == InputKind::CtrlC) {
                 std::raise(SIGINT);
             }
@@ -6223,7 +6252,7 @@ private:
                 event.kind == InputKind::MouseUp || event.kind == InputKind::MouseDown ||
                 event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
                 event.kind == InputKind::Home || event.kind == InputKind::End) {
-                adjustScroll(event.kind, scrollOffset, buffer.size());
+                dirty = adjustScroll(event.kind, scrollOffset, buffer.size()) || dirty;
                 continue;
             }
             if (event.kind != InputKind::Character) {
@@ -6238,12 +6267,18 @@ private:
             if (event.ch == 8 || event.ch == 127) {
                 if (!value.empty()) {
                     value.pop_back();
+                    cursorOn = true;
+                    lastBlink = std::chrono::steady_clock::now();
+                    dirty = true;
                 }
                 continue;
             }
             const unsigned char ch = static_cast<unsigned char>(event.ch);
             if (ch >= 32 || ch >= 0x80) {
                 value.push_back(event.ch);
+                cursorOn = true;
+                lastBlink = std::chrono::steady_clock::now();
+                dirty = true;
             }
         }
     }
@@ -8675,6 +8710,12 @@ inline int selfTest() {
     check("诊断报告 section 检查", diagnosticReportHasRequiredSections("### fail2ban\n...\n### ufw\n...\n### accounting\n") &&
                                       !diagnosticReportHasRequiredSections("### fail2ban\n### ufw\n"));
     check("输入光标移动序列", cursorMoveSequence(4, 12) == "\033[4;12H\033[?25h");
+    check("输入软件光标闪烁渲染", promptInputLine("端口> ", "443", true).find(ansi::inverse) != std::string::npos &&
+                                      promptInputLine("端口> ", "443", false).find(ansi::inverse) == std::string::npos);
+    int scrollProbe = 0;
+    const bool topScrollChanged = adjustScroll(InputKind::Up, scrollProbe, 100);
+    const bool downScrollChanged = adjustScroll(InputKind::Down, scrollProbe, 100);
+    check("无效滚动不触发重绘", !topScrollChanged && downScrollChanged && scrollProbe > 0);
 
 #if LTG_HAS_SQLITE
     check("SQLite 编译模式", true, "LTG_HAS_SQLITE=1");
@@ -8872,5 +8913,3 @@ int main(int argc, char **argv) {
 #endif
 
 #endif // LINUX_TRAFFIC_GUARD_HPP
-
-

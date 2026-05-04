@@ -2,6 +2,6 @@
 
 namespace linux_traffic_guard {
 
-inline constexpr const char *kVersion = "4.12.15";
+inline constexpr const char *kVersion = "4.12.16";
 
 } // namespace linux_traffic_guard
