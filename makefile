@@ -94,7 +94,7 @@ uninstall:
 
 dist: clean
 	mkdir -p $(DISTDIR)
-	cp $(SOURCE) makefile README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md .gitattributes $(DISTDIR)/
+	cp $(SOURCE) makefile README.md README.zh-CN.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md .gitattributes $(DISTDIR)/
 	tar -czf $(DISTDIR).tar.gz $(DISTDIR)
 	rm -rf $(DISTDIR)
 
