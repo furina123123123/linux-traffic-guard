@@ -9,6 +9,7 @@
 - Hid the terminal hardware cursor while prompt input pages are active so only one cursor is visible.
 - Added Vim-style TUI navigation: `j/k`, `g/G`, `Ctrl-f/Ctrl-b`, and `Ctrl-d/Ctrl-u`.
 - Added optional DB-IP IP to City Lite MMDB support for source-IP country labels, with README attribution for the free CC BY 4.0 database.
+- Made repeated UFW threat analysis loads use a fast cache-gap path instead of rescanning rotated log files for tiny recent windows.
 
 ## 4.12.15 - 2026-05-04
 

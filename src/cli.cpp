@@ -110,6 +110,7 @@ inline const std::string kUfwDropActionFile = "/etc/fail2ban/action.d/ufw-drop.c
 inline const std::string kUfwCacheDir = "/var/tmp/linux_traffic_guard_ufw_cache_v2";
 inline const std::string kFail2banDb = "/var/lib/fail2ban/fail2ban.sqlite3";
 inline constexpr int kUfwCacheIdleDays = 14;
+inline constexpr int kUfwLiveGapFastFallbackSeconds = 10 * 60;
 inline constexpr std::size_t kDashboardTrafficDays = 31;
 inline constexpr std::size_t kDashboardTrafficPortLimit = 10;
 
@@ -2918,6 +2919,20 @@ inline UfwAnalysisReport analyzeUfwEventsSqlite(const std::string &title,
 }
 #endif
 
+inline bool shouldUseFastUfwLogGap(std::time_t start, std::time_t end) {
+    return end > start && end - start <= kUfwLiveGapFastFallbackSeconds;
+}
+
+inline std::string ufwCurrentLogTailCommand() {
+    return "(tail -n 5000 /var/log/ufw.log /var/log/kern.log /var/log/syslog /var/log/messages "
+           "2>/dev/null | grep -E '\\[UFW (BLOCK|AUDIT|ALLOW)\\]' || true)";
+}
+
+inline std::string ufwFullLogScanCommand() {
+    return "(zgrep -h -E '\\[UFW (BLOCK|AUDIT|ALLOW)\\]' /var/log/ufw.log* /var/log/kern.log* /var/log/syslog* /var/log/messages* 2>/dev/null || "
+           "grep -h -E '\\[UFW (BLOCK|AUDIT|ALLOW)\\]' /var/log/ufw.log /var/log/kern.log /var/log/syslog /var/log/messages 2>/dev/null || true)";
+}
+
 inline std::vector<UfwLogEvent> loadLiveUfwEvents(std::time_t start, std::time_t end, std::string &sourceNote, UfwLogEvidence *evidence) {
     std::vector<UfwLogEvent> events;
     if (evidence) {
@@ -2936,11 +2951,13 @@ inline std::vector<UfwLogEvent> loadLiveUfwEvents(std::time_t start, std::time_t
         }
     }
     if (trim(output).empty()) {
-        const std::string command =
-            "(zgrep -h -E '\\[UFW (BLOCK|AUDIT|ALLOW)\\]' /var/log/ufw.log* /var/log/kern.log* /var/log/syslog* /var/log/messages* 2>/dev/null || "
-            "grep -h -E '\\[UFW (BLOCK|AUDIT|ALLOW)\\]' /var/log/ufw.log /var/log/kern.log /var/log/syslog /var/log/messages 2>/dev/null || true)";
-        output = Shell::capture(command).output;
-        sourceNote = trim(output).empty() ? "无可用 UFW 日志" : "文件日志";
+        if (shouldUseFastUfwLogGap(start, end)) {
+            output = Shell::capture(ufwCurrentLogTailCommand()).output;
+            sourceNote = trim(output).empty() ? "缓存增量窗口内无新增 UFW 日志" : "当前文件日志 tail";
+        } else {
+            output = Shell::capture(ufwFullLogScanCommand()).output;
+            sourceNote = trim(output).empty() ? "无可用 UFW 日志" : "文件日志";
+        }
     }
     if (evidence) {
         evidence->liveSource = sourceNote;
@@ -9470,6 +9487,11 @@ inline int selfTest() {
     const UfwAnalysisReport evidenceReport = buildUfwReportFromEvents("test", 1, 2, "live", {parsedGood}, evidence);
     check("UFW 分析证据不参与排序", evidenceReport.evidence.rawMatches == 2 &&
                                            ufwAnalysisAccuracyNote().find("国家/地区只用于展示") != std::string::npos);
+    check("UFW 缓存小缺口快路径", shouldUseFastUfwLogGap(1000, 1300) &&
+                                      !shouldUseFastUfwLogGap(1000, 3000) &&
+                                      ufwCurrentLogTailCommand().find("tail -n 5000") != std::string::npos &&
+                                      ufwCurrentLogTailCommand().find("zgrep") == std::string::npos &&
+                                      ufwFullLogScanCommand().find("zgrep") != std::string::npos);
     const std::string nftSample =
         "table inet usp_ip_traffic {\n"
         "\tset tracked_ports { elements = { 22, 443 } }\n"
