@@ -69,6 +69,7 @@
 
 - Changed traffic accounting enablement to append tracked ports by default instead of deleting the accounting table.
 - Reworked the dashboard to show recent 31-day port traffic Top 10 from the local history store and avoid expensive UFW/fail2ban/nft/tool probes on first render.
+- Hardened reliability checks for traffic accounting, UFW analysis, and fail2ban automation: traffic port enablement now verifies nft rules before writing local history/timer state, UFW analysis shows raw/effective log evidence, and fail2ban probes require a commented UFW deny plus verified cleanup.
 - Improved TUI wording and empty states so users can tell whether traffic history is uninitialized, waiting for a baseline, or ready for drill-down.
 - Changed append-port confirmation away from yes/no wording, added a non-rebuild tracked-port delete flow, added visible tracked-port lists, and put upload before download in traffic tables.
 - Renamed user-facing raw nftables wording to the friendlier advanced "底层计数规则" surface.

@@ -267,12 +267,26 @@ struct UfwLogEvent {
     std::string dpt;
 };
 
+struct UfwLogEvidence {
+    std::size_t rawMatches = 0;
+    std::size_t validPublic = 0;
+    std::size_t filteredSource = 0;
+    std::size_t noDpt = 0;
+    std::size_t block = 0;
+    std::size_t audit = 0;
+    std::size_t allow = 0;
+    bool cacheCovered = false;
+    std::string cacheRanges;
+    std::string liveSource;
+};
+
 struct UfwAnalysisReport {
     std::string title;
     std::time_t start = 0;
     std::time_t end = 0;
     std::size_t validLines = 0;
     std::string sourceNote;
+    UfwLogEvidence evidence;
     std::map<std::string, std::map<std::string, int>> ipDaily;
     std::map<std::string, std::map<std::string, int>> portDaily;
     std::map<std::string, std::map<std::string, std::map<std::string, int>>> ipPortDaily;
@@ -1722,6 +1736,22 @@ inline std::string ufwAllowFromCommand(const std::string &source) {
     return "ufw allow from " + shellQuote(source);
 }
 
+inline bool ufwStatusHasDenyForIp(const std::string &output, const std::string &ip, bool requireFail2banComment) {
+    for (const auto &line : splitLines(output)) {
+        const std::string lower = lowerCopy(line);
+        if (line.find(ip) == std::string::npos || lower.find("deny") == std::string::npos) {
+            continue;
+        }
+        if (!requireFail2banComment ||
+            lower.find("f2b") != std::string::npos ||
+            lower.find("fail2ban") != std::string::npos ||
+            lower.find("ufw-drop") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline std::string ufwDeleteDenyFromCommand(const std::string &source) {
     return "ufw --force delete deny from " + shellQuote(source) + " 2>/dev/null || true";
 }
@@ -2106,6 +2136,35 @@ inline bool parseSyslogTime(const std::string &line, std::time_t &ts) {
     return ts != static_cast<std::time_t>(-1);
 }
 
+inline std::time_t ufwLogLineTimeOrNow(const std::string &line) {
+    std::time_t ts = 0;
+    if (!parseIsoLogTime(line, ts)) {
+        parseSyslogTime(line, ts);
+    }
+    return ts > 0 ? ts : std::time(nullptr);
+}
+
+inline void observeUfwRawLogLine(const std::string &line, UfwLogEvidence &evidence) {
+    std::smatch match;
+    static const std::regex actionPattern(R"(\[UFW (BLOCK|AUDIT|ALLOW)\])");
+    static const std::regex dptPattern(R"(\bDPT=([0-9]+)\b)");
+    if (!std::regex_search(line, match, actionPattern)) {
+        return;
+    }
+    ++evidence.rawMatches;
+    const std::string action = match[1].str();
+    if (action == "BLOCK") {
+        ++evidence.block;
+    } else if (action == "AUDIT") {
+        ++evidence.audit;
+    } else if (action == "ALLOW") {
+        ++evidence.allow;
+    }
+    if (!std::regex_search(line, dptPattern)) {
+        ++evidence.noDpt;
+    }
+}
+
 inline bool parseUfwLogEvent(const std::string &line, UfwLogEvent &event) {
     std::smatch match;
     static const std::regex actionPattern(R"(\[UFW (BLOCK|AUDIT|ALLOW)\])");
@@ -2475,7 +2534,60 @@ inline void writeUfwCacheEvents(const std::vector<UfwLogEvent> &newEvents) {
     }
 }
 
-inline std::vector<UfwLogEvent> loadLiveUfwEvents(std::time_t start, std::time_t end, std::string &sourceNote);
+inline std::vector<UfwLogEvent> loadLiveUfwEvents(std::time_t start, std::time_t end, std::string &sourceNote, UfwLogEvidence *evidence = nullptr);
+
+inline std::string ufwRangesSummary(const std::vector<std::pair<std::time_t, std::time_t>> &ranges) {
+    if (ranges.empty()) {
+        return "无缓存范围";
+    }
+    std::ostringstream out;
+    std::size_t shown = 0;
+    for (const auto &range : ranges) {
+        if (shown != 0) {
+            out << " | ";
+        }
+        out << dateTimeStamp(range.first) << "~" << dateTimeStamp(range.second);
+        if (++shown >= 3) {
+            break;
+        }
+    }
+    if (ranges.size() > shown) {
+        out << " | ...";
+    }
+    return out.str();
+}
+
+inline UfwAnalysisReport buildUfwReportFromEvents(const std::string &title,
+                                                  std::time_t start,
+                                                  std::time_t end,
+                                                  const std::string &sourceNote,
+                                                  const std::vector<UfwLogEvent> &events,
+                                                  const UfwLogEvidence &evidence = {}) {
+    UfwAnalysisReport report;
+    report.title = title;
+    report.start = start;
+    report.end = end;
+    report.sourceNote = sourceNote;
+    report.validLines = events.size();
+    report.evidence = evidence;
+    if (report.evidence.validPublic == 0 && !events.empty()) {
+        report.evidence.validPublic = events.size();
+    }
+    for (const auto &event : events) {
+        if (event.action == "ALLOW") {
+            if (event.ts >= std::time(nullptr) - 3 * 86400) {
+                report.allowRecent.push_back({event.src, event.ts});
+            }
+            continue;
+        }
+        report.ipDaily[event.src][event.day] += 1;
+        if (!event.dpt.empty()) {
+            report.portDaily[event.dpt][event.day] += 1;
+            report.ipPortDaily[event.src][event.dpt][event.day] += 1;
+        }
+    }
+    return report;
+}
 
 #if LTG_HAS_SQLITE
 inline std::string ufwCacheDbPath() {
@@ -2654,6 +2766,16 @@ inline UfwAnalysisReport sqliteBuildUfwReport(sqlite3 *db,
     report.sourceNote = sourceNote;
     report.validLines = static_cast<std::size_t>(
         sqliteCountScalar(db, "SELECT count(*) FROM events WHERE ts BETWEEN ? AND ?;", start, end));
+    report.evidence.validPublic = report.validLines;
+    report.evidence.rawMatches = report.validLines;
+    report.evidence.block = static_cast<std::size_t>(
+        sqliteCountScalar(db, "SELECT count(*) FROM events WHERE ts BETWEEN ? AND ? AND action='BLOCK';", start, end));
+    report.evidence.audit = static_cast<std::size_t>(
+        sqliteCountScalar(db, "SELECT count(*) FROM events WHERE ts BETWEEN ? AND ? AND action='AUDIT';", start, end));
+    report.evidence.allow = static_cast<std::size_t>(
+        sqliteCountScalar(db, "SELECT count(*) FROM events WHERE ts BETWEEN ? AND ? AND action='ALLOW';", start, end));
+    report.evidence.noDpt = static_cast<std::size_t>(
+        sqliteCountScalar(db, "SELECT count(*) FROM events WHERE ts BETWEEN ? AND ? AND dpt='" + kUnknownUfwPort + "';", start, end));
 
     auto run3 = [&](const std::string &sql, const std::function<void(const char *, const char *, int)> &fn) {
         sqlite3_stmt *stmt = nullptr;
@@ -2739,12 +2861,24 @@ inline UfwAnalysisReport analyzeUfwEventsSqlite(const std::string &title,
         ranges.clear();
     }
     const auto gaps = missingRanges(start, end, ranges);
+    UfwLogEvidence liveEvidence;
     if (!gaps.empty()) {
         std::vector<UfwLogEvent> loaded;
         std::string liveNote;
         for (const auto &gap : gaps) {
             std::string note;
-            auto part = loadLiveUfwEvents(gap.first, gap.second, note);
+            UfwLogEvidence gapEvidence;
+            auto part = loadLiveUfwEvents(gap.first, gap.second, note, &gapEvidence);
+            liveEvidence.rawMatches += gapEvidence.rawMatches;
+            liveEvidence.validPublic += gapEvidence.validPublic;
+            liveEvidence.filteredSource += gapEvidence.filteredSource;
+            liveEvidence.noDpt += gapEvidence.noDpt;
+            liveEvidence.block += gapEvidence.block;
+            liveEvidence.audit += gapEvidence.audit;
+            liveEvidence.allow += gapEvidence.allow;
+            if (!gapEvidence.liveSource.empty()) {
+                liveEvidence.liveSource = gapEvidence.liveSource;
+            }
             if (!note.empty() && liveNote.empty()) {
                 liveNote = note;
             }
@@ -2757,13 +2891,33 @@ inline UfwAnalysisReport analyzeUfwEventsSqlite(const std::string &title,
     }
     sqliteTouchUfwCache(db);
     UfwAnalysisReport report = sqliteBuildUfwReport(db, title, start, end, sourceNote);
+    report.evidence.cacheCovered = rangeCovered(start, end, ranges);
+    report.evidence.cacheRanges = ufwRangesSummary(ranges);
+    report.evidence.liveSource = liveEvidence.liveSource;
+    if (forceRefresh || (report.evidence.cacheCovered && ranges.size() == 1 && ranges.front().first <= start && ranges.front().second >= end)) {
+        if (liveEvidence.rawMatches > 0 || forceRefresh) {
+            report.evidence.rawMatches = liveEvidence.rawMatches;
+            report.evidence.validPublic = liveEvidence.validPublic;
+            report.evidence.filteredSource = liveEvidence.filteredSource;
+            report.evidence.noDpt = liveEvidence.noDpt;
+            report.evidence.block = liveEvidence.block;
+            report.evidence.audit = liveEvidence.audit;
+            report.evidence.allow = liveEvidence.allow;
+        }
+    }
+    if (report.evidence.cacheCovered && report.validLines == 0 && sourceNote == "SQLite 缓存") {
+        report.sourceNote = "SQLite 缓存(窗口内无有效记录)";
+    }
     sqlite3_close(db);
     return report;
 }
 #endif
 
-inline std::vector<UfwLogEvent> loadLiveUfwEvents(std::time_t start, std::time_t end, std::string &sourceNote) {
+inline std::vector<UfwLogEvent> loadLiveUfwEvents(std::time_t start, std::time_t end, std::string &sourceNote, UfwLogEvidence *evidence) {
     std::vector<UfwLogEvent> events;
+    if (evidence) {
+        *evidence = {};
+    }
     const std::string since = dateTimeStamp(start);
     const std::string until = dateTimeStamp(end);
     std::string output;
@@ -2783,13 +2937,26 @@ inline std::vector<UfwLogEvent> loadLiveUfwEvents(std::time_t start, std::time_t
         output = Shell::capture(command).output;
         sourceNote = trim(output).empty() ? "无可用 UFW 日志" : "文件日志";
     }
+    if (evidence) {
+        evidence->liveSource = sourceNote;
+    }
     for (const auto &line : splitLines(output)) {
-        UfwLogEvent event;
-        if (!parseUfwLogEvent(line, event)) {
+        const std::time_t ts = ufwLogLineTimeOrNow(line);
+        if (ts < start || ts > end) {
             continue;
         }
-        if (event.ts < start || event.ts > end) {
+        if (evidence) {
+            observeUfwRawLogLine(line, *evidence);
+        }
+        UfwLogEvent event;
+        if (!parseUfwLogEvent(line, event)) {
+            if (evidence) {
+                ++evidence->filteredSource;
+            }
             continue;
+        }
+        if (evidence) {
+            ++evidence->validPublic;
         }
         events.push_back(event);
     }
@@ -2817,32 +2984,35 @@ inline UfwAnalysisReport analyzeUfwEvents(const std::string &title,
     report.end = end;
     std::vector<std::pair<std::time_t, std::time_t>> ranges = readUfwCacheRanges();
     std::vector<UfwLogEvent> events;
+    UfwLogEvidence evidence;
     if (!forceRefresh && rangeCovered(start, end, ranges)) {
         events = readUfwCacheEvents(start, end);
         report.sourceNote = "文本缓存";
+        evidence.cacheCovered = true;
+        evidence.cacheRanges = ufwRangesSummary(ranges);
     } else {
-        events = loadLiveUfwEvents(start, end, report.sourceNote);
+        events = loadLiveUfwEvents(start, end, report.sourceNote, &evidence);
         writeUfwCacheEvents(events);
         ranges.push_back({start, end});
         writeUfwCacheRanges(ranges);
+        evidence.cacheCovered = rangeCovered(start, end, ranges);
+        evidence.cacheRanges = ufwRangesSummary(ranges);
     }
     touchUfwCacheActivity();
-    report.validLines = events.size();
-    const std::time_t allowCutoff = std::time(nullptr) - 3 * 86400;
-    for (const auto &event : events) {
-        if (event.action == "ALLOW") {
-            if (event.ts >= allowCutoff) {
-                report.allowRecent.push_back({event.src, event.ts});
-            }
-            continue;
+    if (report.sourceNote == "文本缓存") {
+        evidence.rawMatches = events.size();
+        evidence.validPublic = events.size();
+        for (const auto &event : events) {
+            if (event.action == "BLOCK") ++evidence.block;
+            else if (event.action == "AUDIT") ++evidence.audit;
+            else if (event.action == "ALLOW") ++evidence.allow;
+            if (event.dpt == kUnknownUfwPort) ++evidence.noDpt;
         }
-        report.ipDaily[event.src][event.day] += 1;
-        if (!event.dpt.empty()) {
-            report.portDaily[event.dpt][event.day] += 1;
-            report.ipPortDaily[event.src][event.dpt][event.day] += 1;
+        if (events.empty()) {
+            report.sourceNote = "文本缓存(窗口内无有效记录)";
         }
     }
-    return report;
+    return buildUfwReportFromEvents(report.title, report.start, report.end, report.sourceNote, events, evidence);
 #endif
 }
 
@@ -3668,7 +3838,8 @@ inline int dailyPeak(const std::map<std::string, int> &daily) {
 
 inline std::string ufwAnalysisAccuracyNote() {
     return "口径: 精确时间窗口内的公网 SRC UFW BLOCK/AUDIT；按本机本地日期计算单日峰值。"
-           "与旧 Python 脚本不同，LTG 不会把同一天但窗口外的已缓存日志并入当前结果。";
+           "与旧 Python 脚本不同，LTG 不会把同一天但窗口外的已缓存日志并入当前结果。"
+           "国家/地区只用于展示，不参与排序、计数或 fail2ban 决策。";
 }
 
 inline std::string topPortsText(const UfwAnalysisReport &report, const std::string &ip, std::size_t topN = 5) {
@@ -3701,6 +3872,23 @@ inline void addUfwAnalysisToBuffer(ScreenBuffer &buffer, const UfwAnalysisReport
     buffer.add("范围: " + dateTimeStamp(report.start) + " ~ " + dateTimeStamp(report.end));
     buffer.add("来源: " + report.sourceNote + "  有效记录: " + std::to_string(report.validLines));
     buffer.add(ufwAnalysisAccuracyNote());
+    const std::vector<int> evidenceWidths = {16, 56};
+    buffer.add(bufferTableRow({"证据", "值"}, evidenceWidths, true));
+    buffer.add(bufferTableRule(evidenceWidths));
+    buffer.add(bufferTableRow({"原始匹配行", std::to_string(report.evidence.rawMatches)}, evidenceWidths));
+    buffer.add(bufferTableRow({"有效公网SRC", std::to_string(report.evidence.validPublic)}, evidenceWidths));
+    buffer.add(bufferTableRow({"过滤/无效SRC", std::to_string(report.evidence.filteredSource)}, evidenceWidths));
+    buffer.add(bufferTableRow({"动作分布", "BLOCK " + std::to_string(report.evidence.block) +
+                                       " / AUDIT " + std::to_string(report.evidence.audit) +
+                                       " / ALLOW " + std::to_string(report.evidence.allow)}, evidenceWidths));
+    buffer.add(bufferTableRow({"无DPT记录", std::to_string(report.evidence.noDpt)}, evidenceWidths));
+    buffer.add(bufferTableRow({"缓存覆盖", report.evidence.cacheCovered ? "是" : "否"}, evidenceWidths));
+    if (!report.evidence.cacheRanges.empty()) {
+        buffer.add("缓存范围: " + report.evidence.cacheRanges);
+    }
+    if (report.evidence.cacheCovered && report.validLines == 0) {
+        buffer.add(ansi::gray + std::string("缓存命中且当前窗口内无有效公网 UFW 记录。") + ansi::plain);
+    }
     buffer.add("");
 
     struct IpRisk {
@@ -4819,6 +5007,69 @@ inline std::set<int> nftTrackedTrafficPorts() {
     return ports;
 }
 
+inline bool nftChainContains(const std::string &body, const std::string &chain, const std::string &needle) {
+    const std::string marker = "chain " + chain;
+    const std::size_t start = body.find(marker);
+    if (start == std::string::npos) {
+        return false;
+    }
+    const std::size_t next = body.find("\n\tchain ", start + marker.size());
+    const std::string section = body.substr(start, next == std::string::npos ? std::string::npos : next - start);
+    return section.find(needle) != std::string::npos;
+}
+
+struct TrafficAccountingVerification {
+    bool ok = false;
+    std::set<int> nftPorts;
+    std::vector<std::string> failures;
+    std::string evidence;
+};
+
+inline TrafficAccountingVerification verifyTrafficAccountingApplied(const std::set<int> &expectedPorts) {
+    TrafficAccountingVerification verification;
+    if (!Shell::exists("nft")) {
+        verification.failures.push_back("nft 命令不可用");
+        return verification;
+    }
+    const CommandResult table = Shell::capture("nft list table inet " + kIpTrafficTable + " 2>&1");
+    if (!table.ok()) {
+        verification.failures.push_back("统计表不存在或不可读取: " + firstNonEmptyLine(table.output));
+        return verification;
+    }
+    const std::string &body = table.output;
+    const std::vector<std::string> sets = {"tracked_ports", "ipv4_download", "ipv4_upload", "ipv6_download", "ipv6_upload"};
+    for (const auto &setName : sets) {
+        if (body.find("set " + setName) == std::string::npos) {
+            verification.failures.push_back("缺少 set " + setName);
+        }
+    }
+    const std::vector<std::pair<std::string, std::string>> chains = {
+        {"input_account", "hook input"},
+        {"output_account", "hook output"},
+        {"forward_account", "hook forward"},
+    };
+    for (const auto &chain : chains) {
+        if (!nftChainContains(body, chain.first, chain.second)) {
+            verification.failures.push_back("chain " + chain.first + " 未挂载 " + chain.second);
+        }
+    }
+    if (body.find("@tracked_ports") == std::string::npos) {
+        verification.failures.push_back("规则未引用 @tracked_ports");
+    }
+    for (const auto &counterSet : {"@ipv4_download", "@ipv4_upload", "@ipv6_download", "@ipv6_upload"}) {
+        if (body.find(counterSet) == std::string::npos) {
+            verification.failures.push_back(std::string("规则未更新 ") + counterSet);
+        }
+    }
+    verification.nftPorts = nftTrackedTrafficPorts();
+    if (verification.nftPorts != expectedPorts) {
+        verification.failures.push_back("nft tracked_ports 与目标端口不一致");
+    }
+    verification.evidence = "目标端口: " + humanPortList(expectedPorts) + " / nft端口: " + humanPortList(verification.nftPorts);
+    verification.ok = verification.failures.empty();
+    return verification;
+}
+
 inline TrafficSnapshotResult recordTrafficSnapshot() {
     TrafficSnapshotResult result;
     result.sampledAt = std::time(nullptr);
@@ -5160,12 +5411,139 @@ inline void verifyUpdateChainReadiness(ReliabilityReport &report) {
 #endif
 }
 
+inline bool loadCachedUfwAnalysisReportReadonly(const std::string &title,
+                                                std::time_t start,
+                                                std::time_t end,
+                                                UfwAnalysisReport &report) {
+#if LTG_HAS_SQLITE
+    if (!fileExists(ufwCacheDbPath())) {
+        return false;
+    }
+    sqlite3 *db = nullptr;
+    if (sqlite3_open_v2(ufwCacheDbPath().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return false;
+    }
+    const auto ranges = sqliteReadUfwRanges(db);
+    if (!rangeCovered(start, end, ranges)) {
+        report.title = title;
+        report.start = start;
+        report.end = end;
+        report.sourceNote = "SQLite 缓存未覆盖窗口";
+        report.evidence.cacheCovered = false;
+        report.evidence.cacheRanges = ufwRangesSummary(ranges);
+        sqlite3_close(db);
+        return false;
+    }
+    report = sqliteBuildUfwReport(db, title, start, end, "SQLite 缓存(只读)");
+    report.evidence.cacheCovered = true;
+    report.evidence.cacheRanges = ufwRangesSummary(ranges);
+    if (report.validLines == 0) {
+        report.sourceNote = "SQLite 缓存(窗口内无有效记录)";
+    }
+    sqlite3_close(db);
+    return true;
+#else
+    const auto ranges = readUfwCacheRanges();
+    if (!rangeCovered(start, end, ranges)) {
+        report.title = title;
+        report.start = start;
+        report.end = end;
+        report.sourceNote = "文本缓存未覆盖窗口";
+        report.evidence.cacheCovered = false;
+        report.evidence.cacheRanges = ufwRangesSummary(ranges);
+        return false;
+    }
+    const auto events = readUfwCacheEvents(start, end);
+    UfwLogEvidence evidence;
+    evidence.cacheCovered = true;
+    evidence.cacheRanges = ufwRangesSummary(ranges);
+    evidence.rawMatches = events.size();
+    evidence.validPublic = events.size();
+    for (const auto &event : events) {
+        if (event.action == "BLOCK") ++evidence.block;
+        else if (event.action == "AUDIT") ++evidence.audit;
+        else if (event.action == "ALLOW") ++evidence.allow;
+        if (event.dpt == kUnknownUfwPort) ++evidence.noDpt;
+    }
+    report = buildUfwReportFromEvents(title, start, end,
+                                      events.empty() ? "文本缓存(窗口内无有效记录)" : "文本缓存(只读)",
+                                      events, evidence);
+    return true;
+#endif
+}
+
+inline std::string ufwTopSignature(const UfwAnalysisReport &report) {
+    std::ostringstream out;
+    out << "valid=" << report.validLines << ";src=";
+    std::vector<std::pair<std::string, int>> sources;
+    for (const auto &entry : report.ipDaily) {
+        sources.push_back({entry.first, dailyTotal(entry.second)});
+    }
+    std::sort(sources.begin(), sources.end(), [](const auto &a, const auto &b) {
+        if (a.second != b.second) return a.second > b.second;
+        return a.first < b.first;
+    });
+    for (std::size_t i = 0; i < sources.size() && i < 5; ++i) {
+        out << sources[i].first << ":" << sources[i].second << ",";
+    }
+    out << ";ports=";
+    for (const auto &port : sortedCounter([&] {
+             std::map<std::string, int> totals;
+             for (const auto &entry : report.portDaily) {
+                 totals[entry.first] = dailyTotal(entry.second);
+             }
+             return totals;
+         }())) {
+        out << port.first << ":" << port.second << ",";
+    }
+    return out.str();
+}
+
+inline void verifyUfwAnalysisChain(ReliabilityReport &report) {
+    const std::time_t end = std::time(nullptr) - (std::time(nullptr) % 60);
+    const std::time_t start = std::max<std::time_t>(0, end - 24 * 3600);
+    std::string liveNote;
+    UfwLogEvidence liveEvidence;
+    const auto liveEvents = loadLiveUfwEvents(start, end, liveNote, &liveEvidence);
+    const UfwAnalysisReport liveReport = buildUfwReportFromEvents("可靠性自检 live", start, end, liveNote, liveEvents, liveEvidence);
+    UfwAnalysisReport cachedReport;
+    const bool cacheOk = loadCachedUfwAnalysisReportReadonly("可靠性自检 cache", start, end, cachedReport);
+    const bool same = cacheOk && ufwTopSignature(liveReport) == ufwTopSignature(cachedReport);
+    addReliabilityResult(report, "UFW分析链路", "日志读取",
+                         liveNote == "无可用 UFW 日志" ? ReliabilityStatus::Warning : ReliabilityStatus::Pass,
+                         liveNote == "无可用 UFW 日志" ? "未读到 UFW 日志，无法确认分析有效性" : "UFW 日志可读取",
+                         "来源: " + liveNote +
+                             " / 原始匹配: " + std::to_string(liveEvidence.rawMatches) +
+                             " / 有效公网SRC: " + std::to_string(liveEvidence.validPublic) +
+                             " / 过滤SRC: " + std::to_string(liveEvidence.filteredSource),
+                         liveNote == "无可用 UFW 日志" ? "确认 UFW logging 是否开启，或查看 journalctl -k" : "");
+    addReliabilityResult(report, "UFW分析链路", "缓存覆盖",
+                         cacheOk ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
+                         cacheOk ? "缓存覆盖最近24小时窗口" : "缓存尚未完整覆盖最近24小时",
+                         cachedReport.sourceNote + " / " + cachedReport.evidence.cacheRanges,
+                         cacheOk ? "" : "进入“安全中心 -> 分析追查”刷新一次窗口");
+    addReliabilityResult(report, "UFW分析链路", "live/cache 聚合一致",
+                         !cacheOk ? ReliabilityStatus::Skipped : same ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         !cacheOk ? "缓存未覆盖，跳过一致性对比" : same ? "live 解析与缓存聚合一致" : "live 解析与缓存聚合不一致",
+                         "live: " + ufwTopSignature(liveReport) + (cacheOk ? " / cache: " + ufwTopSignature(cachedReport) : ""),
+                         !cacheOk ? "刷新 UFW 分析缓存后可复核" : same ? "国家/地区只用于展示，不参与计数或 fail2ban 决策" : "清理 UFW 分析缓存后强制刷新，或检查日志时间窗口");
+}
+
 inline void verifyFail2banUfwChain(ReliabilityReport &report, bool allowActiveProbe) {
     if (!Shell::exists("fail2ban-client")) {
         addReliabilityResult(report, "防护链路", "fail2ban-client", ReliabilityStatus::Fail,
                              "命令不可用", "", "安装 fail2ban");
         return;
     }
+    const CommandResult configTest = Shell::capture("fail2ban-client -t");
+    addReliabilityResult(report, "防护链路", "fail2ban 配置检查",
+                         configTest.ok() ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         configTest.ok() ? "fail2ban-client -t 通过" : "fail2ban 配置检查失败",
+                         summarizeCommandResult(configTest),
+                         configTest.ok() ? "" : "先修复 fail2ban-client -t 输出中的配置错误");
     const CommandResult ping = Shell::capture("fail2ban-client ping");
     const bool pingOk = ping.ok() && lowerCopy(ping.output).find("pong") != std::string::npos;
     addReliabilityResult(report, "防护链路", "fail2ban ping", pingOk ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
@@ -5210,16 +5588,16 @@ inline void verifyFail2banUfwChain(ReliabilityReport &report, bool allowActivePr
                          ban.ok() && banListed ? "" : "检查 fail2ban-client set 输出和 jail 状态");
 
     const CommandResult ufw = Shell::capture("ufw status numbered");
-    const bool ufwLanded = ufw.output.find(kFail2banEffectProbeIp) != std::string::npos;
+    const bool ufwLanded = ufwStatusHasDenyForIp(ufw.output, kFail2banEffectProbeIp, true);
     addReliabilityResult(report, "防护链路", "UFW deny 落地", ufwLanded ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
-                         ufwLanded ? "UFW 中找到测试 deny 规则" : "fail2ban ban 后 UFW 未出现 deny",
+                         ufwLanded ? "UFW 中找到测试 deny 规则和 fail2ban comment" : "fail2ban ban 后 UFW 未出现带 comment 的 deny",
                          summarizeCommandResult(ufw),
                          ufwLanded ? "" : "检查 ufw-drop action 和 UFW 状态");
 
     const CommandResult unban = Shell::capture(fail2banSetIpCommandStrict(kRule2Jail, "unbanip", kFail2banEffectProbeIp));
     const CommandResult cleanup = Shell::capture("(ufw --force delete deny from " + shellQuote(kFail2banEffectProbeIp) + " || true)");
     const CommandResult post = Shell::capture("ufw status numbered 2>/dev/null || true");
-    const bool cleaned = post.output.find(kFail2banEffectProbeIp) == std::string::npos;
+    const bool cleaned = !ufwStatusHasDenyForIp(post.output, kFail2banEffectProbeIp, false);
     addReliabilityResult(report, "防护链路", "测试痕迹清理", unban.ok() && cleanup.ok() && cleaned ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
                          unban.ok() && cleanup.ok() && cleaned ? "unban 和 UFW 残留清理完成" : "测试 IP 可能有残留",
                          summarizeCommandResult(unban) + " / " + summarizeCommandResult(cleanup),
@@ -5260,6 +5638,12 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
 
     const std::set<int> historyPorts = loadTrackedTrafficPorts();
     const std::set<int> nftPorts = nftTrackedTrafficPorts();
+    const TrafficAccountingVerification semantic = verifyTrafficAccountingApplied(nftPorts);
+    addReliabilityResult(report, "流量统计链路", "nft 规则语义",
+                         semantic.ok ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         semantic.ok ? "规则引用端口集合并挂载三条 hook 链" : "统计规则语义不完整",
+                         semantic.ok ? semantic.evidence : joinWords(semantic.failures, "；") + " / " + semantic.evidence,
+                         semantic.ok ? "" : "重新执行“开启/追加端口”重建管理链但保留 counter set");
     const std::set<int> onlyHistory = setDifference(historyPorts, nftPorts);
     const std::set<int> onlyNft = setDifference(nftPorts, historyPorts);
     ReliabilityStatus portStatus = ReliabilityStatus::Pass;
@@ -5310,7 +5694,8 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
     }
 
     const std::time_t latest = latestTrafficSnapshotTime();
-    const auto monthRows = aggregateTrafficHistoryByPort(TrafficPeriodMode::Month, currentTrafficPeriodLabel(TrafficPeriodMode::Month));
+    std::vector<std::string> trafficPeriods;
+    const auto recentRows = aggregateTrafficHistoryByPortForRecentDays(kDashboardTrafficDays, trafficPeriods);
     const auto dayTotals = loadTrafficPeriodTotals(TrafficPeriodMode::Day, 1);
     const auto monthTotals = loadTrafficPeriodTotals(TrafficPeriodMode::Month, 1);
     const auto yearTotals = loadTrafficPeriodTotals(TrafficPeriodMode::Year, 1);
@@ -5318,7 +5703,7 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
                          latest > 0 ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
                          latest > 0 ? "存在历史快照" : "尚无历史快照",
                          "最近采样: " + (latest > 0 ? dateTimeStamp(latest) : std::string("无")) +
-                             " / 本月端口行: " + std::to_string(monthRows.size()) +
+                             " / 最近31天端口行: " + std::to_string(recentRows.size()) +
                              " / 日月年周期: " + std::to_string(dayTotals.size()) + "/" +
                              std::to_string(monthTotals.size()) + "/" + std::to_string(yearTotals.size()),
                          latest > 0 ? "" : "执行 sudo ltg --traffic-snapshot 或等待 timer");
@@ -5392,6 +5777,7 @@ inline ReliabilityReport runReliabilitySelfCheck(bool allowActiveProbes) {
     verifyDependencyChain(report);
     verifyGeoDatabaseChain(report);
     verifyUpdateChainReadiness(report);
+    verifyUfwAnalysisChain(report);
     verifyFail2banUfwChain(report, allowActiveProbes);
     verifyTrafficAccountingChain(report, allowActiveProbes);
     verifyDiagnosticExportChain(report, allowActiveProbes);
@@ -5404,6 +5790,29 @@ inline ScreenBuffer reliabilityReportBuffer(const ReliabilityReport &report, boo
     buffer.add(std::string("主动探测: ") + (allowActiveProbes ? "已启用，会执行临时 ban/采样/诊断写入" : "未启用，只做非破坏检查"));
     buffer.add(std::string("总体结果: ") + (report.ok() ? ansi::green + std::string("通过") + ansi::plain
                                                         : ansi::yellow + std::string("存在失败项") + ansi::plain));
+    auto groupVerdict = [&](const std::string &group) {
+        bool seen = false;
+        bool fail = false;
+        bool warn = false;
+        for (const auto &item : report.results) {
+            if (item.group != group) {
+                continue;
+            }
+            seen = true;
+            if (item.status == ReliabilityStatus::Fail || item.status == ReliabilityStatus::Permission) {
+                fail = true;
+            } else if (item.status == ReliabilityStatus::Warning) {
+                warn = true;
+            }
+        }
+        if (!seen) return std::string("未检查");
+        if (fail) return std::string("失败");
+        if (warn) return std::string("不能确认");
+        return std::string("能正常工作");
+    };
+    buffer.add("链路判定: 流量统计=" + groupVerdict("流量统计链路") +
+               " / UFW分析=" + groupVerdict("UFW分析链路") +
+               " / fail2ban防护=" + groupVerdict("防护链路"));
     buffer.add("");
     std::string currentGroup;
     const std::vector<int> widths = {22, 10, 32, 42};
@@ -6854,17 +7263,58 @@ private:
         std::vector<std::string> commands = updatePortSetOnly
             ? trafficPortSetUpdateCommands(finalPorts)
             : trafficAccountingRuleCommands(finalPorts, false);
-        std::string storeError;
-        storeTrackedTrafficPorts(finalPorts, storeError);
         std::string timerError;
-        const bool timerWritten = writeTrafficSnapshotTimerUnits("", timerError);
-        if (timerWritten && Shell::exists("systemctl")) {
-            commands.push_back("systemctl daemon-reload");
-            commands.push_back("systemctl enable --now " + kTrafficSnapshotTimer);
-        }
         renderBusy("开启/追加统计端口", "正在应用统计规则...");
         cachedDashboardValid() = false;
-        ScreenBuffer buffer = runCommandList(commands);
+        ScreenBuffer buffer;
+        bool commandOk = true;
+        for (const auto &command : commands) {
+            const CommandResult result = runDisplayedCommand(buffer, command);
+            if (!result.ok()) {
+                commandOk = false;
+            }
+        }
+        const TrafficAccountingVerification verification = verifyTrafficAccountingApplied(finalPorts);
+        if (!commandOk || !verification.ok) {
+            ScreenBuffer result;
+            result.add(ansi::yellow + std::string("统计规则未能确认生效，已停止写入本地端口记录和后台 timer。") + ansi::plain);
+            result.add("未生效端口: " + humanPortList(finalPorts));
+            result.add("下一步: 修复 nftables 权限/语法后，重新进入“流量统计 -> 开启/追加端口”。");
+            result.add("");
+            if (!verification.ok) {
+                result.add("> 生效验证失败");
+                for (const auto &failure : verification.failures) {
+                    result.add("- " + failure);
+                }
+                result.add(verification.evidence);
+                result.add("");
+            }
+            result.add("> 命令输出");
+            result.addAll(buffer.lines());
+            pushResult("开启/追加统计端口", result);
+            return;
+        }
+        std::string storeError;
+        storeTrackedTrafficPorts(finalPorts, storeError);
+        if (!storeError.empty()) {
+            ScreenBuffer result;
+            result.add(ansi::yellow + std::string("统计规则已生效，但本地端口记录写入失败，已停止安装后台 timer。") + ansi::plain);
+            result.add("影响: 可靠性自检会看到“历史记录有/实时规则有”状态不一致，后台采样不会自动启用。");
+            result.add("端口记录写入失败: " + storeError);
+            result.add("当前 nft 端口: " + humanPortList(verification.nftPorts));
+            result.add("");
+            result.add("> 命令输出");
+            result.addAll(buffer.lines());
+            pushResult("开启/追加统计端口", result);
+            return;
+        }
+        const bool timerWritten = writeTrafficSnapshotTimerUnits("", timerError);
+        if (timerWritten && Shell::exists("systemctl")) {
+            buffer.add("");
+            buffer.add("> 后台采样 timer");
+            runDisplayedCommand(buffer, "systemctl daemon-reload");
+            runDisplayedCommand(buffer, "systemctl enable --now " + kTrafficSnapshotTimer);
+        }
         buffer.add("");
         buffer.add("> 统计端口");
         buffer.add("原有端口: " + std::to_string(managed.size()) + " 个  " + humanPortList(managed));
@@ -6876,6 +7326,7 @@ private:
         } else {
             buffer.add("已使用端口集合管理统计范围；保留实时计数和历史数据。之后追加端口只更新端口集合。");
         }
+        buffer.add("生效验证: " + verification.evidence);
         const TrafficSnapshotResult snapshotResult = recordTrafficSnapshot();
         buffer.add("");
         buffer.add("> 历史采样基线");
@@ -7947,9 +8398,18 @@ private:
         buffer.add("");
         buffer.add("> 统一可靠性口径");
         buffer.addAll(reliabilityReportBuffer(readonlyReport, false).lines());
-        if (!scanRuntime.loaded()) {
+        if (!ping.ok() || !sshRuntime.loaded() || !scanRuntime.loaded()) {
             ScreenBuffer result;
-            result.add(ansi::yellow + std::string("规则2未加载，未真正生效。") + ansi::plain);
+            result.add(ansi::yellow + std::string("fail2ban 自动化未通过统一验收，不能视为已生效。") + ansi::plain);
+            if (!ping.ok()) {
+                result.add("- fail2ban ping 失败：socket 或服务状态不可用。");
+            }
+            if (!sshRuntime.loaded()) {
+                result.add("- sshd jail 未加载。");
+            }
+            if (!scanRuntime.loaded()) {
+                result.add("- 规则2未加载，未真正生效。");
+            }
             result.add("请查看下方 fail2ban-client status 输出和 /etc/fail2ban/jail.local 配置。");
             result.add("");
             result.addAll(buffer.lines());
@@ -8121,14 +8581,15 @@ private:
             const F2bJailRuntimeInfo afterBan = parseFail2banJailStatus(kRule2Jail, probe.statusAfterBan.output, true);
             probe.banListed = afterBan.bannedIps.count(kFail2banEffectProbeIp) > 0;
             probe.ufwStatus = runDisplayedCommand(buffer, "ufw status numbered");
-            probe.ufwLanded = probe.ufwStatus.output.find(kFail2banEffectProbeIp) != std::string::npos;
+            probe.ufwLanded = ufwStatusHasDenyForIp(probe.ufwStatus.output, kFail2banEffectProbeIp, true);
         }
 
         buffer.add("> 清理测试痕迹");
         probe.unban = runDisplayedCommand(buffer, fail2banSetIpCommandStrict(kRule2Jail, "unbanip", kFail2banEffectProbeIp));
         probe.unbanOk = probe.unban.ok();
         probe.ufwCleanup = runDisplayedCommand(buffer, "(ufw --force delete deny from " + shellQuote(kFail2banEffectProbeIp) + " || true)");
-        probe.ufwCleanupOk = probe.ufwCleanup.ok();
+        CommandResult postCleanup = runDisplayedCommand(buffer, "ufw status numbered 2>/dev/null || true");
+        probe.ufwCleanupOk = probe.ufwCleanup.ok() && !ufwStatusHasDenyForIp(postCleanup.output, kFail2banEffectProbeIp, false);
 
         ScreenBuffer result;
         result.add("> 实效结论");
@@ -8136,7 +8597,7 @@ private:
             {"fail2ban 服务", probe.serviceOk ? "正常" : "异常"},
             {"规则2 jail", probe.jailLoaded ? "已加载" : probe.jailStatus.label},
             {"banip 进入列表", probe.banListed ? "是" : "否"},
-            {"UFW deny 落地", probe.ufwLanded ? "是" : "否"},
+            {"UFW deny 落地", probe.ufwLanded ? "是，且带 fail2ban comment" : "否"},
             {"unban 清理", probe.unbanOk ? "完成" : "失败"},
             {"UFW 残留清理", probe.ufwCleanupOk ? "已尝试清理" : "失败"},
         });
@@ -8150,7 +8611,7 @@ private:
             } else if (!probe.banListed) {
                 result.add("- banip 未进入 fail2ban 列表：检查 fail2ban-client set 输出和 jail 状态。");
             } else if (!probe.ufwLanded) {
-                result.add("- fail2ban 已记录封禁，但 UFW 未出现 deny：检查 ufw-drop action 和 UFW 状态。");
+                result.add("- fail2ban 已记录封禁，但 UFW 未出现带 fail2ban comment 的 deny：检查 ufw-drop action 和 UFW 状态。");
             }
         }
         result.add("");
@@ -8861,6 +9322,29 @@ inline int selfTest() {
     check("UFW 无DPT端口兼容", parseUfwLogEvent(unknownPortUfwLine, event) && event.dpt == kUnknownUfwPort);
     const std::string badUfwLine = "2026-05-03T20:01:02 host kernel: [UFW BLOCK] SRC=:::: DST=5.6.7.8 DPT=22";
     check("UFW 无效来源过滤", !parseUfwLogEvent(badUfwLine, event));
+    UfwLogEvidence evidence;
+    observeUfwRawLogLine(ufwLine, evidence);
+    observeUfwRawLogLine(unknownPortUfwLine, evidence);
+    check("UFW 原始证据统计", evidence.rawMatches == 2 && evidence.block == 1 && evidence.audit == 1 && evidence.noDpt == 1);
+    UfwLogEvent parsedGood;
+    parseUfwLogEvent(ufwLine, parsedGood);
+    const UfwAnalysisReport evidenceReport = buildUfwReportFromEvents("test", 1, 2, "live", {parsedGood}, evidence);
+    check("UFW 分析证据不参与排序", evidenceReport.evidence.rawMatches == 2 &&
+                                           ufwAnalysisAccuracyNote().find("国家/地区只用于展示") != std::string::npos);
+    const std::string nftSample =
+        "table inet usp_ip_traffic {\n"
+        "\tset tracked_ports { elements = { 22, 443 } }\n"
+        "\tset ipv4_download { }\n\tset ipv4_upload { }\n\tset ipv6_download { }\n\tset ipv6_upload { }\n"
+        "\tchain input_account { type filter hook input priority -150; policy accept; tcp dport @tracked_ports update @ipv4_download { ip saddr . tcp dport } }\n"
+        "\tchain output_account { type filter hook output priority -150; policy accept; tcp sport @tracked_ports update @ipv4_upload { ip daddr . tcp sport } }\n"
+        "\tchain forward_account { type filter hook forward priority -150; policy accept; tcp dport @tracked_ports update @ipv6_download { ip6 saddr . tcp dport } update @ipv6_upload { ip6 daddr . tcp sport } }\n"
+        "}";
+    check("nft hook 语义解析", nftChainContains(nftSample, "input_account", "hook input") &&
+                                  nftChainContains(nftSample, "output_account", "hook output") &&
+                                  nftSample.find("@tracked_ports") != std::string::npos);
+    check("UFW deny comment 识别", ufwStatusHasDenyForIp("[ 1] Anywhere DENY IN 203.0.113.254 # f2b:ufw-slowscan-global ip:203.0.113.254",
+                                                        "203.0.113.254", true) &&
+                                    !ufwStatusHasDenyForIp("[ 1] Anywhere DENY IN 203.0.113.254", "203.0.113.254", true));
     UfwAnalysisReport sourceTopReport;
     sourceTopReport.ipDaily["1.2.3.4"]["2026-05-03"] = 2;
     sourceTopReport.ipDaily["1.2.3.4"]["2026-05-04"] = 5;
@@ -9106,7 +9590,7 @@ inline void usage(const char *argv0) {
     std::cout << "Ubuntu 服务器流量与防护运维工具，模块化 C++17 项目，纯 ANSI TUI。\n\n";
     std::cout << "用法: " << argv0 << " [选项]\n\n";
     std::cout << "说明:\n";
-    std::cout << "  除 --help / --version / --self-test 外，本工具必须以 root 权限运行。\n";
+    std::cout << "  除 --help / --version / --self-test / --reliability-check 外，本工具必须以 root 权限运行。\n";
     std::cout << "  交互模式会进入全屏 TUI；命令行参数模式输出普通文本，方便脚本/日志收集。\n";
     std::cout << "  会调用系统工具 nft/ufw/fail2ban-client/journalctl/ss/conntrack，不依赖 .sh/.py。\n\n";
     std::cout << "选项:\n";
@@ -9165,6 +9649,10 @@ int appMain(int argc, char **argv) {
         if (arg == "update" || arg == "--update") {
             return updateFromRelease(argv[0]);
         }
+        if (arg == "--reliability-check") {
+            const bool active = argc > 2 && std::string(argv[2]) == "--active-probes";
+            return cliReliabilityCheck(active);
+        }
         const int rootCheck = requireRootOrExit();
         if (rootCheck != 0) {
             return rootCheck;
@@ -9183,10 +9671,6 @@ int appMain(int argc, char **argv) {
         if (arg == "--doctor" || arg == "--check-deps") {
             dependencyDoctor();
             return 0;
-        }
-        if (arg == "--reliability-check") {
-            const bool active = argc > 2 && std::string(argv[2]) == "--active-probes";
-            return cliReliabilityCheck(active);
         }
         if (arg == "--audit") {
             logSummary();
