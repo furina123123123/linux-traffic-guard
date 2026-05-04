@@ -44,7 +44,7 @@ git clone https://github.com/furina123123123/linux-traffic-guard.git && cd linux
 - Reliability checks: `sudo ltg --reliability-check` verifies dependencies, update readiness, UFW analysis evidence, fail2ban/UFW effectiveness, traffic accounting rule semantics, diagnostics, and TUI terminal behavior; add `--active-probes` only for explicit temporary real probes.
 - Security center: daily workflows organized as overview, investigation, policy configuration, remediation, service checks, and diagnostics.
 - UFW analysis: parses UFW `BLOCK`/`AUDIT`/`ALLOW` events, shows raw/effective log evidence, aggregates by IP/port/time period, supports IP tracing, and can display country/region labels from the optional DB-IP Lite MMDB database.
-- fail2ban effectiveness checks: verifies that jails are really loaded after repair and can run a reversible test ban to confirm UFW rule landing.
+- fail2ban effectiveness checks: policy repair can install missing `fail2ban`/`ufw` after confirmation, then requires both default jails to load and a reversible test ban to confirm UFW rule landing before reporting success.
 - Cache: stores parsed UFW events in `/var/tmp/linux_traffic_guard_ufw_cache_v2/events.sqlite3` for faster repeated analysis.
 - Traffic history: stores sampled traffic deltas in `/var/tmp/linux_traffic_guard_traffic_history_v1/` with SQLite when available and a TSV fallback for no-SQLite builds.
 - Diagnostics: exports service status, rules, logs, nft counters, listeners, and connection snapshots to `/tmp`.

@@ -324,6 +324,11 @@ struct F2bEffectProbe {
     F2bJailRuntimeInfo jailStatus;
 };
 
+struct F2bDependencyReadiness {
+    bool ok = false;
+    std::vector<std::string> missing;
+};
+
 enum class ReliabilityStatus {
     Pass,
     Fail,
@@ -5337,6 +5342,27 @@ inline std::string dependencyPackageForTool(const std::string &tool) {
     return tool;
 }
 
+inline F2bDependencyReadiness fail2banStackDependencyReadiness() {
+    Shell::clearExistsCache();
+    F2bDependencyReadiness readiness;
+    for (const auto &tool : {"fail2ban-client", "systemctl", "ufw", "journalctl"}) {
+        if (!Shell::exists(tool)) {
+            readiness.missing.push_back(tool);
+        }
+    }
+    readiness.ok = readiness.missing.empty();
+    return readiness;
+}
+
+inline std::string fail2banStackInstallCommand() {
+    return "apt update && apt install -y fail2ban ufw";
+}
+
+inline bool shouldOfferFail2banStackAptInstall(const F2bDependencyReadiness &readiness) {
+    return std::find(readiness.missing.begin(), readiness.missing.end(), "fail2ban-client") != readiness.missing.end() ||
+           std::find(readiness.missing.begin(), readiness.missing.end(), "ufw") != readiness.missing.end();
+}
+
 inline void verifyDependencyChain(ReliabilityReport &report) {
     Shell::clearExistsCache();
     const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "systemctl", "journalctl", "ss", "conntrack", "awk", "grep"};
@@ -5534,6 +5560,9 @@ inline void verifyUfwAnalysisChain(ReliabilityReport &report) {
 
 inline void verifyFail2banUfwChain(ReliabilityReport &report, bool allowActiveProbe) {
     if (!Shell::exists("fail2ban-client")) {
+        addReliabilityResult(report, "防护链路", "防护状态", ReliabilityStatus::Fail,
+                             "未安装 fail2ban", "fail2ban-client 不可用",
+                             "执行“策略安装/修复”，确认后会自动安装 fail2ban/ufw");
         addReliabilityResult(report, "防护链路", "fail2ban-client", ReliabilityStatus::Fail,
                              "命令不可用", "", "安装 fail2ban");
         return;
@@ -5564,6 +5593,29 @@ inline void verifyFail2banUfwChain(ReliabilityReport &report, bool allowActivePr
                          rule2.loaded() ? "ufw-slowscan-global 已加载" : "规则2未加载，未真正生效",
                          rule2.label + " / " + summarizeCommandResult(rule2Status),
                          rule2.loaded() ? "" : "执行“策略安装/修复”，修复 UnknownJail 或权限问题");
+
+    std::string protectionState = allowActiveProbe ? "jail 已加载，正在验证 UFW 落地" : "完整生效";
+    ReliabilityStatus protectionStatus = allowActiveProbe ? ReliabilityStatus::Warning : ReliabilityStatus::Pass;
+    std::string protectionSuggestion;
+    if (!pingOk) {
+        protectionState = "已安装但服务不可用";
+        protectionStatus = ReliabilityStatus::Fail;
+        protectionSuggestion = "检查 systemctl status fail2ban，或执行“策略安装/修复”";
+    } else if (!ssh.loaded() || !rule2.loaded()) {
+        protectionState = "服务可用但 jail 未加载";
+        protectionStatus = ReliabilityStatus::Fail;
+        protectionSuggestion = "执行“策略安装/修复”，确保 sshd 和 ufw-slowscan-global 同时加载";
+    } else if (!allowActiveProbe) {
+        protectionState = "jail 已加载但 UFW 落地未主动验证";
+        protectionStatus = ReliabilityStatus::Warning;
+        protectionSuggestion = "运行 --reliability-check --active-probes，或 TUI 执行“实效自检”";
+    }
+    if (!allowActiveProbe || protectionStatus == ReliabilityStatus::Fail) {
+        addReliabilityResult(report, "防护链路", "防护状态", protectionStatus,
+                             protectionState,
+                             "sshd=" + ssh.label + " / " + kRule2Jail + "=" + rule2.label,
+                             protectionSuggestion);
+    }
 
     if (!allowActiveProbe) {
         addReliabilityResult(report, "防护链路", "临时 ban 落地", ReliabilityStatus::Skipped,
@@ -5602,6 +5654,14 @@ inline void verifyFail2banUfwChain(ReliabilityReport &report, bool allowActivePr
                          unban.ok() && cleanup.ok() && cleaned ? "unban 和 UFW 残留清理完成" : "测试 IP 可能有残留",
                          summarizeCommandResult(unban) + " / " + summarizeCommandResult(cleanup),
                          cleaned ? "" : "手动执行 ufw status numbered 并删除测试 IP 规则");
+    const bool fullyEffective = pingOk && ssh.loaded() && rule2.loaded() && ban.ok() && banListed && ufwLanded && unban.ok() && cleanup.ok() && cleaned;
+    addReliabilityResult(report, "防护链路", "防护状态", fullyEffective ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+                         fullyEffective ? "完整生效" : "jail 已加载但 UFW 未落地或清理失败",
+                         "sshd=" + ssh.label + " / " + kRule2Jail + "=" + rule2.label +
+                             " / banListed=" + std::string(banListed ? "yes" : "no") +
+                             " / ufwLanded=" + std::string(ufwLanded ? "yes" : "no") +
+                             " / cleaned=" + std::string(cleaned ? "yes" : "no"),
+                         fullyEffective ? "" : "检查 ufw-drop action、UFW 状态和 fail2ban-client set 输出");
 }
 
 inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSnapshotProbe) {
@@ -8296,7 +8356,45 @@ private:
     }
 
     void actionEnsureFail2banStack() {
-        if (!confirmYesNo("将创建/修复 jail.local、UFW 慢扫 filter、ufw-drop action，并重载 fail2ban。", false)) {
+        F2bDependencyReadiness readiness = fail2banStackDependencyReadiness();
+        if (!readiness.ok) {
+            ScreenBuffer preview;
+            preview.add(ansi::yellow + std::string("防护核心依赖不完整。") + ansi::plain);
+            preview.add("缺失工具: " + joinWords(readiness.missing, ", "));
+            preview.add("");
+            if (shouldOfferFail2banStackAptInstall(readiness)) {
+                preview.add("将通过 apt 安装: fail2ban ufw");
+                preview.add("命令: " + fail2banStackInstallCommand());
+                preview.add("安装后会重新检查 fail2ban-client/systemctl/ufw/journalctl，再继续写入策略。");
+                if (!confirmYesNoWithBody("安装 fail2ban 防护依赖", preview.lines(), false)) {
+                    ScreenBuffer cancel;
+                    cancel.add("操作已取消。未安装依赖，也未写入 fail2ban 配置。");
+                    pushResult("安装/修复配置", cancel);
+                    return;
+                }
+                renderBusy("安装 fail2ban 防护依赖", "正在安装 fail2ban/ufw...");
+                ScreenBuffer install = runCommandList({fail2banStackInstallCommand()});
+                Shell::clearExistsCache();
+                readiness = fail2banStackDependencyReadiness();
+                if (!readiness.ok) {
+                    ScreenBuffer result;
+                    result.add(ansi::yellow + std::string("依赖安装后仍未通过复查，已停止写入防护策略。") + ansi::plain);
+                    result.add("仍缺失: " + joinWords(readiness.missing, ", "));
+                    result.add("");
+                    result.add("> 安装输出");
+                    result.addAll(install.lines());
+                    pushResult("安装/修复配置", result);
+                    return;
+                }
+            } else {
+                preview.add("缺失的是 systemd/journal 工具，无法确认 fail2ban 服务会被正确运行。");
+                preview.add("请先修复系统环境，再重新执行“策略安装/修复”。");
+                pushResult("安装/修复配置", preview);
+                return;
+            }
+        }
+
+        if (!confirmYesNo("将创建/修复两条默认防护策略，启动 fail2ban，并执行临时 ban 验证 UFW 落地。", false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
             pushResult("安装/修复配置", buffer);
@@ -8393,12 +8491,12 @@ private:
             {kRule1Jail, sshRuntime.label},
             {kRule2Jail, scanRuntime.label},
         });
-        ReliabilityReport readonlyReport;
-        verifyFail2banUfwChain(readonlyReport, false);
+        ReliabilityReport activeReport;
+        verifyFail2banUfwChain(activeReport, true);
         buffer.add("");
         buffer.add("> 统一可靠性口径");
-        buffer.addAll(reliabilityReportBuffer(readonlyReport, false).lines());
-        if (!ping.ok() || !sshRuntime.loaded() || !scanRuntime.loaded()) {
+        buffer.addAll(reliabilityReportBuffer(activeReport, true).lines());
+        if (!ping.ok() || !sshRuntime.loaded() || !scanRuntime.loaded() || !activeReport.ok()) {
             ScreenBuffer result;
             result.add(ansi::yellow + std::string("fail2ban 自动化未通过统一验收，不能视为已生效。") + ansi::plain);
             if (!ping.ok()) {
@@ -8410,6 +8508,9 @@ private:
             if (!scanRuntime.loaded()) {
                 result.add("- 规则2未加载，未真正生效。");
             }
+            if (!activeReport.ok()) {
+                result.add("- 临时 ban / UFW deny 落地 / 清理复查 未全部通过。");
+            }
             result.add("请查看下方 fail2ban-client status 输出和 /etc/fail2ban/jail.local 配置。");
             result.add("");
             result.addAll(buffer.lines());
@@ -8417,7 +8518,7 @@ private:
             return;
         }
         buffer.add("");
-        buffer.add(ansi::green + std::string("安装/修复完成，默认 jail 已加载。") + ansi::plain);
+        buffer.add(ansi::green + std::string("两条防护策略已正确运行：sshd 与 ufw-slowscan-global 已加载，规则2临时封禁已落地 UFW 并完成清理。") + ansi::plain);
         pushResult("安装/修复配置", buffer);
     }
 
@@ -9456,6 +9557,14 @@ inline int selfTest() {
         "ERROR Permission denied to socket: /var/run/fail2ban/fail2ban.sock, (you must be root)",
         true);
     check("fail2ban 权限不足解析", parsedDenied.state == F2bJailRuntimeState::PermissionDenied);
+    F2bDependencyReadiness missingFail2ban;
+    missingFail2ban.missing = {"fail2ban-client"};
+    F2bDependencyReadiness missingSystemd;
+    missingSystemd.missing = {"systemctl"};
+    check("fail2ban 缺失时提示自动安装", shouldOfferFail2banStackAptInstall(missingFail2ban) &&
+                                              !shouldOfferFail2banStackAptInstall(missingSystemd) &&
+                                              fail2banStackInstallCommand().find("apt install -y fail2ban ufw") != std::string::npos);
+    check("两条默认 jail 必须同时加载", parsedLoaded.loaded() && !parsedUnknown.loaded());
     F2bEffectProbe probeTest;
     probeTest.serviceOk = true;
     probeTest.jailLoaded = true;
@@ -9465,6 +9574,9 @@ inline int selfTest() {
     probeTest.ufwCleanupOk = true;
     check("fail2ban 实效自检聚合", probeTest.serviceOk && probeTest.jailLoaded && probeTest.banListed &&
                                       !probeTest.ufwLanded && probeTest.unbanOk && probeTest.ufwCleanupOk);
+    check("UFW 残留复查识别", ufwStatusHasDenyForIp("[ 2] Anywhere DENY IN 203.0.113.254 # f2b:ufw-slowscan-global ip:203.0.113.254",
+                                                   "203.0.113.254", false) &&
+                                  !ufwStatusHasDenyForIp("[ 2] Anywhere ALLOW IN 203.0.113.254", "203.0.113.254", false));
     DashboardSnapshot renderOnlySnapshot;
     renderOnlySnapshot.tableEnabled = true;
     renderOnlySnapshot.defaultPolicies = collectDefaultFail2banPolicies(false);

@@ -44,7 +44,7 @@ git clone https://github.com/furina123123123/linux-traffic-guard.git && cd linux
 - 可靠性自检：`sudo ltg --reliability-check` 会验证依赖、更新、UFW 分析证据、防护实效、流量统计规则语义、诊断和 TUI 终端状态；只有显式加 `--active-probes` 才执行临时真实探测。
 - 安全中心：按安全总览、分析追查、策略配置、处置修复、服务诊断组织日常运维路径。
 - 威胁分析：解析 UFW `BLOCK`/`AUDIT`/`ALLOW` 日志，展示原始/有效日志证据，按 IP、端口、时间段聚合，支持指定 IP 下钻，并可用可选 DB-IP Lite MMDB 显示国家/地区。
-- fail2ban 实效核验：策略安装/修复后检查 jail 是否真正加载，并可用临时测试 IP 验证 UFW deny 是否落地。
+- fail2ban 实效核验：策略安装/修复可在确认后自动安装缺失的 `fail2ban`/`ufw`，随后要求两个默认 jail 已加载，并用临时测试 IP 验证 UFW deny 落地后才显示成功。
 - SQLite 缓存：使用 `/var/tmp/linux_traffic_guard_ufw_cache_v2/events.sqlite3` 缓存日志事件。
 - 流量历史：使用 `/var/tmp/linux_traffic_guard_traffic_history_v1/` 保存采样增量；有 SQLite 时使用 SQLite，无 SQLite 编译路径使用 TSV fallback。
 - 诊断导出：收集服务状态、规则、日志、nft 统计和连接快照到 `/tmp`。
