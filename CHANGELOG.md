@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.7 - 2026-05-04
+
+### Changed
+
+- Moved fail2ban default policy runtime collection out of dashboard rendering and into the background snapshot loader to prevent TUI redraw stalls.
+- Reworked README as bilingual documentation with English as the default first section and a full Chinese section below it.
+
 ## 4.12.6 - 2026-05-03
 
 ### Changed
