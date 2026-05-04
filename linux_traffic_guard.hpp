@@ -85,7 +85,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.10";
+inline const std::string kVersion = "4.12.11";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
@@ -3872,6 +3872,25 @@ inline std::map<std::string, TrafficRow> loadLatestTrafficSnapshot(std::string &
     return out;
 }
 
+inline bool trafficHistoryHasDeltas() {
+    if (!fileExists(trafficHistoryDbPath())) {
+        return false;
+    }
+    std::string error;
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return false;
+    }
+    sqlite3_stmt *stmt = nullptr;
+    bool hasRows = false;
+    if (sqlite3_prepare_v2(db, "select 1 from traffic_delta limit 1;", -1, &stmt, nullptr) == SQLITE_OK) {
+        hasRows = sqlite3_step(stmt) == SQLITE_ROW;
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return hasRows;
+}
+
 inline bool insertTrafficSnapshotRows(const std::vector<TrafficRow> &rows, std::time_t sampledAt, std::string &error) {
     sqlite3 *db = nullptr;
     if (!openTrafficHistoryDb(&db, error)) {
@@ -4167,6 +4186,17 @@ inline std::map<std::string, TrafficRow> loadLatestTrafficSnapshot(std::string &
     return out;
 }
 
+inline bool trafficHistoryHasDeltas() {
+    std::ifstream input(trafficHistoryPath("delta.tsv"), std::ios::binary);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!trim(line).empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline bool insertTrafficSnapshotRows(const std::vector<TrafficRow> &rows, std::time_t sampledAt, std::string &error) {
     ensureDirectory(kTrafficHistoryDir);
     std::ofstream output(trafficHistoryPath("snapshot.tsv"), std::ios::binary | std::ios::app);
@@ -4344,7 +4374,8 @@ inline TrafficSnapshotResult recordTrafficSnapshot() {
     }
     const auto current = collectTrafficRows();
     std::size_t resetRows = 0;
-    const auto deltas = computeTrafficDeltas(current, previous, result.sampledAt, resetRows);
+    const bool seedExistingCounters = !previous.empty() && !trafficHistoryHasDeltas();
+    const auto deltas = computeTrafficDeltas(current, seedExistingCounters ? std::map<std::string, TrafficRow>{} : previous, result.sampledAt, resetRows);
     if (!insertTrafficSnapshotRows(current, result.sampledAt, error)) {
         result.message = error;
         return result;
@@ -4357,7 +4388,7 @@ inline TrafficSnapshotResult recordTrafficSnapshot() {
     result.liveRows = current.size();
     result.deltaRows = deltas.size();
     result.resetRows = resetRows;
-    result.message = "采样完成。";
+    result.message = seedExistingCounters ? "采样完成，已把旧版本首轮快照中的已有计数纳入当前周期。" : "采样完成。";
     return result;
 }
 

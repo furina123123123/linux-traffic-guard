@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.12.11 - 2026-05-04
+
+### Changed
+
+- Added a migration path for traffic histories created by older snapshots: if no delta rows exist yet, the next snapshot seeds current counters into the current local period.
+
 ## 4.12.10 - 2026-05-04
 
 ### Changed
