@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.19 - 2026-05-04
+
+### Changed
+
+- Clarified traffic direction labels as host outbound/upload and host inbound/download to avoid ambiguity around upstream/downstream wording.
+- Added a self-test guard for nft input/output accounting direction semantics.
+
 ## 4.12.18 - 2026-05-04
 
 ### Changed

@@ -72,8 +72,8 @@ LTG is meant to behave like a port-level vnStat with IP visibility:
 - Keep historical day/month/year data when appending new ports.
 - Sample nftables counters every 5 minutes through a systemd timer.
 - View day/month/year traffic in rolling-window or absolute-period mode.
-- Read each period as `period + port` rows: upload, download, total, packets, and Top IPs.
-- Drill down from a port into IP-level upload/download details.
+- Read each period as `period + port` rows: host outbound/upload, host inbound/download, total, packets, and Top IPs.
+- Drill down from a port into IP-level outbound/inbound details.
 
 Example TUI path:
 
@@ -280,8 +280,8 @@ GitHub Actions builds and uploads:
 Maintainers release a new version by updating `include/ltg/version.hpp`, implementation files, and `CHANGELOG.md`, then pushing a version tag:
 
 ```bash
-git tag v4.12.18
-git push origin v4.12.18
+git tag v4.12.19
+git push origin v4.12.19
 ```
 
 ## Safety Notes
