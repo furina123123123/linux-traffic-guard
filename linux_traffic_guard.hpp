@@ -85,7 +85,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.13";
+inline const std::string kVersion = "4.12.14";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kLatestSha256Url = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/SHA256SUMS";
@@ -1144,6 +1144,73 @@ inline std::string currentTrafficPeriodLabel(TrafficPeriodMode mode) {
         return localYearStamp(now);
     }
     return localMonthStamp(now);
+}
+
+inline std::string trafficPeriodModeTitle(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "日流量";
+    if (mode == TrafficPeriodMode::Year) return "年流量";
+    return "月流量";
+}
+
+inline std::string trafficPeriodModeDetailTitle(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "按日流量";
+    if (mode == TrafficPeriodMode::Year) return "按年流量";
+    return "按月流量";
+}
+
+inline std::string trafficPeriodModeUnit(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "天";
+    if (mode == TrafficPeriodMode::Year) return "年";
+    return "月";
+}
+
+inline std::string trafficPeriodModeColumn(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "日期";
+    if (mode == TrafficPeriodMode::Year) return "年份";
+    return "月份";
+}
+
+inline std::string trafficPeriodVnstatCommand(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "vnstat -d";
+    if (mode == TrafficPeriodMode::Year) return "vnstat -y";
+    return "vnstat -m";
+}
+
+inline std::string trafficPeriodSample(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "2026-05-04";
+    if (mode == TrafficPeriodMode::Year) return "2026";
+    return "2026-05";
+}
+
+inline std::size_t defaultTrafficRollingLimit(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return 31;
+    if (mode == TrafficPeriodMode::Year) return 10;
+    return 24;
+}
+
+inline std::size_t maxTrafficRollingLimit(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return 366;
+    if (mode == TrafficPeriodMode::Year) return 50;
+    return 120;
+}
+
+inline bool parseTrafficRollingLimit(const std::string &text,
+                                     TrafficPeriodMode mode,
+                                     std::size_t &limit) {
+    const std::string value = trim(text);
+    if (value.empty()) {
+        limit = defaultTrafficRollingLimit(mode);
+        return true;
+    }
+    if (!std::regex_match(value, std::regex(R"([0-9]+)"))) {
+        return false;
+    }
+    const unsigned long long parsed = std::stoull(value);
+    if (parsed == 0 || parsed > maxTrafficRollingLimit(mode)) {
+        return false;
+    }
+    limit = static_cast<std::size_t>(parsed);
+    return true;
 }
 
 inline std::time_t makeLocalTime(std::tm tm) {
@@ -5694,14 +5761,12 @@ private:
         pushMenu("流量统计", "像 vnStat 一样按日/月/年查看，默认按端口聚合",
                  {
                      {"1", "开启/追加端口", "默认追加，不清空已有统计", true, [this] { actionInstallTraffic(); }},
-                     {"2", "日流量", "按天汇总，并显示每一天的端口/IP明细", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Day); }},
-                     {"3", "月流量", "按月汇总，并显示每个月的端口/IP明细", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Month); }},
-                     {"4", "年流量", "按年汇总，并显示每一年的端口/IP明细", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Year); }},
-                     {"5", "本月端口明细", "本月按端口汇总，并保留 IP 下钻", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Month, currentTrafficPeriodLabel(TrafficPeriodMode::Month)); }},
-                     {"6", "今日端口明细", "今天按端口汇总，并保留 IP 下钻", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Day, currentTrafficPeriodLabel(TrafficPeriodMode::Day)); }},
-                     {"7", "实时明细", "较慢，读取底层实时计数和 IP 明细", false, [this] { actionShowTrafficRanking(); }},
-                     {"8", "删除统计端口", "停止统计指定端口，保留历史", true, [this] { actionRemoveTrafficPorts(); }},
-                     {"9", "高级：删除全部统计规则", "高风险，删除底层统计规则", true, [this] { actionRemoveTrafficAccounting(); }},
+                     {"2", "日流量", "滚动最近N天，或指定某一天，均带端口/IP明细", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Day); }},
+                     {"3", "月流量", "滚动最近N个月，或指定某个月，均带端口/IP明细", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Month); }},
+                     {"4", "年流量", "滚动最近N年，或指定某一年，均带端口/IP明细", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Year); }},
+                     {"5", "实时明细", "较慢，读取底层实时计数和 IP 明细", false, [this] { actionShowTrafficRanking(); }},
+                     {"6", "删除统计端口", "停止统计指定端口，保留历史", true, [this] { actionRemoveTrafficPorts(); }},
+                     {"7", "高级：删除全部统计规则", "高风险，删除底层统计规则", true, [this] { actionRemoveTrafficAccounting(); }},
                      {"0", "高级：底层计数规则", "查看 nftables 原始输出", false, [this] { actionRawNftTable(); }},
                  });
     }
@@ -6288,11 +6353,10 @@ private:
 
     void actionShowTrafficPeriod(TrafficPeriodMode mode, const std::string &period) {
         ScreenBuffer buffer;
-        const std::string title = mode == TrafficPeriodMode::Day ? "按日流量"
-                                : mode == TrafficPeriodMode::Year ? "按年流量"
-                                                                  : "按月流量";
+        const std::string title = trafficPeriodModeDetailTitle(mode);
         const auto rows = loadTrafficDeltasForPeriod(mode, period);
         const auto byPort = aggregateTrafficByPort(rows);
+        buffer.add("查询模式: 绝对时间。");
         buffer.add("统计口径: 系统本地时间 " + period + "，按端口和 IP:端口聚合上行/下行。");
         buffer.add("历史目录: " + kTrafficHistoryDir);
         if (rows.empty()) {
@@ -6312,14 +6376,9 @@ private:
         pushResult(title + " " + period, buffer);
     }
 
-    void actionShowTrafficPeriods(TrafficPeriodMode mode) {
-        const std::string title = mode == TrafficPeriodMode::Day ? "日流量"
-                                : mode == TrafficPeriodMode::Year ? "年流量"
-                                                                  : "月流量";
-        const std::string vnstat = mode == TrafficPeriodMode::Day ? "vnstat -d"
-                                  : mode == TrafficPeriodMode::Year ? "vnstat -y"
-                                                                    : "vnstat -m";
-        const std::size_t limit = mode == TrafficPeriodMode::Day ? 31 : mode == TrafficPeriodMode::Month ? 24 : 10;
+    void actionShowTrafficPeriods(TrafficPeriodMode mode, std::size_t limit, const std::string &queryNote) {
+        const std::string title = trafficPeriodModeTitle(mode);
+        const std::string vnstat = trafficPeriodVnstatCommand(mode);
         const auto rows = loadTrafficPeriodTotals(mode, limit);
         std::vector<std::string> periods;
         for (const auto &row : rows) {
@@ -6327,10 +6386,9 @@ private:
         }
         const auto details = loadTrafficDeltasForPeriods(mode, periods);
         ScreenBuffer buffer;
+        buffer.add("查询模式: " + queryNote);
         buffer.add("统计口径: 保留 " + vnstat + " 的时间维度，但每行额外显示该周期的端口和 IP:端口 Top。");
-        buffer.add("每行是一个" +
-                   (mode == TrafficPeriodMode::Day ? std::string("日期") : mode == TrafficPeriodMode::Year ? std::string("年份") : std::string("月份")) +
-                   "的采样增量。");
+        buffer.add("每行是一个" + trafficPeriodModeColumn(mode) + "的采样增量。");
         buffer.add("时间使用服务器系统本地时区；上行在前，下行在后。");
         buffer.add("历史目录: " + kTrafficHistoryDir);
         buffer.add("");
@@ -6352,14 +6410,62 @@ private:
         pushResult(title, buffer);
     }
 
-    void actionPromptTrafficPeriod(TrafficPeriodMode mode) {
-        const std::string title = mode == TrafficPeriodMode::Day ? "按日查看"
-                                : mode == TrafficPeriodMode::Year ? "按年查看"
-                                                                  : "按月查看";
-        const std::string sample = mode == TrafficPeriodMode::Day ? "示例: 2026-05-04"
-                                  : mode == TrafficPeriodMode::Year ? "示例: 2026"
-                                                                    : "示例: 2026-05";
-        PromptAnswer answer = promptLine(title, {sample, "时间按服务器系统本地时区解释。"}, "时间: ");
+    void actionShowTrafficPeriods(TrafficPeriodMode mode) {
+        actionShowTrafficPeriods(mode, defaultTrafficRollingLimit(mode),
+                                 "滚动窗口，最近 " + std::to_string(defaultTrafficRollingLimit(mode)) +
+                                     " 个有采样数据的" + trafficPeriodModeUnit(mode));
+    }
+
+    void actionTrafficPeriodQuery(TrafficPeriodMode mode) {
+        const std::string title = trafficPeriodModeTitle(mode);
+        const std::string current = currentTrafficPeriodLabel(mode);
+        PromptAnswer queryMode = promptLine(title,
+                                            {"选择查询方式:",
+                                             "1 = 滚动窗口，最近 N 个有采样数据的" + trafficPeriodModeUnit(mode),
+                                             "2 = 绝对时间，指定一个" + trafficPeriodModeColumn(mode),
+                                             "直接按 Enter 使用滚动窗口。"},
+                                            "模式 [1/2]: ");
+        if (!queryMode.ok) {
+            return;
+        }
+        const std::string choice = trim(queryMode.value);
+        if (choice.empty() || choice == "1" || lowerCopy(choice) == "r" || lowerCopy(choice) == "rolling") {
+            const std::size_t defaultLimit = defaultTrafficRollingLimit(mode);
+            PromptAnswer count = promptLine(title + " - 滚动窗口",
+                                            {"输入要查看的周期数量。",
+                                             "默认: " + std::to_string(defaultLimit) + "，最大: " + std::to_string(maxTrafficRollingLimit(mode)),
+                                             "说明: 滚动窗口展示最近有采样增量的周期，并保留端口/IP:端口明细。"},
+                                            "最近N个" + trafficPeriodModeUnit(mode) + ": ",
+                                            std::to_string(defaultLimit));
+            if (!count.ok) {
+                return;
+            }
+            std::size_t limit = defaultLimit;
+            if (!parseTrafficRollingLimit(count.value, mode, limit)) {
+                ScreenBuffer buffer;
+                buffer.add(ansi::yellow + std::string("滚动窗口数量不合法。") + ansi::plain);
+                buffer.add("请输入 1 到 " + std::to_string(maxTrafficRollingLimit(mode)) + " 之间的整数。");
+                pushResult(title, buffer);
+                return;
+            }
+            actionShowTrafficPeriods(mode, limit,
+                                     "滚动窗口，最近 " + std::to_string(limit) +
+                                         " 个有采样数据的" + trafficPeriodModeUnit(mode));
+            return;
+        }
+        if (!(choice == "2" || lowerCopy(choice) == "a" || lowerCopy(choice) == "absolute")) {
+            ScreenBuffer buffer;
+            buffer.add(ansi::yellow + std::string("查询方式不合法。") + ansi::plain);
+            buffer.add("请输入 1/2，或直接按 Enter 使用滚动窗口。");
+            pushResult(title, buffer);
+            return;
+        }
+
+        const std::string sample = "示例: " + trafficPeriodSample(mode);
+        PromptAnswer answer = promptLine(title + " - 绝对时间",
+                                         {sample, "默认: " + current, "时间按服务器系统本地时区解释。"},
+                                         trafficPeriodModeColumn(mode) + ": ",
+                                         current);
         if (!answer.ok) {
             return;
         }
@@ -6368,6 +6474,7 @@ private:
             ScreenBuffer buffer;
             buffer.add(ansi::yellow + std::string("时间格式不合法。") + ansi::plain);
             buffer.add(sample);
+            buffer.add("当前默认值: " + current);
             pushResult(title, buffer);
             return;
         }
@@ -8493,6 +8600,14 @@ inline int selfTest() {
                                   isValidTrafficPeriodLabel(TrafficPeriodMode::Month, localMonthStamp(std::time(nullptr))) &&
                                   isValidTrafficPeriodLabel(TrafficPeriodMode::Year, localYearStamp(std::time(nullptr))) &&
                                   !isValidTrafficPeriodLabel(TrafficPeriodMode::Day, "05-04"));
+    std::size_t rollingLimit = 0;
+    check("流量滚动查询数量", parseTrafficRollingLimit("", TrafficPeriodMode::Day, rollingLimit) &&
+                                  rollingLimit == defaultTrafficRollingLimit(TrafficPeriodMode::Day) &&
+                                  parseTrafficRollingLimit("12", TrafficPeriodMode::Month, rollingLimit) &&
+                                  rollingLimit == 12 &&
+                                  !parseTrafficRollingLimit("0", TrafficPeriodMode::Month, rollingLimit) &&
+                                  !parseTrafficRollingLimit("9999", TrafficPeriodMode::Day, rollingLimit) &&
+                                  !parseTrafficRollingLimit("abc", TrafficPeriodMode::Year, rollingLimit));
 
     const auto merged = mergeRanges({{10, 20}, {1, 5}, {6, 9}, {30, 40}});
     check("range 合并", merged.size() == 2 && merged[0].first == 1 && merged[0].second == 20 &&

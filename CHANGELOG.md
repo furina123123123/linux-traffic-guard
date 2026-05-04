@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.14 - 2026-05-04
+
+### Changed
+
+- Reworked day/month/year traffic views into a query flow with rolling-window mode and absolute-period mode.
+- Removed duplicate today/month detail entries from the traffic menu; the period query now owns both summary and port/IP drilldown behavior.
+
 ## 4.12.13 - 2026-05-04
 
 ### Added
