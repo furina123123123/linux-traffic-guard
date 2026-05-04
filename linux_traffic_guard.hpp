@@ -85,7 +85,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.11";
+inline const std::string kVersion = "4.12.12";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
@@ -4146,6 +4146,58 @@ inline std::vector<TrafficPeriodTotal> loadTrafficPeriodTotals(TrafficPeriodMode
     }
     return out;
 }
+
+inline std::map<std::string, std::vector<TrafficRow>> loadTrafficDeltasForPeriods(TrafficPeriodMode mode,
+                                                                                  const std::vector<std::string> &periods) {
+    std::map<std::string, std::vector<TrafficRow>> out;
+    if (periods.empty() || !fileExists(trafficHistoryDbPath())) {
+        return out;
+    }
+    std::string error;
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return out;
+    }
+    const std::string column = mode == TrafficPeriodMode::Day ? "day" : mode == TrafficPeriodMode::Year ? "year" : "month";
+    std::ostringstream placeholders;
+    for (std::size_t i = 0; i < periods.size(); ++i) {
+        if (i != 0) {
+            placeholders << ",";
+        }
+        placeholders << "?";
+    }
+    const std::string sql = "select " + column + ",family,direction,ip,port,sum(bytes),sum(packets) from traffic_delta where " +
+                            column + " in (" + placeholders.str() + ") group by " + column + ",family,direction,ip,port;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return out;
+    }
+    for (std::size_t i = 0; i < periods.size(); ++i) {
+        sqlite3_bind_text(stmt, static_cast<int>(i + 1), periods[i].c_str(), -1, SQLITE_TRANSIENT);
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto *periodText = sqlite3_column_text(stmt, 0);
+        const auto *familyText = sqlite3_column_text(stmt, 1);
+        const auto *directionText = sqlite3_column_text(stmt, 2);
+        const auto *ipText = sqlite3_column_text(stmt, 3);
+        const auto *portText = sqlite3_column_text(stmt, 4);
+        if (!periodText || !familyText || !directionText || !ipText || !portText) {
+            continue;
+        }
+        TrafficRow row;
+        row.family = reinterpret_cast<const char *>(familyText);
+        row.direction = reinterpret_cast<const char *>(directionText);
+        row.ip = reinterpret_cast<const char *>(ipText);
+        row.port = reinterpret_cast<const char *>(portText);
+        row.bytes = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 5));
+        row.packets = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 6));
+        out[reinterpret_cast<const char *>(periodText)].push_back(std::move(row));
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return out;
+}
 #else
 inline std::map<std::string, TrafficRow> loadLatestTrafficSnapshot(std::string &error) {
     std::map<std::string, TrafficRow> out;
@@ -4338,6 +4390,37 @@ inline std::vector<TrafficPeriodTotal> loadTrafficPeriodTotals(TrafficPeriodMode
     }
     return out;
 }
+
+inline std::map<std::string, std::vector<TrafficRow>> loadTrafficDeltasForPeriods(TrafficPeriodMode mode,
+                                                                                  const std::vector<std::string> &periods) {
+    std::map<std::string, std::vector<TrafficRow>> out;
+    if (periods.empty()) {
+        return out;
+    }
+    const std::set<std::string> wanted(periods.begin(), periods.end());
+    std::ifstream input(trafficHistoryPath("delta.tsv"), std::ios::binary);
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto parts = splitByChar(line, '\t');
+        if (parts.size() != 10) {
+            continue;
+        }
+        const std::string &period = mode == TrafficPeriodMode::Day ? parts[1] : mode == TrafficPeriodMode::Year ? parts[3] : parts[2];
+        if (wanted.find(period) == wanted.end()) {
+            continue;
+        }
+        TrafficRow row;
+        row.family = parts[4];
+        row.direction = parts[5];
+        row.ip = parts[6];
+        row.port = parts[7];
+        if (!parseU64(parts[8], row.bytes) || !parseU64(parts[9], row.packets)) {
+            continue;
+        }
+        out[period].push_back(std::move(row));
+    }
+    return out;
+}
 #endif
 
 inline std::set<int> detectExistingTrafficPorts() {
@@ -4457,6 +4540,31 @@ inline TrafficSummaryRow sumTrafficSummaryRows(const std::vector<TrafficSummaryR
     return total;
 }
 
+inline std::string compactTrafficSummary(const std::vector<TrafficSummaryRow> &rows,
+                                         TrafficGroupMode mode,
+                                         std::size_t limit) {
+    if (rows.empty()) {
+        return "-";
+    }
+    std::vector<std::string> items;
+    for (std::size_t i = 0; i < rows.size() && i < limit; ++i) {
+        std::ostringstream item;
+        if (mode == TrafficGroupMode::Port) {
+            item << rows[i].port;
+        } else if (mode == TrafficGroupMode::IpPort) {
+            item << rows[i].ip << ":" << rows[i].port;
+        } else {
+            item << rows[i].ip;
+        }
+        item << " " << humanBytes(rows[i].totalBytes());
+        items.push_back(item.str());
+    }
+    if (rows.size() > limit) {
+        items.push_back("+" + std::to_string(rows.size() - limit));
+    }
+    return joinWords(items, ", ");
+}
+
 inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, TrafficGroupMode mode) {
     Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "端口", "上行", "下行", "合计", "包数"}
                 : mode == TrafficGroupMode::Port ? std::vector<std::string>{"序号", "端口", "服务", "上行", "下行", "合计", "包数"}
@@ -4488,15 +4596,27 @@ inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std
     return trafficSummaryTable(rows, limit, includePort ? TrafficGroupMode::IpPort : TrafficGroupMode::Ip);
 }
 
-inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &rows, TrafficPeriodMode mode) {
+inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &rows,
+                                      TrafficPeriodMode mode,
+                                      const std::map<std::string, std::vector<TrafficRow>> &details = {}) {
     const std::string label = mode == TrafficPeriodMode::Day ? "日期" : mode == TrafficPeriodMode::Year ? "年份" : "月份";
-    Table table({label, "上行", "下行", "合计", "包数"}, {14, 14, 14, 14, 12});
+    Table table({label, "上行", "下行", "合计", "包数", "Top端口", "Top IP:端口"},
+                {12, 11, 11, 11, 8, 26, 34});
     for (const auto &row : rows) {
+        std::string topPorts = "-";
+        std::string topIpPorts = "-";
+        const auto detailIt = details.find(row.period);
+        if (detailIt != details.end()) {
+            topPorts = compactTrafficSummary(aggregateTrafficByPort(detailIt->second), TrafficGroupMode::Port, 3);
+            topIpPorts = compactTrafficSummary(aggregateTrafficByIpPort(detailIt->second), TrafficGroupMode::IpPort, 3);
+        }
         table.add({row.period,
                    humanBytes(row.uploadBytes),
                    humanBytes(row.downloadBytes),
                    humanBytes(row.totalBytes()),
-                   std::to_string(row.totalPackets())});
+                   std::to_string(row.totalPackets()),
+                   topPorts,
+                   topIpPorts});
     }
     return table;
 }
@@ -5100,9 +5220,9 @@ private:
         pushMenu("流量统计", "像 vnStat 一样按日/月/年查看，默认按端口聚合",
                  {
                      {"1", "开启/追加端口", "默认追加，不清空已有统计", true, [this] { actionInstallTraffic(); }},
-                     {"2", "日流量", "类似 vnstat -d，列出每天上行/下行/合计", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Day); }},
-                     {"3", "月流量", "类似 vnstat -m，列出每月上行/下行/合计", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Month); }},
-                     {"4", "年流量", "类似 vnstat -y，列出每年上行/下行/合计", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Year); }},
+                     {"2", "日流量", "按天汇总，并显示每一天的端口/IP明细", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Day); }},
+                     {"3", "月流量", "按月汇总，并显示每个月的端口/IP明细", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Month); }},
+                     {"4", "年流量", "按年汇总，并显示每一年的端口/IP明细", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Year); }},
                      {"5", "本月端口明细", "本月按端口汇总，并保留 IP 下钻", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Month, currentTrafficPeriodLabel(TrafficPeriodMode::Month)); }},
                      {"6", "今日端口明细", "今天按端口汇总，并保留 IP 下钻", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Day, currentTrafficPeriodLabel(TrafficPeriodMode::Day)); }},
                      {"7", "实时明细", "较慢，读取底层实时计数和 IP 明细", false, [this] { actionShowTrafficRanking(); }},
@@ -5683,7 +5803,7 @@ private:
                                                                   : "按月流量";
         const auto rows = loadTrafficDeltasForPeriod(mode, period);
         const auto byPort = aggregateTrafficByPort(rows);
-    buffer.add("统计口径: 系统本地时间 " + period + "，按端口聚合上行/下行。");
+        buffer.add("统计口径: 系统本地时间 " + period + "，按端口和 IP:端口聚合上行/下行。");
         buffer.add("历史目录: " + kTrafficHistoryDir);
         if (rows.empty()) {
             buffer.add(ansi::yellow + std::string("该时间段还没有采样增量。") + ansi::plain);
@@ -5694,7 +5814,10 @@ private:
         buffer.add("> 端口汇总");
         addTrafficSummaryTable(buffer, byPort, 50, "暂无采样增量", TrafficGroupMode::Port);
         buffer.add("");
-        buffer.add("> IP 明细");
+        buffer.add("> IP:端口明细");
+        addTrafficSummaryTable(buffer, aggregateTrafficByIpPort(rows), 80, "暂无采样增量", TrafficGroupMode::IpPort);
+        buffer.add("");
+        buffer.add("> IP 汇总");
         addTrafficSummaryTable(buffer, aggregateTrafficByIp(rows), 50, "暂无采样增量", false);
         pushResult(title + " " + period, buffer);
     }
@@ -5708,15 +5831,34 @@ private:
                                                                     : "vnstat -m";
         const std::size_t limit = mode == TrafficPeriodMode::Day ? 31 : mode == TrafficPeriodMode::Month ? 24 : 10;
         const auto rows = loadTrafficPeriodTotals(mode, limit);
+        std::vector<std::string> periods;
+        for (const auto &row : rows) {
+            periods.push_back(row.period);
+        }
+        const auto details = loadTrafficDeltasForPeriods(mode, periods);
         ScreenBuffer buffer;
-        buffer.add("统计口径: 类似 " + vnstat + "，每行是一个" +
+        buffer.add("统计口径: 保留 " + vnstat + " 的时间维度，但每行额外显示该周期的端口和 IP:端口 Top。");
+        buffer.add("每行是一个" +
                    (mode == TrafficPeriodMode::Day ? std::string("日期") : mode == TrafficPeriodMode::Year ? std::string("年份") : std::string("月份")) +
                    "的采样增量。");
         buffer.add("时间使用服务器系统本地时区；上行在前，下行在后。");
         buffer.add("历史目录: " + kTrafficHistoryDir);
         buffer.add("");
-        buffer.addAll(tableLines(trafficPeriodTotalsTable(rows, mode),
+        buffer.addAll(tableLines(trafficPeriodTotalsTable(rows, mode, details),
                                  "暂无历史采样增量。开启/追加端口后，第一次采样会把已有底层计数纳入当前周期。"));
+        if (!rows.empty()) {
+            const auto detailIt = details.find(rows.front().period);
+            const std::vector<TrafficRow> latestRows = detailIt == details.end() ? std::vector<TrafficRow>{} : detailIt->second;
+            buffer.add("");
+            buffer.add("> 最新周期完整明细: " + rows.front().period);
+            buffer.add("端口明细和 IP:端口明细来自同一批采样增量，不是底层实时累计值。");
+            buffer.add("");
+            buffer.add("> 端口汇总");
+            addTrafficSummaryTable(buffer, aggregateTrafficByPort(latestRows), 30, "暂无采样增量", TrafficGroupMode::Port);
+            buffer.add("");
+            buffer.add("> IP:端口明细");
+            addTrafficSummaryTable(buffer, aggregateTrafficByIpPort(latestRows), 50, "暂无采样增量", TrafficGroupMode::IpPort);
+        }
         pushResult(title, buffer);
     }
 

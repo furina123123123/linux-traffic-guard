@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.12 - 2026-05-04
+
+### Changed
+
+- Changed day/month/year traffic pages from plain vnStat-like totals into period tables with per-period top ports and top IP:port details.
+- Added a full latest-period drilldown below each day/month/year page so operators can see the port and source breakdown without leaving the view.
+
 ## 4.12.11 - 2026-05-04
 
 ### Changed

@@ -40,7 +40,7 @@ git clone https://github.com/furina123123123/linux-traffic-guard.git && cd linux
 ## Features
 
 - Dashboard: current-month port traffic plus cached UFW security analysis, clear empty states, and next-step guidance; live service and dependency probes are kept out of the first render for faster loading.
-- Traffic accounting: append/remove tracked ports without rebuilding by default, visible tracked-port lists, background snapshots every 5 minutes, and `vnStat`-style day/month/year tables.
+- Traffic accounting: append/remove tracked ports without rebuilding by default, visible tracked-port lists, background snapshots every 5 minutes, and `vnStat`-style day/month/year tables with per-period port and IP:port detail.
 - Security center: daily workflows organized as overview, investigation, policy configuration, remediation, service checks, and diagnostics.
 - UFW analysis: parses UFW `BLOCK`/`AUDIT`/`ALLOW` events, aggregates by IP/port/time period, and supports IP tracing.
 - fail2ban effectiveness checks: verifies that jails are really loaded after repair and can run a reversible test ban to confirm UFW rule landing.
