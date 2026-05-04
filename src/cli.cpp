@@ -3810,7 +3810,11 @@ public:
                 lastPhysical_[static_cast<std::size_t>(row)] = fitted;
             }
         }
-        frame << (showHardwareCursor ? "\033[?25h" : "\033[?25l");
+        if (showHardwareCursor) {
+            frame << "\033[?25h";
+        } else {
+            frame << "\033[" << rows << ";1H\033[?25l";
+        }
         std::cout << frame.str();
         std::cout.flush();
         painted_ = true;
@@ -9920,8 +9924,10 @@ inline int selfTest() {
     cursorViewport.render("菜单", cursorBuffer, 0, "q 返回");
     std::cout.rdbuf(oldCursorOut);
     const std::string cursorFrameText = cursorFrame.str();
+    const std::string hiddenAtFooter = "\033[" + std::to_string(terminalRows()) + ";1H\033[?25l";
     check("非输入页隐藏硬件光标", cursorFrameText.size() >= 6 &&
-                                      cursorFrameText.rfind("\033[?25l") == cursorFrameText.size() - 6);
+                                      cursorFrameText.rfind("\033[?25l") == cursorFrameText.size() - 6 &&
+                                      cursorFrameText.find(hiddenAtFooter) != std::string::npos);
     int scrollProbe = 0;
     const bool topScrollChanged = adjustScroll(InputKind::Up, scrollProbe, 100);
     const bool downScrollChanged = adjustScroll(InputKind::Down, scrollProbe, 100);
