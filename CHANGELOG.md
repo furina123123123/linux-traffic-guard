@@ -7,6 +7,7 @@
 - Reduced TUI scroll flicker by buffering full-screen renders and skipping redraws for no-op scroll or selection input.
 - Made prompt input feedback more obvious with a software blinking cursor that updates only when needed.
 - Hid the terminal hardware cursor while prompt input pages are active so only one cursor is visible.
+- Added Vim-style TUI navigation: `j/k`, `g/G`, `Ctrl-f/Ctrl-b`, and `Ctrl-d/Ctrl-u`.
 
 ## 4.12.15 - 2026-05-04
 

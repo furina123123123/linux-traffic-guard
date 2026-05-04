@@ -3364,6 +3364,52 @@ inline bool adjustScroll(InputKind kind, int &scrollOffset, std::size_t lineCoun
     return scrollOffset != before;
 }
 
+inline bool adjustScrollByRows(int rows, int &scrollOffset, std::size_t lineCount) {
+    const int before = scrollOffset;
+    const int bodyRows = std::max(3, terminalRows() - 4);
+    const int maxOffset = std::max(0, static_cast<int>(lineCount) - bodyRows);
+    scrollOffset = std::max(0, std::min(scrollOffset + rows, maxOffset));
+    return scrollOffset != before;
+}
+
+inline bool adjustScrollForEvent(const InputEvent &event, int &scrollOffset, std::size_t lineCount) {
+    const int bodyRows = std::max(3, terminalRows() - 4);
+    if (event.kind == InputKind::Up || event.kind == InputKind::MouseUp) {
+        return adjustScroll(event.kind, scrollOffset, lineCount);
+    }
+    if (event.kind == InputKind::Down || event.kind == InputKind::MouseDown) {
+        return adjustScroll(event.kind, scrollOffset, lineCount);
+    }
+    if (event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
+        event.kind == InputKind::Home || event.kind == InputKind::End) {
+        return adjustScroll(event.kind, scrollOffset, lineCount);
+    }
+    if (event.kind != InputKind::Character) {
+        return false;
+    }
+    if (event.ch == 'k') return adjustScrollByRows(-3, scrollOffset, lineCount);
+    if (event.ch == 'j') return adjustScrollByRows(3, scrollOffset, lineCount);
+    if (event.ch == 'g') return adjustScroll(InputKind::Home, scrollOffset, lineCount);
+    if (event.ch == 'G') return adjustScroll(InputKind::End, scrollOffset, lineCount);
+    if (event.ch == 2) return adjustScroll(InputKind::PageUp, scrollOffset, lineCount);       // Ctrl-b
+    if (event.ch == 6) return adjustScroll(InputKind::PageDown, scrollOffset, lineCount);     // Ctrl-f
+    if (event.ch == 21) return adjustScrollByRows(-(bodyRows / 2), scrollOffset, lineCount);  // Ctrl-u
+    if (event.ch == 4) return adjustScrollByRows(bodyRows / 2, scrollOffset, lineCount);      // Ctrl-d
+    return false;
+}
+
+inline bool isScrollInput(const InputEvent &event) {
+    if (event.kind == InputKind::Up || event.kind == InputKind::Down ||
+        event.kind == InputKind::MouseUp || event.kind == InputKind::MouseDown ||
+        event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
+        event.kind == InputKind::Home || event.kind == InputKind::End) {
+        return true;
+    }
+    return event.kind == InputKind::Character &&
+           (event.ch == 'j' || event.ch == 'k' || event.ch == 'g' || event.ch == 'G' ||
+            event.ch == 2 || event.ch == 4 || event.ch == 6 || event.ch == 21);
+}
+
 inline std::string cursorMoveSequence(int row, int col) {
     std::ostringstream out;
     out << "\033[" << std::max(1, row) << ";" << std::max(1, col) << "H\033[?25h";
@@ -5960,7 +6006,7 @@ private:
         ScreenBuffer buffer;
         buffer.add("  " + page.subtitle);
         buffer.add("");
-        buffer.add(ansi::gray + std::string("  ↑/↓ 或滚轮移动，Enter 确认。当前选中项会高亮。") + ansi::plain);
+        buffer.add(ansi::gray + std::string("  ↑/↓、j/k 或滚轮移动，Ctrl-f/b 翻页，Ctrl-d/u 半页。当前选中项会高亮。") + ansi::plain);
         buffer.add("");
         buffer.add(ansi::bold + std::string("  序号  操作                    说明") + ansi::plain);
         buffer.add(ansi::gray + std::string("  --------------------------------------------------------------------------") + ansi::plain);
@@ -6025,12 +6071,12 @@ private:
 
     std::string footerFor(const Page &page, std::size_t) const {
         if (page.kind == PageKind::Dashboard) {
-            return "↑↓/滚轮 滚动  r 刷新  q 返回";
+            return "j/k/↑↓ 滚动  Ctrl-f/b 翻页  Ctrl-d/u 半页  r 刷新  q 返回";
         }
         if (page.kind == PageKind::Result) {
-            return "↑↓/滚轮 滚动  PgUp/PgDn 翻页  q 返回";
+            return "j/k/↑↓ 滚动  Ctrl-f/b/PgUp/PgDn 翻页  Ctrl-d/u 半页  g/G 顶底  q 返回";
         }
-        return "↑↓/滚轮 选择  Enter 确认  q 返回";
+        return "j/k/↑↓ 选择  Ctrl-f/b 翻页  Ctrl-d/u 半页  Enter 确认  q 返回";
     }
 
     bool updateAsync(Page &page) {
@@ -6090,14 +6136,25 @@ private:
         ScreenBuffer buffer = renderPage(page);
         if (event.kind == InputKind::Up || event.kind == InputKind::Down ||
             event.kind == InputKind::MouseUp || event.kind == InputKind::MouseDown ||
-            event.kind == InputKind::Home || event.kind == InputKind::End) {
+            event.kind == InputKind::Home || event.kind == InputKind::End ||
+            (event.kind == InputKind::Character &&
+             (event.ch == 'j' || event.ch == 'k' || event.ch == 'g' || event.ch == 'G'))) {
             const int beforeScroll = page.scrollOffset;
-            const bool selectedChanged = adjustSelection(event.kind, page.selected, selectableCount);
+            InputKind selectionKind = event.kind;
+            if (event.kind == InputKind::Character) {
+                if (event.ch == 'j') selectionKind = InputKind::Down;
+                else if (event.ch == 'k') selectionKind = InputKind::Up;
+                else if (event.ch == 'g') selectionKind = InputKind::Home;
+                else if (event.ch == 'G') selectionKind = InputKind::End;
+            }
+            const bool selectedChanged = adjustSelection(selectionKind, page.selected, selectableCount);
             ensureLineVisible(6 + page.selected, page.scrollOffset, buffer.size());
             return selectedChanged || page.scrollOffset != beforeScroll;
         }
-        if (event.kind == InputKind::PageUp || event.kind == InputKind::PageDown) {
-            return adjustScroll(event.kind, page.scrollOffset, buffer.size());
+        if (event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
+            (event.kind == InputKind::Character &&
+             (event.ch == 2 || event.ch == 4 || event.ch == 6 || event.ch == 21))) {
+            return adjustScrollForEvent(event, page.scrollOffset, buffer.size());
         }
         if (event.kind == InputKind::Escape) {
             popPage();
@@ -6130,11 +6187,8 @@ private:
 
     bool handleDashboard(const InputEvent &event, Page &page) {
         ScreenBuffer buffer = renderPage(page);
-        if (event.kind == InputKind::Up || event.kind == InputKind::Down ||
-            event.kind == InputKind::MouseUp || event.kind == InputKind::MouseDown ||
-            event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
-            event.kind == InputKind::Home || event.kind == InputKind::End) {
-            return adjustScroll(event.kind, page.scrollOffset, buffer.size());
+        if (isScrollInput(event)) {
+            return adjustScrollForEvent(event, page.scrollOffset, buffer.size());
         }
         if (event.kind == InputKind::Escape) {
             popPage();
@@ -6158,11 +6212,8 @@ private:
 
     bool handleScrollable(const InputEvent &event, Page &page) {
         ScreenBuffer buffer = renderPage(page);
-        if (event.kind == InputKind::Up || event.kind == InputKind::Down ||
-            event.kind == InputKind::MouseUp || event.kind == InputKind::MouseDown ||
-            event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
-            event.kind == InputKind::Home || event.kind == InputKind::End) {
-            return adjustScroll(event.kind, page.scrollOffset, buffer.size());
+        if (isScrollInput(event)) {
+            return adjustScrollForEvent(event, page.scrollOffset, buffer.size());
         }
         if (event.kind == InputKind::Escape) {
             popPage();
@@ -6253,6 +6304,11 @@ private:
                 event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
                 event.kind == InputKind::Home || event.kind == InputKind::End) {
                 dirty = adjustScroll(event.kind, scrollOffset, buffer.size()) || dirty;
+                continue;
+            }
+            if (event.kind == InputKind::Character &&
+                (event.ch == 2 || event.ch == 4 || event.ch == 6 || event.ch == 21)) {
+                dirty = adjustScrollForEvent(event, scrollOffset, buffer.size()) || dirty;
                 continue;
             }
             if (event.kind != InputKind::Character) {
@@ -8716,6 +8772,12 @@ inline int selfTest() {
     const bool topScrollChanged = adjustScroll(InputKind::Up, scrollProbe, 100);
     const bool downScrollChanged = adjustScroll(InputKind::Down, scrollProbe, 100);
     check("无效滚动不触发重绘", !topScrollChanged && downScrollChanged && scrollProbe > 0);
+    int vimScrollProbe = 0;
+    const bool vimDown = adjustScrollForEvent({InputKind::Character, 'j'}, vimScrollProbe, 100);
+    const bool vimHalfDown = adjustScrollForEvent({InputKind::Character, 4}, vimScrollProbe, 100);
+    const bool vimPageUp = adjustScrollForEvent({InputKind::Character, 2}, vimScrollProbe, 100);
+    const bool vimBottom = adjustScrollForEvent({InputKind::Character, 'G'}, vimScrollProbe, 100);
+    check("Vim 风格滚动快捷键", vimDown && vimHalfDown && vimPageUp && vimBottom && vimScrollProbe > 0);
 
 #if LTG_HAS_SQLITE
     check("SQLite 编译模式", true, "LTG_HAS_SQLITE=1");
