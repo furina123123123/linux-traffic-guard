@@ -3310,7 +3310,8 @@ public:
     void render(const std::string &title,
                 const ScreenBuffer &buffer,
                 int scrollOffset,
-                const std::string &footer) const {
+                const std::string &footer,
+                bool showHardwareCursor = true) const {
         const int rows = terminalRows();
         const int cols = terminalCols();
         const int bodyRows = std::max(3, rows - 4);
@@ -3343,7 +3344,7 @@ public:
         }
         draw(rows - 1, ansi::gray + std::string(std::max(1, std::min(cols, 140)), '-') + ansi::plain);
         draw(rows, footerLine.str());
-        frame << "\033[?25h";
+        frame << (showHardwareCursor ? "\033[?25h" : "\033[?25l");
         std::cout << frame.str();
         std::cout.flush();
     }
@@ -5136,7 +5137,7 @@ inline void verifyTuiTerminalChain(ReliabilityReport &report) {
     addReliabilityResult(report, "TUI 终端状态", "alternate screen", ReliabilityStatus::Pass,
                          "退出路径会恢复 ?25h/?1049l", "restoreTerminalDisplay()");
     addReliabilityResult(report, "TUI 终端状态", "输入光标", ReliabilityStatus::Pass,
-                         "输入页渲染后移动到输入末尾并显示光标", "promptLine cursor move");
+                         "输入页使用单一软件光标，退出时恢复终端光标", "promptLine software cursor");
 }
 
 inline ReliabilityReport runReliabilitySelfCheck(bool allowActiveProbes) {
@@ -6237,8 +6238,7 @@ private:
             buffer.add("");
             buffer.add(promptInputLine(label, value, cursorOn));
             if (dirty) {
-                viewport_.render(title, buffer, scrollOffset, "Enter 确认  Backspace 删除  Esc/q 取消");
-                movePromptCursor(body.size(), scrollOffset, label, value);
+                viewport_.render(title, buffer, scrollOffset, "Enter 确认  Backspace 删除  Esc/q 取消", false);
                 dirty = false;
             }
             const InputEvent event = inputReader().readEvent(80);

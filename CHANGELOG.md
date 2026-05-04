@@ -6,6 +6,7 @@
 
 - Reduced TUI scroll flicker by buffering full-screen renders and skipping redraws for no-op scroll or selection input.
 - Made prompt input feedback more obvious with a software blinking cursor that updates only when needed.
+- Hid the terminal hardware cursor while prompt input pages are active so only one cursor is visible.
 
 ## 4.12.15 - 2026-05-04
 
