@@ -3485,6 +3485,14 @@ private:
     std::vector<std::string> lines_;
 };
 
+inline std::string fitLine(const std::string &line, int width);
+
+inline std::string terminalDrawLineSequence(int row, const std::string &text, int cols) {
+    std::ostringstream out;
+    out << "\033[" << row << ";1H" << fitLine(text, cols) << "\033[K";
+    return out.str();
+}
+
 inline bool readAnsiSequence(const std::string &value, std::size_t &index, std::string &sequence) {
     if (index >= value.size() || value[index] != '\033') {
         return false;
@@ -3642,7 +3650,7 @@ public:
                 const ScreenBuffer &buffer,
                 int scrollOffset,
                 const std::string &footer,
-                bool showHardwareCursor = true) const {
+                bool showHardwareCursor = true) {
         const int rows = terminalRows();
         const int cols = terminalCols();
         const int bodyRows = std::max(3, rows - 4);
@@ -3657,28 +3665,58 @@ public:
         footerLine << footer << "  |  页 " << currentPage << "/" << totalPages
                    << "  行 " << fromLine << "-" << toLine << "/" << lines.size();
 
-        std::ostringstream frame;
-        const auto draw = [&](int row, const std::string &text) {
-            frame << "\033[" << row << ";1H\033[2K" << fitLine(text, cols);
-        };
-
-        frame << "\033[?25l\033[H";
-        draw(1, ansi::bold + title + ansi::plain);
-        draw(2, ansi::gray + std::string(std::max(1, std::min(cols, 140)), '-') + ansi::plain);
+        std::vector<std::string> physical(static_cast<std::size_t>(rows) + 1);
+        physical[1] = ansi::bold + title + ansi::plain;
+        physical[2] = ansi::gray + std::string(std::max(1, std::min(cols, 140)), '-') + ansi::plain;
         for (int i = 0; i < bodyRows; ++i) {
             const int idx = scrollOffset + i;
             if (idx >= 0 && idx < static_cast<int>(lines.size())) {
-                draw(3 + i, lines[static_cast<std::size_t>(idx)]);
+                physical[static_cast<std::size_t>(3 + i)] = lines[static_cast<std::size_t>(idx)];
             } else {
-                draw(3 + i, "");
+                physical[static_cast<std::size_t>(3 + i)] = "";
             }
         }
-        draw(rows - 1, ansi::gray + std::string(std::max(1, std::min(cols, 140)), '-') + ansi::plain);
-        draw(rows, footerLine.str());
+        physical[static_cast<std::size_t>(rows - 1)] = ansi::gray + std::string(std::max(1, std::min(cols, 140)), '-') + ansi::plain;
+        physical[static_cast<std::size_t>(rows)] = footerLine.str();
+
+        const bool resized = rows != lastRows_ || cols != lastCols_;
+        if (resized) {
+            lastRows_ = rows;
+            lastCols_ = cols;
+            lastPhysical_.clear();
+        }
+        if (lastPhysical_.size() != physical.size()) {
+            lastPhysical_.assign(physical.size(), std::string());
+        }
+
+        std::ostringstream frame;
+        frame << "\033[?25l";
+        if (resized || !painted_) {
+            frame << "\033[H\033[2J";
+        }
+        for (int row = 1; row <= rows; ++row) {
+            const std::string fitted = fitLine(physical[static_cast<std::size_t>(row)], cols);
+            if (!painted_ || lastPhysical_[static_cast<std::size_t>(row)] != fitted) {
+                frame << terminalDrawLineSequence(row, physical[static_cast<std::size_t>(row)], cols);
+                lastPhysical_[static_cast<std::size_t>(row)] = fitted;
+            }
+        }
         frame << (showHardwareCursor ? "\033[?25h" : "\033[?25l");
         std::cout << frame.str();
         std::cout.flush();
+        painted_ = true;
     }
+
+    void invalidate() {
+        painted_ = false;
+        lastPhysical_.clear();
+    }
+
+private:
+    bool painted_ = false;
+    int lastRows_ = 0;
+    int lastCols_ = 0;
+    std::vector<std::string> lastPhysical_;
 };
 
 inline bool adjustScroll(InputKind kind, int &scrollOffset, std::size_t lineCount) {
@@ -9611,6 +9649,9 @@ inline int selfTest() {
     check("诊断报告 section 检查", diagnosticReportHasRequiredSections("### fail2ban\n...\n### ufw\n...\n### accounting\n") &&
                                       !diagnosticReportHasRequiredSections("### fail2ban\n### ufw\n"));
     check("输入光标移动序列", cursorMoveSequence(4, 12) == "\033[4;12H\033[?25h");
+    const std::string drawLine = terminalDrawLineSequence(2, "abc", 10);
+    check("渲染行尾清理", drawLine == "\033[2;1Habc\033[K" &&
+                              drawLine.find("\033[2K") == std::string::npos);
     check("输入软件光标闪烁渲染", promptInputLine("端口> ", "443", true).find(ansi::inverse) != std::string::npos &&
                                       promptInputLine("端口> ", "443", false).find(ansi::inverse) == std::string::npos);
     int scrollProbe = 0;
