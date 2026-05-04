@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.21 - 2026-05-04
+
+### Changed
+
+- Simplified traffic table labels to `inbound` and `outbound` and made period traffic tables more compact.
+- Reworked period overview rows to show totals plus counted ports and IPs, leaving Top IP detail to the port-level table.
+
 ## 4.12.20 - 2026-05-04
 
 ### Changed
