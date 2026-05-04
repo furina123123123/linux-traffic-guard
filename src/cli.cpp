@@ -3633,6 +3633,11 @@ inline int dailyPeak(const std::map<std::string, int> &daily) {
     return peak;
 }
 
+inline std::string ufwAnalysisAccuracyNote() {
+    return "口径: 精确时间窗口内的公网 SRC UFW BLOCK/AUDIT；按本机本地日期计算单日峰值。"
+           "与旧 Python 脚本不同，LTG 不会把同一天但窗口外的已缓存日志并入当前结果。";
+}
+
 inline std::string topPortsText(const UfwAnalysisReport &report, const std::string &ip, std::size_t topN = 5) {
     std::vector<std::pair<std::string, int>> ports;
     const auto ipFound = report.ipPortDaily.find(ip);
@@ -3662,10 +3667,12 @@ inline void addUfwAnalysisToBuffer(ScreenBuffer &buffer, const UfwAnalysisReport
     buffer.add("> UFW 安全日志分析");
     buffer.add("范围: " + dateTimeStamp(report.start) + " ~ " + dateTimeStamp(report.end));
     buffer.add("来源: " + report.sourceNote + "  有效记录: " + std::to_string(report.validLines));
+    buffer.add(ufwAnalysisAccuracyNote());
     buffer.add("");
 
     struct IpRisk {
         std::string ip;
+        std::string country;
         int peak = 0;
         int total = 0;
     };
@@ -3677,8 +3684,9 @@ inline void addUfwAnalysisToBuffer(ScreenBuffer &buffer, const UfwAnalysisReport
     for (const auto &item : report.ipDaily) {
         const int peak = dailyPeak(item.second);
         const int total = dailyTotal(item.second);
-        if (peak >= 100) high.push_back({item.first, peak, total});
-        else if (peak >= 10) med.push_back({item.first, peak, total});
+        const std::string country = ipGeoLabel(item.first);
+        if (peak >= 100) high.push_back({item.first, country, peak, total});
+        else if (peak >= 10) med.push_back({item.first, country, peak, total});
         else if (total > 0) {
             ++lowCount;
             lowTotal += total;
@@ -3705,26 +3713,26 @@ inline void addUfwAnalysisToBuffer(ScreenBuffer &buffer, const UfwAnalysisReport
         }
         return times.empty() ? "-" : joinWords(times, ",");
     };
-    const std::vector<int> ipWidths = {34, 10, 10, 18, 34};
+    const std::vector<int> ipWidths = {30, 18, 10, 10, 18, 34};
     buffer.add(ansi::red + std::string("> TOP 高危 IP (单日峰值 >= 100)") + ansi::plain);
-    buffer.add(bufferTableRow({"IP", "单日峰值", "时段总计", "最近3天ALLOW", "扫描端口TOP5"}, ipWidths, true));
+    buffer.add(bufferTableRow({"IP", "国家/地区", "单日峰值", "时段总计", "最近3天ALLOW", "扫描端口TOP5"}, ipWidths, true));
     buffer.add(bufferTableRule(ipWidths));
     if (high.empty()) {
         buffer.add("  " + ansi::gray + "- 暂无高危 IP" + ansi::plain);
     }
     for (std::size_t i = 0; i < high.size() && i < 15; ++i) {
-        buffer.add(bufferTableRow({high[i].ip, std::to_string(high[i].peak), std::to_string(high[i].total),
+        buffer.add(bufferTableRow({high[i].ip, high[i].country, std::to_string(high[i].peak), std::to_string(high[i].total),
                                    allowText(high[i].ip), topPortsText(report, high[i].ip)}, ipWidths));
     }
     buffer.add("");
     buffer.add(ansi::yellow + std::string("> TOP 中危 IP (10 <= 单日峰值 < 100)") + ansi::plain);
-    buffer.add(bufferTableRow({"IP", "单日峰值", "时段总计"}, {34, 10, 10}, true));
-    buffer.add(bufferTableRule({34, 10, 10}));
+    buffer.add(bufferTableRow({"IP", "国家/地区", "单日峰值", "时段总计"}, {30, 18, 10, 10}, true));
+    buffer.add(bufferTableRule({30, 18, 10, 10}));
     if (med.empty()) {
         buffer.add("  " + ansi::gray + "- 暂无中危 IP" + ansi::plain);
     }
     for (std::size_t i = 0; i < med.size() && i < 10; ++i) {
-        buffer.add(bufferTableRow({med[i].ip, std::to_string(med[i].peak), std::to_string(med[i].total)}, {34, 10, 10}));
+        buffer.add(bufferTableRow({med[i].ip, med[i].country, std::to_string(med[i].peak), std::to_string(med[i].total)}, {30, 18, 10, 10}));
     }
     buffer.add("");
     buffer.add(ansi::green + std::string("> 低危 IP 整体统计") + ansi::plain);
@@ -3789,6 +3797,7 @@ inline void addUfwAnalysisToBuffer(ScreenBuffer &buffer, const UfwAnalysisReport
     if (!traceIp.empty()) {
         buffer.add("");
         buffer.add(ansi::cyan + std::string("> IP 追查: ") + traceIp + ansi::plain);
+        buffer.add("国家/地区: " + ipGeoLabel(traceIp));
         buffer.add(bufferTableRow({"端口", "次数", "服务描述", "本地活跃进程"}, portWidths, true));
         buffer.add(bufferTableRule(portWidths));
         const auto ipFound = report.ipPortDaily.find(traceIp);
@@ -6981,7 +6990,7 @@ private:
         buffer.add("");
 
         buffer.add("> UFW拦截风险来源Top");
-        buffer.add("统计口径: 兼容 ufw_analyze.py；最近24小时跨到的日期窗口，公网 SRC 的 UFW BLOCK/AUDIT；按单日峰值优先排序。");
+        buffer.add(ufwAnalysisAccuracyNote());
         addUfwTable(buffer, ufwTopFuture.get(), "该窗口暂无公网 UFW BLOCK/AUDIT 记录。");
         buffer.add("");
 
@@ -8816,6 +8825,11 @@ inline int selfTest() {
     sourceTopReport.ipPortDaily["1.2.3.4"]["22"]["2026-05-04"] = 5;
     sourceTopReport.ipPortDaily["8.8.8.8"]["443"]["2026-05-03"] = 6;
     sourceTopReport.allowRecent.push_back({"1.2.3.4", std::time(nullptr)});
+    ScreenBuffer ufwAnalysisBuffer;
+    addUfwAnalysisToBuffer(ufwAnalysisBuffer, sourceTopReport);
+    const std::string ufwAnalysisText = joinWords(ufwAnalysisBuffer.lines(), "\n");
+    check("UFW分析页显示国家和口径", ufwAnalysisText.find("国家/地区") != std::string::npos &&
+                                          ufwAnalysisText.find("精确时间窗口") != std::string::npos);
     const auto sourceTop = buildUfwSourceTopFromReport(sourceTopReport, 10);
     check("UFW来源Top口径", sourceTop.size() == 2 && sourceTop[0].value == "8.8.8.8" &&
                               sourceTop[0].peak == 6 && sourceTop[0].count == 6 &&
