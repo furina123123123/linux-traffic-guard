@@ -2167,6 +2167,29 @@ inline std::vector<std::pair<std::time_t, std::time_t>> mergeRanges(std::vector<
     return merged;
 }
 
+inline bool latestOverlappingRange(std::time_t start,
+                                   std::time_t end,
+                                   const std::vector<std::pair<std::time_t, std::time_t>> &ranges,
+                                   std::time_t &outStart,
+                                   std::time_t &outEnd) {
+    bool found = false;
+    outStart = 0;
+    outEnd = 0;
+    for (const auto &range : mergeRanges(ranges)) {
+        const std::time_t left = std::max(start, range.first);
+        const std::time_t right = std::min(end, range.second);
+        if (left >= right) {
+            continue;
+        }
+        if (!found || right > outEnd || (right == outEnd && left > outStart)) {
+            found = true;
+            outStart = left;
+            outEnd = right;
+        }
+    }
+    return found;
+}
+
 inline std::vector<std::pair<std::time_t, std::time_t>> missingRanges(std::time_t start,
                                                                        std::time_t end,
                                                                        std::vector<std::pair<std::time_t, std::time_t>> ranges) {
@@ -5495,46 +5518,39 @@ inline std::vector<UfwHit> buildUfwSourceTopFromReport(const UfwAnalysisReport &
 inline std::vector<UfwHit> collectUfwSourceTop() {
     const std::time_t end = std::time(nullptr);
     const std::time_t roundedEnd = end - (end % 60);
-    const std::time_t rollingStart = roundedEnd - 86400;
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &rollingStart);
-#else
-    localtime_r(&rollingStart, &tm);
-#endif
-    tm.tm_hour = 0;
-    tm.tm_min = 0;
-    tm.tm_sec = 0;
-    const std::time_t legacyStart = makeLocalTime(tm);
-    const UfwAnalysisReport report = analyzeUfwEvents("仪表盘近24小时日期口径", legacyStart, roundedEnd, false);
+    const std::time_t rollingStart = std::max<std::time_t>(0, roundedEnd - 86400);
+    const UfwAnalysisReport report = analyzeUfwEvents("仪表盘近24小时", rollingStart, roundedEnd, false);
     return buildUfwSourceTopFromReport(report, 10);
 }
 
 inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &note) {
     const std::time_t end = std::time(nullptr);
     const std::time_t roundedEnd = end - (end % 60);
-    const std::time_t rollingStart = roundedEnd - 86400;
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &rollingStart);
-#else
-    localtime_r(&rollingStart, &tm);
-#endif
-    tm.tm_hour = 0;
-    tm.tm_min = 0;
-    tm.tm_sec = 0;
-    const std::time_t start = makeLocalTime(tm);
+    const std::time_t start = std::max<std::time_t>(0, roundedEnd - 86400);
 #if LTG_HAS_SQLITE
-    if (fileExists(ufwCacheDbPath()) && collectUfwSourceTopSqlite(start, roundedEnd, hits)) {
-        note = "来自 UFW 分析缓存；进入“安全中心 -> 分析追查”可刷新。";
-        return true;
+    if (fileExists(ufwCacheDbPath())) {
+        sqlite3 *db = openUfwCacheDb();
+        if (db) {
+            const auto ranges = sqliteReadUfwRanges(db);
+            sqlite3_close(db);
+            std::time_t cachedStart = 0;
+            std::time_t cachedEnd = 0;
+            if (latestOverlappingRange(start, roundedEnd, ranges, cachedStart, cachedEnd) &&
+                collectUfwSourceTopSqlite(cachedStart, cachedEnd, hits)) {
+                note = "来自 UFW 分析缓存(" + dateTimeStamp(cachedStart) + " - " + dateTimeStamp(cachedEnd) +
+                       ")；进入“安全中心 -> 分析追查”可刷新。";
+                return true;
+            }
+        }
     }
 #else
     const auto ranges = readUfwCacheRanges();
-    if (rangeCovered(start, roundedEnd, ranges)) {
+    std::time_t cachedStart = 0;
+    std::time_t cachedEnd = 0;
+    if (latestOverlappingRange(start, roundedEnd, ranges, cachedStart, cachedEnd)) {
         std::map<std::string, UfwHit> grouped;
         std::map<std::string, std::map<std::string, std::uint64_t>> ports;
-        for (const auto &event : readUfwCacheEvents(start, roundedEnd)) {
+        for (const auto &event : readUfwCacheEvents(cachedStart, cachedEnd)) {
             if (event.action != "BLOCK" && event.action != "AUDIT") {
                 continue;
             }
@@ -5563,11 +5579,12 @@ inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &no
         if (hits.size() > 10) {
             hits.resize(10);
         }
-        note = "来自 UFW 分析缓存；进入“安全中心 -> 分析追查”可刷新。";
+        note = "来自 UFW 分析缓存(" + dateTimeStamp(cachedStart) + " - " + dateTimeStamp(cachedEnd) +
+               ")；进入“安全中心 -> 分析追查”可刷新。";
         return true;
     }
 #endif
-    note = "暂无可用缓存。进入“安全中心 -> 分析追查”生成后，仪表盘会显示安全摘要。";
+    note = "暂无可用安全分析缓存。进入“安全中心 -> 分析追查”跑一次最近24小时/7天后，仪表盘会显示缓存摘要。";
     return false;
 }
 
@@ -8868,6 +8885,11 @@ inline int selfTest() {
     const auto merged = mergeRanges({{10, 20}, {1, 5}, {6, 9}, {30, 40}});
     check("range 合并", merged.size() == 2 && merged[0].first == 1 && merged[0].second == 20 &&
                             rangeCovered(1, 20, merged) && !rangeCovered(1, 30, merged));
+    std::time_t overlapStart = 0;
+    std::time_t overlapEnd = 0;
+    check("缓存窗口重叠选择", latestOverlappingRange(100, 300, {{1, 90}, {120, 180}, {200, 260}}, overlapStart, overlapEnd) &&
+                                  overlapStart == 200 && overlapEnd == 260 &&
+                                  !latestOverlappingRange(100, 300, {{1, 90}, {301, 400}}, overlapStart, overlapEnd));
 
     IniConfig ini;
     ini.loadString("[sshd]\nmaxretry = 5\n\n[DEFAULT]\nignoreip = 127.0.0.1\n");
