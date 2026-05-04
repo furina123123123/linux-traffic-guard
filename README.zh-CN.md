@@ -43,7 +43,7 @@ git clone https://github.com/furina123123123/linux-traffic-guard.git && cd linux
 - 流量统计：默认不重建，支持追加/删除统计端口，展示已统计端口列表，后台每 5 分钟采样；日/月/年查询支持滚动窗口和绝对时间两种模式，并在每个周期直接显示端口和 IP:端口明细。
 - 可靠性自检：`sudo ltg --reliability-check` 会验证依赖、更新、防护、流量统计、诊断和 TUI 终端状态；只有显式加 `--active-probes` 才执行临时真实探测。
 - 安全中心：按安全总览、分析追查、策略配置、处置修复、服务诊断组织日常运维路径。
-- 威胁分析：解析 UFW `BLOCK`/`AUDIT`/`ALLOW` 日志，按 IP、端口、时间段聚合，支持指定 IP 下钻，并可用可选 DB-IP Lite MMDB 显示城市/国家归属地。
+- 威胁分析：解析 UFW `BLOCK`/`AUDIT`/`ALLOW` 日志，按 IP、端口、时间段聚合，支持指定 IP 下钻，并可用可选 DB-IP Lite MMDB 显示国家/地区。
 - fail2ban 实效核验：策略安装/修复后检查 jail 是否真正加载，并可用临时测试 IP 验证 UFW deny 是否落地。
 - SQLite 缓存：使用 `/var/tmp/linux_traffic_guard_ufw_cache_v2/events.sqlite3` 缓存日志事件。
 - 流量历史：使用 `/var/tmp/linux_traffic_guard_traffic_history_v1/` 保存采样增量；有 SQLite 时使用 SQLite，无 SQLite 编译路径使用 TSV fallback。
@@ -68,20 +68,20 @@ make deps
 
 运行时会调用系统工具：`nft`、`ufw`、`fail2ban-client`、`journalctl`、`ss`、`conntrack`、`systemctl`，以及可选的 `mmdblookup`。
 
-## 可选 IP 归属地数据库
+## 可选 IP 国家库
 
-LTG 可以在 UFW 来源表和流量 IP 明细表中显示城市/国家归属地。这个能力使用免费的 [DB-IP IP to City Lite](https://db-ip.com/db/download/ip-to-city-lite) 数据库，格式为 MMDB。
+LTG 可以在 UFW 来源表和流量 IP 明细表中显示国家/地区。这个能力使用免费的 [DB-IP IP to City Lite](https://db-ip.com/db/download/ip-to-city-lite) 数据库，格式为 MMDB，但 LTG 默认只读取国家字段，因为城市级精度不适合作为运维默认判断依据。
 
 在 TUI 中安装或更新本地数据库：
 
 ```text
 sudo ltg
-诊断 -> 安装/更新 IP 城市库
+诊断 -> 安装/更新 IP 国家库
 ```
 
-数据库保存到 `/var/lib/linux-traffic-guard/dbip-city-lite.mmdb`。仓库和 Release 二进制不会内置这份数据库；如果数据库或 `mmdblookup` 不存在，LTG 仍正常运行，归属地列显示 `-`。
+数据库保存到 `/var/lib/linux-traffic-guard/dbip-city-lite.mmdb`。仓库和 Release 二进制不会内置这份数据库；如果数据库或 `mmdblookup` 不存在，LTG 仍正常运行，国家/地区列显示 `-`。
 
-鸣谢：IP 归属地数据来自 [DB-IP.com](https://db-ip.com) 的免费 IP to City Lite 数据库，使用 [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/) 许可。免费 Lite 数据库相比 DB-IP 商业库精度更低。
+鸣谢：IP 国家/地区数据来自 [DB-IP.com](https://db-ip.com) 的免费 IP to City Lite 数据库，使用 [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/) 许可。免费 Lite 数据库相比 DB-IP 商业库精度更低。
 
 ## 构建与检查
 

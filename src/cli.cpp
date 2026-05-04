@@ -2363,16 +2363,8 @@ inline std::string ipGeoLabel(const std::string &rawIp) {
     if (country.empty()) {
         country = mmdbLookupString(ip, {"country", "names", "en"});
     }
-    std::string city = mmdbLookupString(ip, {"city", "names", "zh-CN"});
-    if (city.empty()) {
-        city = mmdbLookupString(ip, {"city", "names", "en"});
-    }
     std::string label = "-";
-    if (!country.empty() && !city.empty() && country != city) {
-        label = country + "/" + city;
-    } else if (!city.empty()) {
-        label = city;
-    } else if (!country.empty()) {
+    if (!country.empty()) {
         label = country;
     }
     {
@@ -4928,9 +4920,9 @@ inline std::string compactTrafficSummary(const std::vector<TrafficSummaryRow> &r
 }
 
 inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, TrafficGroupMode mode) {
-    Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "归属地", "端口", "上行", "下行", "合计", "包数"}
+    Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "国家/地区", "端口", "上行", "下行", "合计", "包数"}
                 : mode == TrafficGroupMode::Port ? std::vector<std::string>{"序号", "端口", "服务", "上行", "下行", "合计", "包数"}
-                                                  : std::vector<std::string>{"序号", "IP", "归属地", "上行", "下行", "合计", "包数"},
+                                                  : std::vector<std::string>{"序号", "IP", "国家/地区", "上行", "下行", "合计", "包数"},
                 mode == TrafficGroupMode::IpPort ? std::vector<std::size_t>{6, 28, 18, 8, 12, 12, 12, 10}
                 : mode == TrafficGroupMode::Port ? std::vector<std::size_t>{6, 8, 18, 12, 12, 12, 10}
                                                   : std::vector<std::size_t>{6, 28, 18, 12, 12, 12, 10});
@@ -5042,20 +5034,20 @@ inline void verifyGeoDatabaseChain(ReliabilityReport &report) {
     const bool db = fileExists(kDbIpLiteMmdbPath);
     const bool reader = Shell::exists("mmdblookup");
     if (!db) {
-        addReliabilityResult(report, "IP归属地链路", "DB-IP Lite MMDB", ReliabilityStatus::Skipped,
-                             "未安装本地城市库，表格归属地显示为 -",
+        addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", ReliabilityStatus::Skipped,
+                             "未安装本地国家库，表格国家/地区显示为 -",
                              kDbIpLiteMmdbPath,
-                             "诊断 -> 安装/更新 IP 城市库");
+                             "诊断 -> 安装/更新 IP 国家库");
         return;
     }
-    addReliabilityResult(report, "IP归属地链路", "DB-IP Lite MMDB", reader ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
+    addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", reader ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
                          reader ? "数据库与 MMDB 读取工具可用" : "数据库存在但缺少 mmdblookup",
                          kDbIpLiteMmdbPath + " / " + humanBytes(fileSizeBytes(kDbIpLiteMmdbPath)),
                          reader ? kDbIpLiteAttribution : "apt install -y mmdb-bin");
     if (reader) {
         const std::string label = ipGeoLabel("8.8.8.8");
-        addReliabilityResult(report, "IP归属地链路", "样例查询", label == "-" ? ReliabilityStatus::Fail : ReliabilityStatus::Pass,
-                             label == "-" ? "样例 IP 未查到归属地" : "样例 IP 查询成功",
+        addReliabilityResult(report, "IP国家链路", "样例查询", label == "-" ? ReliabilityStatus::Fail : ReliabilityStatus::Pass,
+                             label == "-" ? "样例 IP 未查到国家/地区" : "样例 IP 查询成功",
                              "8.8.8.8 => " + label);
     }
 }
@@ -5580,7 +5572,7 @@ inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &no
 }
 
 inline Table ufwHitsTable(const std::vector<UfwHit> &hits) {
-    Table table({"序号", "来源IP", "归属地", "单日峰值", "时段总计", "首要端口", "风险", "建议"}, {6, 30, 18, 10, 10, 12, 8, 18});
+    Table table({"序号", "来源IP", "国家/地区", "单日峰值", "时段总计", "首要端口", "风险", "建议"}, {6, 30, 18, 10, 10, 12, 8, 18});
     for (std::size_t i = 0; i < hits.size(); ++i) {
         const std::string port = hits[i].topPort == "-" || hits[i].topPort.empty()
                                      ? "-"
@@ -5806,9 +5798,9 @@ private:
         const std::vector<int> widths = mode == TrafficGroupMode::IpPort ? std::vector<int>{6, 26, 18, 8, 14, 14, 14, 10}
                                       : mode == TrafficGroupMode::Port ? std::vector<int>{6, 8, 20, 14, 14, 14, 10}
                                                                        : std::vector<int>{6, 26, 18, 14, 14, 14, 10};
-        buffer.add(mode == TrafficGroupMode::IpPort ? tableRow({"序号", "IP", "归属地", "端口", "上行", "下行", "合计", "包数"}, widths, true)
+        buffer.add(mode == TrafficGroupMode::IpPort ? tableRow({"序号", "IP", "国家/地区", "端口", "上行", "下行", "合计", "包数"}, widths, true)
                    : mode == TrafficGroupMode::Port ? tableRow({"序号", "端口", "服务", "上行", "下行", "合计", "包数"}, widths, true)
-                                                     : tableRow({"序号", "IP", "归属地", "上行", "下行", "合计", "包数"}, widths, true));
+                                                     : tableRow({"序号", "IP", "国家/地区", "上行", "下行", "合计", "包数"}, widths, true));
         buffer.add(tableRule(widths));
         if (rows.empty()) {
             buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
@@ -5844,7 +5836,7 @@ private:
 
     static void addUfwTable(ScreenBuffer &buffer, const std::vector<UfwHit> &hits, const std::string &emptyMessage) {
         const std::vector<int> widths = {6, 28, 18, 10, 12, 8, 18};
-        buffer.add(tableRow({"序号", "来源IP", "归属地", "命中", "首要端口", "风险", "建议"}, widths, true));
+        buffer.add(tableRow({"序号", "来源IP", "国家/地区", "命中", "首要端口", "风险", "建议"}, widths, true));
         buffer.add(tableRule(widths));
         if (hits.empty()) {
             buffer.add("  " + ansi::gray + "- " + emptyMessage + ansi::plain);
@@ -6105,7 +6097,7 @@ private:
                      {"2", "日志摘要", "fail2ban 与 UFW 日志", false, [this] { actionLogSummary(); }},
                      {"3", "导出报告", "写入 /tmp 报告", false, [this] { actionExportReport(); }},
                      {"4", "安装依赖", "Debian/Ubuntu apt 命令", true, [this] { actionInstallDependencies(); }},
-                     {"5", "安装/更新 IP 城市库", "DB-IP Lite 免费 MMDB，用于来源归属地展示", true, [this] { actionInstallGeoDatabase(); }},
+                     {"5", "安装/更新 IP 国家库", "DB-IP Lite 免费 MMDB，用于来源国家展示", true, [this] { actionInstallGeoDatabase(); }},
                  });
     }
 
@@ -8418,10 +8410,10 @@ private:
                           "。该数据按 CC BY 4.0 授权，展示结果时会在文档中鸣谢 DB-IP.com。", false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
-            pushResult("安装/更新 IP 城市库", buffer);
+            pushResult("安装/更新 IP 国家库", buffer);
             return;
         }
-        renderBusy("安装/更新 IP 城市库", "正在下载并验证 DB-IP Lite MMDB...");
+        renderBusy("安装/更新 IP 国家库", "正在下载并验证 DB-IP Lite MMDB...");
         ScreenBuffer buffer = runCommandList({dbIpLiteDownloadCommand()});
         Shell::clearExistsCache();
         buffer.add("");
@@ -8432,8 +8424,8 @@ private:
             buffer.add("下载 URL: " + trim(sourceUrl));
         }
         buffer.add("鸣谢: " + kDbIpLiteAttribution);
-        buffer.add("归属地会显示在 UFW 来源 Top 与流量 IP 明细表中；未命中时显示 -。");
-        pushResult("安装/更新 IP 城市库", buffer);
+        buffer.add("国家/地区会显示在 UFW 来源 Top 与流量 IP 明细表中；未命中时显示 -。");
+        pushResult("安装/更新 IP 国家库", buffer);
     }
 };
 
