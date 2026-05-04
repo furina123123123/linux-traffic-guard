@@ -3759,7 +3759,7 @@ public:
                 const ScreenBuffer &buffer,
                 int scrollOffset,
                 const std::string &footer,
-                bool showHardwareCursor = true) {
+                bool showHardwareCursor = false) {
         const int rows = terminalRows();
         const int cols = terminalCols();
         const int bodyRows = std::max(3, rows - 4);
@@ -9912,6 +9912,16 @@ inline int selfTest() {
                               drawLine.find("\033[2K") == std::string::npos);
     check("输入软件光标闪烁渲染", promptInputLine("端口> ", "443", true).find(ansi::inverse) != std::string::npos &&
                                       promptInputLine("端口> ", "443", false).find(ansi::inverse) == std::string::npos);
+    Viewport cursorViewport;
+    ScreenBuffer cursorBuffer;
+    cursorBuffer.add("菜单行");
+    std::ostringstream cursorFrame;
+    auto *oldCursorOut = std::cout.rdbuf(cursorFrame.rdbuf());
+    cursorViewport.render("菜单", cursorBuffer, 0, "q 返回");
+    std::cout.rdbuf(oldCursorOut);
+    const std::string cursorFrameText = cursorFrame.str();
+    check("非输入页隐藏硬件光标", cursorFrameText.size() >= 6 &&
+                                      cursorFrameText.rfind("\033[?25l") == cursorFrameText.size() - 6);
     int scrollProbe = 0;
     const bool topScrollChanged = adjustScroll(InputKind::Up, scrollProbe, 100);
     const bool downScrollChanged = adjustScroll(InputKind::Down, scrollProbe, 100);
