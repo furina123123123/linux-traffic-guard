@@ -2546,6 +2546,9 @@ inline std::string dbIpLiteDownloadCommand() {
 }
 
 inline void writeUfwCacheEvents(const std::vector<UfwLogEvent> &newEvents) {
+    if (newEvents.empty()) {
+        return;
+    }
     ensureDirectory(kUfwCacheDir);
     std::set<std::string> seen;
     {
@@ -2746,6 +2749,9 @@ inline void sqlitePruneIdleUfwCache(sqlite3 *db) {
 }
 
 inline void sqliteInsertUfwEvents(sqlite3 *db, const std::vector<UfwLogEvent> &events) {
+    if (events.empty()) {
+        return;
+    }
     sqliteExec(db, "BEGIN IMMEDIATE;");
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2(db,
@@ -4784,13 +4790,15 @@ inline std::vector<TrafficPeriodTotal> loadTrafficPeriodTotals(TrafficPeriodMode
         return {};
     }
     const std::string column = mode == TrafficPeriodMode::Day ? "day" : mode == TrafficPeriodMode::Year ? "year" : "month";
-    const std::string sql = "select " + column + ",direction,sum(bytes),sum(packets) from traffic_delta group by " +
-                            column + ",direction order by " + column + " desc;";
+    const std::string sql = "select " + column + ",direction,sum(bytes),sum(packets) from traffic_delta "
+                            "where " + column + " in (select distinct " + column + " from traffic_delta order by " + column + " desc limit ?) "
+                            "group by " + column + ",direction order by " + column + " desc;";
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
         sqlite3_close(db);
         return {};
     }
+    sqlite3_bind_int(stmt, 1, static_cast<int>(limit));
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const std::string period = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
         const std::string direction = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
@@ -4879,7 +4887,6 @@ inline std::map<std::string, TrafficRow> loadLatestTrafficSnapshot(std::string &
     }
     std::string line;
     std::time_t latest = 0;
-    std::vector<std::pair<std::time_t, TrafficRow>> parsed;
     while (std::getline(input, line)) {
         const auto parts = splitByChar(line, '\t');
         if (parts.size() != 7) {
@@ -4898,12 +4905,12 @@ inline std::map<std::string, TrafficRow> loadLatestTrafficSnapshot(std::string &
         row.bytes = bytes;
         row.packets = packets;
         const std::time_t ts = static_cast<std::time_t>(std::stoll(parts[0]));
-        latest = std::max(latest, ts);
-        parsed.push_back({ts, row});
-    }
-    for (const auto &item : parsed) {
-        if (item.first == latest) {
-            out[trafficKey(item.second)] = item.second;
+        if (ts > latest) {
+            latest = ts;
+            out.clear();
+        }
+        if (ts == latest) {
+            out[trafficKey(row)] = std::move(row);
         }
     }
     return out;
@@ -5262,6 +5269,19 @@ inline std::time_t latestTrafficSnapshotTime() {
 #endif
 }
 
+inline std::vector<TrafficSummaryRow> sortTrafficSummaryRows(std::vector<TrafficSummaryRow> rows) {
+    std::sort(rows.begin(), rows.end(), [](const TrafficSummaryRow &a, const TrafficSummaryRow &b) {
+        if (a.totalBytes() != b.totalBytes()) {
+            return a.totalBytes() > b.totalBytes();
+        }
+        if (a.ip != b.ip) {
+            return a.ip < b.ip;
+        }
+        return a.port < b.port;
+    });
+    return rows;
+}
+
 inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<TrafficRow> &rows, TrafficGroupMode mode) {
     std::map<std::string, TrafficSummaryRow> grouped;
     for (const auto &row : rows) {
@@ -5289,16 +5309,7 @@ inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<Traffic
         }
         out.push_back(entry.second);
     }
-    std::sort(out.begin(), out.end(), [](const TrafficSummaryRow &a, const TrafficSummaryRow &b) {
-        if (a.totalBytes() != b.totalBytes()) {
-            return a.totalBytes() > b.totalBytes();
-        }
-        if (a.ip != b.ip) {
-            return a.ip < b.ip;
-        }
-        return a.port < b.port;
-    });
-    return out;
+    return sortTrafficSummaryRows(std::move(out));
 }
 
 inline std::vector<TrafficSummaryRow> aggregateTrafficByIp(const std::vector<TrafficRow> &rows) {
@@ -5374,12 +5385,6 @@ inline std::string compactTrafficSummary(const std::vector<TrafficSummaryRow> &r
     return joinWords(items, ", ");
 }
 
-inline std::string compactTrafficIpSummaryForPort(const std::vector<TrafficRow> &rows,
-                                                  const std::string &port,
-                                                  std::size_t limit) {
-    return compactTrafficSummary(aggregateTrafficByIp(filterTrafficRowsByPort(rows, port)), TrafficGroupMode::Ip, limit);
-}
-
 inline std::vector<TrafficPeriodPortRow> trafficPeriodPortRows(
     const std::vector<TrafficPeriodTotal> &periods,
     const std::map<std::string, std::vector<TrafficRow>> &details,
@@ -5390,17 +5395,49 @@ inline std::vector<TrafficPeriodPortRow> trafficPeriodPortRows(
         if (found == details.end()) {
             continue;
         }
-        const auto ports = aggregateTrafficByPort(found->second);
-        for (std::size_t i = 0; i < ports.size() && i < perPeriodLimit; ++i) {
-            TrafficPeriodPortRow row;
-            row.period = period.period;
-            row.port = ports[i].port;
-            row.downloadBytes = ports[i].downloadBytes;
-            row.uploadBytes = ports[i].uploadBytes;
-            row.downloadPackets = ports[i].downloadPackets;
-            row.uploadPackets = ports[i].uploadPackets;
-            row.topIps = compactTrafficIpSummaryForPort(found->second, ports[i].port, 3);
-            out.push_back(std::move(row));
+        struct PortBucket {
+            TrafficPeriodPortRow total;
+            std::map<std::string, TrafficSummaryRow> ips;
+        };
+        std::map<std::string, PortBucket> buckets;
+        for (const auto &traffic : found->second) {
+            auto &bucket = buckets[traffic.port];
+            bucket.total.period = period.period;
+            bucket.total.port = traffic.port;
+            auto &ip = bucket.ips[traffic.ip];
+            ip.ip = traffic.ip;
+            ip.port = traffic.port;
+            if (traffic.direction == "上传") {
+                bucket.total.uploadBytes += traffic.bytes;
+                bucket.total.uploadPackets += traffic.packets;
+                ip.uploadBytes += traffic.bytes;
+                ip.uploadPackets += traffic.packets;
+            } else {
+                bucket.total.downloadBytes += traffic.bytes;
+                bucket.total.downloadPackets += traffic.packets;
+                ip.downloadBytes += traffic.bytes;
+                ip.downloadPackets += traffic.packets;
+            }
+        }
+        std::vector<TrafficPeriodPortRow> periodRows;
+        periodRows.reserve(buckets.size());
+        for (auto &item : buckets) {
+            std::vector<TrafficSummaryRow> ipRows;
+            ipRows.reserve(item.second.ips.size());
+            for (auto &ip : item.second.ips) {
+                ipRows.push_back(std::move(ip.second));
+            }
+            item.second.total.topIps = compactTrafficSummary(sortTrafficSummaryRows(std::move(ipRows)), TrafficGroupMode::Ip, 3);
+            periodRows.push_back(std::move(item.second.total));
+        }
+        std::sort(periodRows.begin(), periodRows.end(), [](const TrafficPeriodPortRow &a, const TrafficPeriodPortRow &b) {
+            if (a.totalBytes() != b.totalBytes()) {
+                return a.totalBytes() > b.totalBytes();
+            }
+            return a.port < b.port;
+        });
+        for (std::size_t i = 0; i < periodRows.size() && i < perPeriodLimit; ++i) {
+            out.push_back(std::move(periodRows[i]));
         }
     }
     return out;

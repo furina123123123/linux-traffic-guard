@@ -280,8 +280,8 @@ GitHub Actions builds and uploads:
 Maintainers release a new version by updating `include/ltg/version.hpp`, implementation files, and `CHANGELOG.md`, then pushing a version tag:
 
 ```bash
-git tag v4.12.17
-git push origin v4.12.17
+git tag v4.12.18
+git push origin v4.12.18
 ```
 
 ## Safety Notes

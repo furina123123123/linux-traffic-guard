@@ -280,8 +280,8 @@ GitHub Actions 会自动编译并上传：
 维护者发布新版本时，先更新 `include/ltg/version.hpp`、实现文件和 `CHANGELOG.md`，再推送 tag：
 
 ```bash
-git tag v4.12.17
-git push origin v4.12.17
+git tag v4.12.18
+git push origin v4.12.18
 ```
 
 ## 安全说明

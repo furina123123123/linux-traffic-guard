@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.12.18 - 2026-05-04
+
+### Changed
+
+- Reduced repeated traffic period drilldown work by computing per-port Top IP summaries in a single pass per period.
+- Limited SQLite traffic period totals at query time instead of loading every historical period before truncating in C++.
+- Reduced no-SQLite snapshot memory usage by retaining only rows from the latest sampled timestamp while scanning `snapshot.tsv`.
+- Skipped empty UFW cache insert paths so cache-gap refreshes with no new events avoid unnecessary full-cache scans or transactions.
+
 ## 4.12.17 - 2026-05-04
 
 ### Changed
