@@ -4313,6 +4313,19 @@ inline std::vector<TrafficSummaryRow> aggregateTrafficHistoryByPort(TrafficPerio
     return loadTrafficPortSummaryForPeriod(mode, period);
 }
 
+inline TrafficSummaryRow sumTrafficSummaryRows(const std::vector<TrafficSummaryRow> &rows) {
+    TrafficSummaryRow total;
+    total.ip = "*";
+    total.port = "*";
+    for (const auto &row : rows) {
+        total.downloadBytes += row.downloadBytes;
+        total.uploadBytes += row.uploadBytes;
+        total.downloadPackets += row.downloadPackets;
+        total.uploadPackets += row.uploadPackets;
+    }
+    return total;
+}
+
 inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, TrafficGroupMode mode) {
     Table table(mode == TrafficGroupMode::IpPort ? std::vector<std::string>{"序号", "IP", "端口", "上行", "下行", "合计", "包数"}
                 : mode == TrafficGroupMode::Port ? std::vector<std::string>{"序号", "端口", "服务", "上行", "下行", "合计", "包数"}
@@ -5385,27 +5398,6 @@ private:
         return false;
     }
 
-    bool confirmAppendTrafficPorts(const std::set<int> &existingPorts,
-                                   const std::set<int> &requestedPorts,
-                                   const std::set<int> &finalPorts) {
-        const std::set<int> newPorts = setDifference(requestedPorts, existingPorts);
-        std::vector<std::string> body = {
-            ansi::green + std::string("本次操作是追加统计端口，不会重建流量统计规则，也不会清空已有计数。") + ansi::plain,
-            "已统计端口: " + std::to_string(existingPorts.size()) + " 个  " + humanPortList(existingPorts),
-            "本次输入端口: " + humanPortList(requestedPorts),
-            "新增端口: " + (newPorts.empty() ? std::string("无，输入端口已在统计范围内") : humanPortList(newPorts)),
-            "执行后统计端口: " + std::to_string(finalPorts.size()) + " 个  " + humanPortList(finalPorts),
-            "",
-            "按 Enter 执行追加。只有输入 q 或 CANCEL 才取消。",
-        };
-        PromptAnswer answer = promptLine("开启/追加统计端口", body, "追加端口> ");
-        if (!answer.ok) {
-            return false;
-        }
-        const std::string value = trim(answer.value);
-        return !(value == "q" || value == "Q" || value == "cancel" || value == "CANCEL");
-    }
-
     bool confirmRemoveTrafficPorts(const std::set<int> &existingPorts,
                                    const std::set<int> &requestedPorts,
                                    const std::set<int> &finalPorts) {
@@ -5535,9 +5527,34 @@ private:
     }
 
     void actionInstallTraffic() {
+        const std::set<int> knownPorts = detectExistingTrafficPorts();
+        const std::string month = currentTrafficPeriodLabel(TrafficPeriodMode::Month);
+        const auto monthRows = aggregateTrafficHistoryByPort(TrafficPeriodMode::Month, month);
+        const TrafficSummaryRow monthTotal = sumTrafficSummaryRows(monthRows);
+        std::vector<std::string> intro = {
+            "默认追加到现有端口，不清空已有统计。",
+            "当前统计端口: " + std::to_string(knownPorts.size()) + " 个  " + humanPortList(knownPorts),
+            "本月流量(" + month + "): 上行 " + humanBytes(monthTotal.uploadBytes) +
+                " / 下行 " + humanBytes(monthTotal.downloadBytes) +
+                " / 合计 " + humanBytes(monthTotal.totalBytes()),
+        };
+        if (monthRows.empty()) {
+            intro.push_back("本月还没有采样增量；第一轮采样建立基线，下一轮开始显示变化。");
+        } else {
+            std::ostringstream top;
+            top << "端口 Top: ";
+            const std::size_t limit = std::min<std::size_t>(3, monthRows.size());
+            for (std::size_t i = 0; i < limit; ++i) {
+                if (i != 0) {
+                    top << " | ";
+                }
+                top << monthRows[i].port << " " << humanBytes(monthRows[i].totalBytes());
+            }
+            intro.push_back(top.str());
+        }
+        intro.push_back("输入需要统计的服务端口，支持单端口、逗号和范围。示例: 80,443,10000-10100");
         PromptAnswer ports = promptLine("开启/追加统计端口",
-                                        {"默认追加到现有端口，不清空已有统计。",
-                                         "输入需要统计的服务端口，支持单端口、逗号和范围。示例: 80,443,10000-10100"},
+                                        intro,
                                         "端口列表: ");
         if (!ports.ok) {
             return;
@@ -5554,15 +5571,9 @@ private:
         std::set<int> requestedPorts;
         expandPortList(value, requestedPorts);
         std::set<int> finalPorts = requestedPorts;
-        std::set<int> managed;
-        managed = detectExistingTrafficPorts();
+        std::set<int> managed = knownPorts;
         finalPorts.insert(managed.begin(), managed.end());
-        if (!confirmAppendTrafficPorts(managed, requestedPorts, finalPorts)) {
-            ScreenBuffer buffer;
-            buffer.add("操作已取消。");
-            pushResult("开启/追加统计端口", buffer);
-            return;
-        }
+        const std::set<int> newPorts = setDifference(requestedPorts, managed);
 
         const bool updatePortSetOnly = trafficTrackedPortsSetEnabled();
         std::vector<std::string> commands = updatePortSetOnly
@@ -5579,10 +5590,16 @@ private:
         renderBusy("开启/追加统计端口", "正在应用统计规则...");
         cachedDashboardValid() = false;
         ScreenBuffer buffer = runCommandList(commands);
+        buffer.add("");
+        buffer.add("> 统计端口");
+        buffer.add("原有端口: " + std::to_string(managed.size()) + " 个  " + humanPortList(managed));
+        buffer.add("本次输入: " + humanPortList(requestedPorts));
+        buffer.add("新增端口: " + (newPorts.empty() ? std::string("无，输入端口已在统计范围内") : humanPortList(newPorts)));
+        buffer.add("当前端口: " + std::to_string(finalPorts.size()) + " 个  " + humanPortList(finalPorts));
         if (updatePortSetOnly) {
-            buffer.add("已只更新统计端口集合，没有重建底层管理链。");
+            buffer.add("已只更新统计端口集合，原有端口计数和历史数据已保留。");
         } else {
-            buffer.add("已把旧规则迁移为端口集合；保留实时计数和历史数据。之后追加端口只更新端口集合。");
+            buffer.add("已使用端口集合管理统计范围；保留实时计数和历史数据。之后追加端口只更新端口集合。");
         }
         const TrafficSnapshotResult snapshotResult = recordTrafficSnapshot();
         buffer.add("");
@@ -5611,7 +5628,7 @@ private:
             return;
         }
         PromptAnswer ports = promptLine("删除统计端口",
-                                        {"输入要停止统计的端口。不会删除历史数据，也不会重建整套规则。",
+                                        {"输入要停止统计的端口。不会删除历史数据，原有端口计数会保留。",
                                          "当前统计端口: " + humanPortList(existingPorts),
                                          "示例: 8080,8443,10000-10010"},
                                         "端口列表: ");
