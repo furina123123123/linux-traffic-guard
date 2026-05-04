@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.12.16 - 2026-05-04
+## 4.12.17 - 2026-05-04
 
 ### Changed
 
@@ -13,6 +13,7 @@
 - Made the no-SQLite UFW analysis cache fill only missing time ranges, matching the SQLite cache behavior instead of rescanning the full window.
 - Cleared in-process source-country lookup caches after installing or updating the DB-IP MMDB so refreshed data appears immediately.
 - Reworked traffic day/month/year pages into port-level vnStat-style views with per-port Top IP drilldown.
+- Reworked the English and Chinese READMEs to clearly explain the project purpose, workflows, safety model, install/update paths, and release assets.
 
 ## 4.12.15 - 2026-05-04
 
