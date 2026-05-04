@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.12.10 - 2026-05-04
+
+### Changed
+
+- Restored dashboard security analysis as a cached UFW summary so first render stays fast while still showing risk context.
+- Changed day/month/year traffic views to vnStat-style period tables instead of asking for a single date/month/year.
+- Preserved existing nftables counters on the first traffic snapshot by assigning first-seen counters to the current local period.
+
 ## 4.12.9 - 2026-05-04
 
 ### Added

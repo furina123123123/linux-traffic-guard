@@ -85,7 +85,7 @@ inline const std::string inverse = "\033[7m";
 inline const std::string plain = "\033[0m";
 } // namespace ansi
 
-inline const std::string kVersion = "4.12.9";
+inline const std::string kVersion = "4.12.10";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kIpTrafficTable = "usp_ip_traffic";
@@ -164,6 +164,22 @@ struct TrafficSnapshotResult {
     std::size_t deltaRows = 0;
     std::size_t resetRows = 0;
     std::string message;
+};
+
+struct TrafficPeriodTotal {
+    std::string period;
+    std::uint64_t downloadBytes = 0;
+    std::uint64_t uploadBytes = 0;
+    std::uint64_t downloadPackets = 0;
+    std::uint64_t uploadPackets = 0;
+
+    std::uint64_t totalBytes() const {
+        return downloadBytes + uploadBytes;
+    }
+
+    std::uint64_t totalPackets() const {
+        return downloadPackets + uploadPackets;
+    }
 };
 
 enum class TrafficPeriodMode {
@@ -290,6 +306,7 @@ struct DashboardSnapshot {
     std::string trafficPeriodLabel;
     bool trafficHistoryAvailable = false;
     std::vector<UfwHit> ufwHits;
+    std::string ufwHitsNote;
     std::vector<F2bPolicyInfo> defaultPolicies;
     std::string fail2banState = "未知";
     std::string ufwState = "未知";
@@ -3759,6 +3776,9 @@ inline std::vector<TrafficDelta> computeTrafficDeltas(const std::vector<TrafficR
     for (const auto &row : current) {
         const auto found = previous.find(trafficKey(row));
         if (found == previous.end()) {
+            if (row.bytes > 0 || row.packets > 0) {
+                deltas.push_back({row, sampledAt, localDayStamp(sampledAt), localMonthStamp(sampledAt), localYearStamp(sampledAt)});
+            }
             continue;
         }
         if (!sameOrHigherCounters(row, found->second)) {
@@ -4062,6 +4082,51 @@ inline std::vector<TrafficSummaryRow> loadTrafficPortSummaryForPeriod(TrafficPer
     });
     return out;
 }
+
+inline std::vector<TrafficPeriodTotal> loadTrafficPeriodTotals(TrafficPeriodMode mode, std::size_t limit) {
+    std::map<std::string, TrafficPeriodTotal, std::greater<std::string>> grouped;
+    if (!fileExists(trafficHistoryDbPath())) {
+        return {};
+    }
+    std::string error;
+    sqlite3 *db = nullptr;
+    if (!openTrafficHistoryDb(&db, error)) {
+        return {};
+    }
+    const std::string column = mode == TrafficPeriodMode::Day ? "day" : mode == TrafficPeriodMode::Year ? "year" : "month";
+    const std::string sql = "select " + column + ",direction,sum(bytes),sum(packets) from traffic_delta group by " +
+                            column + ",direction order by " + column + " desc;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return {};
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const std::string period = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
+        const std::string direction = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+        auto &slot = grouped[period];
+        slot.period = period;
+        const auto bytes = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 2));
+        const auto packets = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 3));
+        if (direction == "上传") {
+            slot.uploadBytes += bytes;
+            slot.uploadPackets += packets;
+        } else {
+            slot.downloadBytes += bytes;
+            slot.downloadPackets += packets;
+        }
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    std::vector<TrafficPeriodTotal> out;
+    for (const auto &item : grouped) {
+        out.push_back(item.second);
+        if (out.size() >= limit) {
+            break;
+        }
+    }
+    return out;
+}
 #else
 inline std::map<std::string, TrafficRow> loadLatestTrafficSnapshot(std::string &error) {
     std::map<std::string, TrafficRow> out;
@@ -4206,6 +4271,41 @@ inline std::vector<TrafficSummaryRow> loadTrafficPortSummaryForPeriod(TrafficPer
         }
         return a.port < b.port;
     });
+    return out;
+}
+
+inline std::vector<TrafficPeriodTotal> loadTrafficPeriodTotals(TrafficPeriodMode mode, std::size_t limit) {
+    std::map<std::string, TrafficPeriodTotal, std::greater<std::string>> grouped;
+    std::ifstream input(trafficHistoryPath("delta.tsv"), std::ios::binary);
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto parts = splitByChar(line, '\t');
+        if (parts.size() != 10) {
+            continue;
+        }
+        const std::string &period = mode == TrafficPeriodMode::Day ? parts[1] : mode == TrafficPeriodMode::Year ? parts[3] : parts[2];
+        TrafficRow row;
+        row.direction = parts[5];
+        if (!parseU64(parts[8], row.bytes) || !parseU64(parts[9], row.packets)) {
+            continue;
+        }
+        auto &slot = grouped[period];
+        slot.period = period;
+        if (row.direction == "上传") {
+            slot.uploadBytes += row.bytes;
+            slot.uploadPackets += row.packets;
+        } else {
+            slot.downloadBytes += row.bytes;
+            slot.downloadPackets += row.packets;
+        }
+    }
+    std::vector<TrafficPeriodTotal> out;
+    for (const auto &item : grouped) {
+        out.push_back(item.second);
+        if (out.size() >= limit) {
+            break;
+        }
+    }
     return out;
 }
 #endif
@@ -4355,6 +4455,19 @@ inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std
 
 inline Table trafficSummaryTable(const std::vector<TrafficSummaryRow> &rows, std::size_t limit, bool includePort) {
     return trafficSummaryTable(rows, limit, includePort ? TrafficGroupMode::IpPort : TrafficGroupMode::Ip);
+}
+
+inline Table trafficPeriodTotalsTable(const std::vector<TrafficPeriodTotal> &rows, TrafficPeriodMode mode) {
+    const std::string label = mode == TrafficPeriodMode::Day ? "日期" : mode == TrafficPeriodMode::Year ? "年份" : "月份";
+    Table table({label, "上行", "下行", "合计", "包数"}, {14, 14, 14, 14, 12});
+    for (const auto &row : rows) {
+        table.add({row.period,
+                   humanBytes(row.uploadBytes),
+                   humanBytes(row.downloadBytes),
+                   humanBytes(row.totalBytes()),
+                   std::to_string(row.totalPackets())});
+    }
+    return table;
 }
 
 inline void enrichUfwHit(UfwHit &hit) {
@@ -4513,6 +4626,67 @@ inline std::vector<UfwHit> collectUfwSourceTop() {
     return buildUfwSourceTopFromReport(report, 10);
 }
 
+inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &note) {
+    const std::time_t end = std::time(nullptr);
+    const std::time_t roundedEnd = end - (end % 60);
+    const std::time_t rollingStart = roundedEnd - 86400;
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &rollingStart);
+#else
+    localtime_r(&rollingStart, &tm);
+#endif
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    const std::time_t start = makeLocalTime(tm);
+#if LTG_HAS_SQLITE
+    if (fileExists(ufwCacheDbPath()) && collectUfwSourceTopSqlite(start, roundedEnd, hits)) {
+        note = "来自 UFW 分析缓存；进入“安全中心 -> 分析追查”可刷新。";
+        return true;
+    }
+#else
+    const auto ranges = readUfwCacheRanges();
+    if (rangeCovered(start, roundedEnd, ranges)) {
+        std::map<std::string, UfwHit> grouped;
+        std::map<std::string, std::map<std::string, std::uint64_t>> ports;
+        for (const auto &event : readUfwCacheEvents(start, roundedEnd)) {
+            if (event.action != "BLOCK" && event.action != "AUDIT") {
+                continue;
+            }
+            auto &hit = grouped[event.src];
+            hit.value = event.src;
+            ++hit.count;
+            hit.peak = hit.count;
+            ports[event.src][event.dpt]++;
+        }
+        for (auto &item : grouped) {
+            const auto found = ports.find(item.first);
+            if (found != ports.end() && !found->second.empty()) {
+                const auto best = std::max_element(found->second.begin(), found->second.end(), [](const auto &a, const auto &b) {
+                    return a.second < b.second;
+                });
+                item.second.topPort = best->first;
+                item.second.topPortCount = best->second;
+            }
+            enrichUfwHit(item.second);
+            hits.push_back(item.second);
+        }
+        std::sort(hits.begin(), hits.end(), [](const UfwHit &a, const UfwHit &b) {
+            if (a.count != b.count) return a.count > b.count;
+            return a.value < b.value;
+        });
+        if (hits.size() > 10) {
+            hits.resize(10);
+        }
+        note = "来自 UFW 分析缓存；进入“安全中心 -> 分析追查”可刷新。";
+        return true;
+    }
+#endif
+    note = "暂无可用缓存。进入“安全中心 -> 分析追查”生成后，仪表盘会显示安全摘要。";
+    return false;
+}
+
 inline Table ufwHitsTable(const std::vector<UfwHit> &hits) {
     Table table({"序号", "来源IP", "单日峰值", "时段总计", "首要端口", "风险", "建议"}, {6, 34, 10, 10, 12, 8, 18});
     for (std::size_t i = 0; i < hits.size(); ++i) {
@@ -4532,6 +4706,7 @@ inline DashboardSnapshot loadDashboardSnapshot() {
     snapshot.trafficPeriodLabel = currentTrafficPeriodLabel(TrafficPeriodMode::Month);
     snapshot.totalRows = aggregateTrafficHistoryByPort(TrafficPeriodMode::Month, snapshot.trafficPeriodLabel);
     snapshot.trafficHistoryAvailable = !snapshot.totalRows.empty();
+    collectCachedUfwSourceTop(snapshot.ufwHits, snapshot.ufwHitsNote);
     snapshot.fail2banState = "未刷新";
     snapshot.ufwState = "未刷新";
     snapshot.loadedAt = std::chrono::steady_clock::now();
@@ -4619,6 +4794,12 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     }
     buffer.addAll(tableLines(trafficSummaryTable(snapshot->totalRows, 8, TrafficGroupMode::Port),
                              snapshot->tableEnabled ? "本月暂无采样增量" : "历史采样未初始化"));
+    buffer.add("");
+    buffer.add("> 安全分析摘要");
+    if (!snapshot->ufwHitsNote.empty()) {
+        buffer.add(snapshot->ufwHitsNote);
+    }
+    buffer.addAll(tableLines(ufwHitsTable(snapshot->ufwHits), "暂无缓存命中。进入“安全中心 -> 分析追查”生成/刷新安全分析。"));
     buffer.add("");
     addTrafficOnboarding(buffer, snapshot->tableEnabled, snapshot->trafficHistoryAvailable);
     return buffer;
@@ -4888,11 +5069,11 @@ private:
         pushMenu("流量统计", "像 vnStat 一样按日/月/年查看，默认按端口聚合",
                  {
                      {"1", "开启/追加端口", "默认追加，不清空已有统计", true, [this] { actionInstallTraffic(); }},
-                     {"2", "本月流量", "默认视图，按端口汇总", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Month, currentTrafficPeriodLabel(TrafficPeriodMode::Month)); }},
-                     {"3", "今日流量", "今天的端口汇总", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Day, currentTrafficPeriodLabel(TrafficPeriodMode::Day)); }},
-                     {"4", "按日查看", "输入 YYYY-MM-DD 查看端口汇总", false, [this] { actionPromptTrafficPeriod(TrafficPeriodMode::Day); }},
-                     {"5", "按月查看", "输入 YYYY-MM 查看端口汇总", false, [this] { actionPromptTrafficPeriod(TrafficPeriodMode::Month); }},
-                     {"6", "按年查看", "输入 YYYY 查看端口汇总", false, [this] { actionPromptTrafficPeriod(TrafficPeriodMode::Year); }},
+                     {"2", "日流量", "类似 vnstat -d，列出每天上行/下行/合计", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Day); }},
+                     {"3", "月流量", "类似 vnstat -m，列出每月上行/下行/合计", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Month); }},
+                     {"4", "年流量", "类似 vnstat -y，列出每年上行/下行/合计", false, [this] { actionShowTrafficPeriods(TrafficPeriodMode::Year); }},
+                     {"5", "本月端口明细", "本月按端口汇总，并保留 IP 下钻", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Month, currentTrafficPeriodLabel(TrafficPeriodMode::Month)); }},
+                     {"6", "今日端口明细", "今天按端口汇总，并保留 IP 下钻", false, [this] { actionShowTrafficPeriod(TrafficPeriodMode::Day, currentTrafficPeriodLabel(TrafficPeriodMode::Day)); }},
                      {"7", "实时明细", "较慢，读取底层实时计数和 IP 明细", false, [this] { actionShowTrafficRanking(); }},
                      {"8", "删除统计端口", "停止统计指定端口，保留历史", true, [this] { actionRemoveTrafficPorts(); }},
                      {"9", "高级：删除全部统计规则", "高风险，删除底层统计规则", true, [this] { actionRemoveTrafficAccounting(); }},
@@ -5122,6 +5303,12 @@ private:
             buffer.add(ansi::yellow + std::string("本月还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。") + ansi::plain);
         }
         addTrafficSummaryTable(buffer, snapshot->totalRows, 8, snapshot->tableEnabled ? "本月暂无采样增量" : "历史采样未初始化", TrafficGroupMode::Port);
+        buffer.add("");
+        buffer.add("> 安全分析摘要");
+        if (!snapshot->ufwHitsNote.empty()) {
+            buffer.add(snapshot->ufwHitsNote);
+        }
+        addUfwTable(buffer, snapshot->ufwHits, "暂无缓存命中。进入“安全中心 -> 分析追查”生成/刷新安全分析。");
         buffer.add("");
         addTrafficOnboarding(buffer, snapshot->tableEnabled, snapshot->trafficHistoryAvailable);
         buffer.add("");
@@ -5479,6 +5666,27 @@ private:
         buffer.add("> IP 明细");
         addTrafficSummaryTable(buffer, aggregateTrafficByIp(rows), 50, "暂无采样增量", false);
         pushResult(title + " " + period, buffer);
+    }
+
+    void actionShowTrafficPeriods(TrafficPeriodMode mode) {
+        const std::string title = mode == TrafficPeriodMode::Day ? "日流量"
+                                : mode == TrafficPeriodMode::Year ? "年流量"
+                                                                  : "月流量";
+        const std::string vnstat = mode == TrafficPeriodMode::Day ? "vnstat -d"
+                                  : mode == TrafficPeriodMode::Year ? "vnstat -y"
+                                                                    : "vnstat -m";
+        const std::size_t limit = mode == TrafficPeriodMode::Day ? 31 : mode == TrafficPeriodMode::Month ? 24 : 10;
+        const auto rows = loadTrafficPeriodTotals(mode, limit);
+        ScreenBuffer buffer;
+        buffer.add("统计口径: 类似 " + vnstat + "，每行是一个" +
+                   (mode == TrafficPeriodMode::Day ? std::string("日期") : mode == TrafficPeriodMode::Year ? std::string("年份") : std::string("月份")) +
+                   "的采样增量。");
+        buffer.add("时间使用服务器系统本地时区；上行在前，下行在后。");
+        buffer.add("历史目录: " + kTrafficHistoryDir);
+        buffer.add("");
+        buffer.addAll(tableLines(trafficPeriodTotalsTable(rows, mode),
+                                 "暂无历史采样增量。开启/追加端口后，第一次采样会把已有底层计数纳入当前周期。"));
+        pushResult(title, buffer);
     }
 
     void actionPromptTrafficPeriod(TrafficPeriodMode mode) {
@@ -7261,6 +7469,15 @@ inline ScreenBuffer dashboardBufferForCli() {
     }
     addTableLines(buffer, trafficSummaryTable(totalRows, 8, TrafficGroupMode::Port), tableEnabled ? "本月暂无采样增量" : "历史采样未初始化");
 
+    addSection(buffer, "安全分析摘要");
+    std::vector<UfwHit> cachedHits;
+    std::string hitNote;
+    collectCachedUfwSourceTop(cachedHits, hitNote);
+    if (!hitNote.empty()) {
+        buffer.add(hitNote);
+    }
+    addTableLines(buffer, ufwHitsTable(cachedHits), "暂无缓存命中。执行 sudo ltg --ufw-analyze 24h 或进入安全中心生成/刷新。");
+
     addSection(buffer, "下一步");
     if (!tableEnabled) {
         buffer.add("sudo ltg 进入“流量统计 -> 开启/追加端口”后开始采样。");
@@ -7536,8 +7753,13 @@ inline int selfTest() {
     resetRow.bytes = 100;
     resetRow.packets = 1;
     const auto resetDeltas = computeTrafficDeltas({resetRow}, previousTraffic, 1777777777, resetRows);
+    const std::size_t resetRowsAfterReset = resetRows;
+    std::size_t firstResetRows = 0;
+    const auto firstDeltas = computeTrafficDeltas({traffic[0]}, {}, 1777777777, firstResetRows);
     check("流量采样增量计算", deltas.size() == 1 && deltas[0].row.bytes == 2048 &&
-                                  deltas[0].row.packets == 2 && resetDeltas.empty() && resetRows == 1);
+                                  deltas[0].row.packets == 2 && resetDeltas.empty() && resetRowsAfterReset == 1);
+    check("首次采样保留已有计数", firstDeltas.size() == 1 && firstDeltas[0].row.bytes == 2048 &&
+                                      firstDeltas[0].day == localDayStamp(1777777777));
     check("本地时间分桶格式", isValidTrafficPeriodLabel(TrafficPeriodMode::Day, localDayStamp(std::time(nullptr))) &&
                                   isValidTrafficPeriodLabel(TrafficPeriodMode::Month, localMonthStamp(std::time(nullptr))) &&
                                   isValidTrafficPeriodLabel(TrafficPeriodMode::Year, localYearStamp(std::time(nullptr))) &&
