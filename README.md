@@ -62,6 +62,58 @@ curl -fL https://github.com/furina123123123/linux-traffic-guard/releases/latest/
 sudo install -Dm755 /tmp/ltg /usr/local/bin/ltg
 ```
 
+## One-Off Root SSH Setup Script
+
+This repository also includes `setup-root-ssh-once.sh`, a standalone one-time helper for initializing root SSH access on a new or temporary server.
+
+It:
+
+- Requires a manually entered non-`22` SSH port.
+- Asks for the full public key line from a `.pub` file, rejects private keys, file paths, and broken keys, and validates the key with `ssh-keygen -l -f`.
+- Writes the key to `/root/.ssh/authorized_keys`.
+- Adds an early SSH drop-in for `PermitRootLogin prohibit-password`, `PubkeyAuthentication yes`, and `AuthorizedKeysFile .ssh/authorized_keys`, which covers hosts that disabled public-key login.
+- Ensures `/etc/ssh/sshd_config` includes `/etc/ssh/sshd_config.d/*.conf` near the top so the managed key-login settings are read early.
+- Keeps detected existing SSH entry ports in the managed config, including the current SSH connection port, existing sshd effective ports, ssh.socket `ListenStream` ports, and `22` when it is available as a rescue port.
+- Runs both `sshd -t` and `sshd -T -C user=root,host=localhost,addr=127.0.0.1` to verify root's effective SSH config.
+- Handles `ssh.socket` systems with a systemd socket override.
+- Opens the new port in UFW/firewalld before validating and reloading SSH; it restarts only when reload is unavailable.
+- Rolls back SSH config and socket overrides if validation, service update, new-port listen checks, or preserved-entry listen checks fail. Firewall rules added by the script are left for manual cleanup.
+- Never closes `22` or any detected existing SSH entry port. Tighten old ports manually only after the new port is confirmed stable.
+
+Run it directly:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/furina123123123/linux-traffic-guard/main/setup-root-ssh-once.sh)
+```
+
+If the current user is not root:
+
+```bash
+sudo bash <(curl -Ls https://raw.githubusercontent.com/furina123123123/linux-traffic-guard/main/setup-root-ssh-once.sh)
+```
+
+Example Windows client key generation:
+
+```powershell
+ssh-keygen -t ed25519 -f C:\Users\furina\.ssh\gcp_root_ed25519
+```
+
+Paste the full single-line contents of the `.pub` file:
+
+```text
+C:\Users\furina\.ssh\gcp_root_ed25519.pub
+```
+
+After the script finishes, keep the current SSH session open and test from a new terminal:
+
+```bash
+ssh -p NEW_PORT root@YOUR_SERVER_IP
+```
+
+The script does not close `22`. After the new port is stable, manually review the cloud firewall, UFW, and `/etc/ssh/` config before tightening old ports.
+
+For cloud servers, also open the new TCP port in the provider security group or cloud firewall. The script can only update firewall rules inside the server.
+
 ## Main Workflows
 
 ### 1. Port-Level Traffic Accounting

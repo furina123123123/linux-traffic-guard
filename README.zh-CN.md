@@ -62,6 +62,56 @@ curl -fL https://github.com/furina123123123/linux-traffic-guard/releases/latest/
 sudo install -Dm755 /tmp/ltg /usr/local/bin/ltg
 ```
 
+## 一次性 Root SSH 配置脚本
+
+仓库也提供一个独立的一次性脚本：`setup-root-ssh-once.sh`。它用于新服务器或临时服务器的 SSH 管理初始化，只处理 `root` 登录：
+
+- 要求手动输入新的 SSH 端口，不能留空，不能继续使用默认 `22`。
+- 要求粘贴 `.pub` 结尾公钥文件里的完整一行内容，会拒绝私钥、`.pub` 文件路径和损坏公钥，并用 `ssh-keygen -l -f` 验证公钥格式。
+- 写入 `/root/.ssh/authorized_keys`。
+- 写入优先级靠前的 SSH drop-in 配置：`PermitRootLogin prohibit-password`、`PubkeyAuthentication yes`、`AuthorizedKeysFile .ssh/authorized_keys`，用于处理某些服务器默认禁用密钥登录的情况。
+- 确保 `/etc/ssh/sshd_config` 顶部 Include `/etc/ssh/sshd_config.d/*.conf`，让脚本写入的密钥登录配置优先被读取。
+- 写入配置时会保留已识别的原有 SSH 入口端口，包括当前 SSH 连接端口、原 sshd 有效端口、ssh.socket 的 ListenStream，以及可用的 `22` 救援端口。
+- 写入后会同时执行 `sshd -t` 和 `sshd -T -C user=root,host=localhost,addr=127.0.0.1`，确认 root 的有效配置确实开启了公钥登录。
+- 如果系统启用了 `ssh.socket`，会写入 systemd socket override。
+- 先放行新端口的 UFW/firewalld 规则，再验证配置并 reload SSH；reload 不支持时才 restart。
+- 如果配置验证、服务更新、新端口监听检查或原有入口端口保留检查失败，会回滚 SSH 配置和 socket override；防火墙新增规则不会自动删除。
+- 脚本不会关闭 `22` 或任何原有 SSH 入口端口。确认新端口长期可用后，再手动收紧旧端口和防火墙规则。
+
+直接运行：
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/furina123123123/linux-traffic-guard/main/setup-root-ssh-once.sh)
+```
+
+如果当前不是 root，请使用：
+
+```bash
+sudo bash <(curl -Ls https://raw.githubusercontent.com/furina123123123/linux-traffic-guard/main/setup-root-ssh-once.sh)
+```
+
+Windows 客户端生成密钥示例：
+
+```powershell
+ssh-keygen -t ed25519 -f C:\Users\furina\.ssh\gcp_root_ed25519
+```
+
+脚本里要粘贴的是下面这个 `.pub` 文件里的那一整行内容：
+
+```text
+C:\Users\furina\.ssh\gcp_root_ed25519.pub
+```
+
+运行完成后，请不要立刻关闭当前 SSH 窗口。先在新的终端里测试：
+
+```bash
+ssh -p 新端口 root@你的服务器IP
+```
+
+脚本不会自动关闭 `22`。如果你确认新端口长期可用，请手动检查云防火墙、UFW 和 `/etc/ssh/` 下的配置后再收紧旧端口。
+
+云服务器还需要在 AWS / GCP / Azure 等云厂商安全组或云防火墙里手动放行新端口；脚本只能处理服务器内部的 UFW/firewalld。
+
 ## 主要工作流
 
 ### 1. 端口级流量统计
