@@ -7,6 +7,11 @@
 - Added restrained color accents to TUI menus, section headers, table headers, status badges, and traffic metric values.
 - Kept the color layer compatible with `NO_COLOR` and redirected output through the existing ANSI-stripping path.
 
+### Fixed
+
+- Bounded `ltg update` download, checksum, install, and version-probe steps with explicit timeouts so remote non-interactive runners fail cleanly instead of waiting indefinitely.
+- Documented `sudo -n ltg update` for remote probes, avoiding sudo password/TTY waits before LTG starts.
+
 ## 4.12.23 - 2026-05-04
 
 ### Fixed

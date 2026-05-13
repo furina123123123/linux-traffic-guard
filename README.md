@@ -55,6 +55,14 @@ Update later with the built-in updater:
 sudo ltg update
 ```
 
+For remote probes or other non-interactive automation, prefer:
+
+```bash
+sudo -n ltg update
+```
+
+`sudo -n` makes sudo fail immediately if it would need a password or TTY. The updater itself also bounds download, checksum, install, and version-probe steps with timeouts, so a network stall should report failure instead of leaving a busy remote process behind.
+
 You can also repeat the direct download command to overwrite the installed binary:
 
 ```bash
@@ -215,7 +223,7 @@ sudo ltg --reliability-check
 sudo ltg update
 ```
 
-All commands except `--help`, `--version`, and `--self-test` require root privileges. The TUI uses the alternate screen and restores the terminal on normal exit or signal handling.
+All commands except `--help`, `--version`, and `--self-test` require root privileges. The TUI uses the alternate screen and restores the terminal on normal exit or signal handling. In remote non-interactive runners, use `sudo -n ltg update` so sudo cannot wait for a password prompt before LTG starts.
 
 ## Requirements
 

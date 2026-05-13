@@ -643,6 +643,27 @@ inline std::string shellQuote(const std::string &value) {
     return out;
 }
 
+inline std::string commandWithTimeout(const std::string &command, int seconds) {
+#ifdef _WIN32
+    (void)seconds;
+    return command;
+#else
+    if (seconds <= 0) {
+        return command;
+    }
+    return "timeout --foreground " + std::to_string(seconds) + "s sh -c " + shellQuote(command);
+#endif
+}
+
+inline std::string curlDownloadCommand(const std::string &url, const std::string &outputPath) {
+    return "curl -fsSL --connect-timeout 10 --max-time 180 --retry 2 --retry-delay 1 " +
+           shellQuote(url) + " -o " + shellQuote(outputPath);
+}
+
+inline std::string wgetDownloadCommand(const std::string &url, const std::string &outputPath) {
+    return "wget -q --timeout=20 --tries=2 -O " + shellQuote(outputPath) + " " + shellQuote(url);
+}
+
 inline bool readTextFile(const std::string &path, std::string &content) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -9520,11 +9541,32 @@ inline int updateFromRelease(const char *argv0) {
     buffer.add("下载来源: " + kLatestBinaryUrl);
     buffer.add("");
 
+    const auto runStep = [&](const std::string &command, int timeoutSeconds = 60) {
+        buffer.add(ansi::gray + "$ " + command +
+                   (timeoutSeconds > 0 ? "  # timeout " + std::to_string(timeoutSeconds) + "s" : "") +
+                   ansi::plain);
+        const CommandResult result = Shell::capture(commandWithTimeout(command, timeoutSeconds));
+        buffer.add(result.ok() ? ansi::green + std::string("exit 0") + ansi::plain
+                               : ansi::yellow + "exit " + std::to_string(result.exitCode) + ansi::plain);
+        const std::string output = trim(result.output);
+        if (!output.empty()) {
+            buffer.addAll(splitLines(output));
+        }
+        if (result.exitCode == 124) {
+            buffer.add(ansi::yellow + std::string("命令超时，已停止等待。远程探针执行时请使用 sudo -n，避免 sudo 交互等待。") + ansi::plain);
+        }
+        buffer.add("");
+        return result.ok();
+    };
+
     if (!Shell::exists("curl") && !Shell::exists("wget")) {
         if (Shell::exists("apt-get")) {
             buffer.add("未发现 curl/wget，正在通过 apt-get 安装 curl。");
-            ScreenBuffer deps = commandListBuffer({"apt-get update && apt-get install -y curl"});
-            buffer.addAll(deps.lines());
+            if (!runStep("DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl", 300)) {
+                buffer.add(ansi::yellow + std::string("curl 自动安装失败或超时，更新已停止。") + ansi::plain);
+                printScreenBuffer(buffer);
+                return 1;
+            }
             Shell::clearExistsCache();
         } else {
             buffer.add(ansi::yellow + std::string("未发现 curl 或 wget，且无法自动使用 apt-get 安装。") + ansi::plain);
@@ -9536,52 +9578,34 @@ inline int updateFromRelease(const char *argv0) {
 
     std::string downloadCommand;
     if (Shell::exists("curl")) {
-        downloadCommand = "curl -fL " + shellQuote(kLatestBinaryUrl) + " -o " + shellQuote(temp);
+        downloadCommand = curlDownloadCommand(kLatestBinaryUrl, temp);
     } else if (Shell::exists("wget")) {
-        downloadCommand = "wget -O " + shellQuote(temp) + " " + shellQuote(kLatestBinaryUrl);
+        downloadCommand = wgetDownloadCommand(kLatestBinaryUrl, temp);
     } else {
         buffer.add(ansi::yellow + std::string("curl 安装后仍不可用，更新已停止。") + ansi::plain);
         printScreenBuffer(buffer);
         return 1;
     }
 
-    const auto runStep = [&](const std::string &command) {
-        buffer.add(ansi::gray + "$ " + command + ansi::plain);
-        const CommandResult result = Shell::capture(command);
-        buffer.add(result.ok() ? ansi::green + std::string("exit 0") + ansi::plain
-                               : ansi::yellow + "exit " + std::to_string(result.exitCode) + ansi::plain);
-        const std::string output = trim(result.output);
-        if (!output.empty()) {
-            buffer.addAll(splitLines(output));
-        }
-        buffer.add("");
-        return result.ok();
-    };
-
-    const std::vector<std::string> commands = {
-        downloadCommand,
-        "chmod +x " + shellQuote(temp),
-    };
-    for (const auto &command : commands) {
-        if (!runStep(command)) {
-            runStep("rm -f " + shellQuote(temp));
-            buffer.add(ansi::yellow + std::string("更新失败，请查看上方输出。") + ansi::plain);
-            printScreenBuffer(buffer);
-            return 1;
-        }
+    if (!runStep(downloadCommand, 210) ||
+        !runStep("chmod +x " + shellQuote(temp), 15)) {
+        runStep("rm -f " + shellQuote(temp), 15);
+        buffer.add(ansi::yellow + std::string("更新失败，请查看上方输出。") + ansi::plain);
+        printScreenBuffer(buffer);
+        return 1;
     }
 
     std::string shaDownload;
     if (Shell::exists("curl")) {
-        shaDownload = "curl -fL " + shellQuote(kLatestSha256Url) + " -o " + shellQuote(tempSha);
+        shaDownload = curlDownloadCommand(kLatestSha256Url, tempSha);
     } else {
-        shaDownload = "wget -O " + shellQuote(tempSha) + " " + shellQuote(kLatestSha256Url);
+        shaDownload = wgetDownloadCommand(kLatestSha256Url, tempSha);
     }
-    if (runStep(shaDownload) && Shell::exists("sha256sum") && Shell::exists("grep") && Shell::exists("sed")) {
+    if (runStep(shaDownload, 60) && Shell::exists("sha256sum") && Shell::exists("grep") && Shell::exists("sed")) {
         const std::string verify = "grep ' ltg-linux-x86_64$' " + shellQuote(tempSha) +
                                    " | sed 's# ltg-linux-x86_64# " + temp + "#' | sha256sum -c -";
-        if (!runStep(verify)) {
-            runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+        if (!runStep(verify, 30)) {
+            runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha), 15);
             buffer.add(ansi::yellow + std::string("SHA256 校验失败，已停止覆盖安装。") + ansi::plain);
             printScreenBuffer(buffer);
             return 1;
@@ -9591,7 +9615,7 @@ inline int updateFromRelease(const char *argv0) {
         buffer.add("");
     }
 
-    const CommandResult downloadedVersion = Shell::capture(shellQuote(temp) + " --version");
+    const CommandResult downloadedVersion = Shell::capture(commandWithTimeout(shellQuote(temp) + " --version", 10));
     buffer.add(ansi::gray + std::string("$ ") + shellQuote(temp) + " --version" + ansi::plain);
     buffer.add(downloadedVersion.ok() ? ansi::green + std::string("exit 0") + ansi::plain
                                       : ansi::yellow + "exit " + std::to_string(downloadedVersion.exitCode) + ansi::plain);
@@ -9602,20 +9626,20 @@ inline int updateFromRelease(const char *argv0) {
     if (!downloadedVersion.ok() || !parseVersionTriplet(kVersion, currentVersion) ||
         !parseVersionTriplet(downloadedVersion.output, newVersion) ||
         compareVersionTriplet(newVersion, currentVersion) < 0) {
-        runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+        runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha), 15);
         buffer.add(ansi::yellow + std::string("下载到的版本无法确认，或低于当前版本，已停止覆盖安装。") + ansi::plain);
         printScreenBuffer(buffer);
         return 1;
     }
 
-    if (!runStep("install -Dm755 " + shellQuote(temp) + " " + shellQuote(target))) {
-        runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+    if (!runStep("install -Dm755 " + shellQuote(temp) + " " + shellQuote(target), 30)) {
+        runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha), 15);
         buffer.add(ansi::yellow + std::string("覆盖安装失败，请查看上方输出。") + ansi::plain);
         printScreenBuffer(buffer);
         return 1;
     }
 
-    const CommandResult installedVersion = Shell::capture(shellQuote(target) + " --version");
+    const CommandResult installedVersion = Shell::capture(commandWithTimeout(shellQuote(target) + " --version", 10));
     buffer.add(ansi::gray + std::string("$ ") + shellQuote(target) + " --version" + ansi::plain);
     buffer.add(installedVersion.ok() ? ansi::green + std::string("exit 0") + ansi::plain
                                      : ansi::yellow + "exit " + std::to_string(installedVersion.exitCode) + ansi::plain);
@@ -9624,13 +9648,13 @@ inline int updateFromRelease(const char *argv0) {
     std::array<int, 3> installed{};
     if (!installedVersion.ok() || !parseVersionTriplet(installedVersion.output, installed) ||
         compareVersionTriplet(installed, newVersion) != 0) {
-        runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+        runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha), 15);
         buffer.add(ansi::yellow + std::string("覆盖后版本复查失败，请确认目标路径是否被正确替换。") + ansi::plain);
         printScreenBuffer(buffer);
         return 1;
     }
 
-    runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha));
+    runStep("rm -f " + shellQuote(temp) + " " + shellQuote(tempSha), 15);
     buffer.add("");
     buffer.add("更新完成，目标文件版本已复查。");
     printScreenBuffer(buffer);
@@ -9906,6 +9930,15 @@ inline int selfTest() {
                                  parseVersionTriplet("4.12.12", olderVersion) &&
                                  compareVersionTriplet(parsedVersion, olderVersion) > 0 &&
                                  !parseVersionTriplet("version unknown", olderVersion));
+#ifdef _WIN32
+    const bool timeoutWrapped = commandWithTimeout("ltg --version", 10) == "ltg --version";
+#else
+    const bool timeoutWrapped = commandWithTimeout("ltg --version", 10).find("timeout --foreground 10s sh -c") != std::string::npos;
+#endif
+    check("update 命令超时封装", timeoutWrapped &&
+                                  commandWithTimeout("ltg --version", 0) == "ltg --version");
+    check("update 下载命令有边界", curlDownloadCommand("https://example.invalid/a", "/tmp/a").find("--max-time 180") != std::string::npos &&
+                                  wgetDownloadCommand("https://example.invalid/a", "/tmp/a").find("--timeout=20") != std::string::npos);
     ReliabilityReport reliabilityReport;
     addReliabilityResult(reliabilityReport, "测试链路", "通过项", ReliabilityStatus::Pass, "ok");
     check("可靠性结果聚合", reliabilityReport.ok());
@@ -10046,6 +10079,9 @@ inline void usage(const char *argv0) {
     std::cout << "  --self-test       运行非 root 纯逻辑自测\n";
     std::cout << "  --version         显示版本\n";
     std::cout << "  --help            显示帮助\n";
+    std::cout << "\n远程执行提示:\n";
+    std::cout << "  自动化探针请使用 sudo -n ltg update；如果 sudo 需要密码/TTY，会在程序启动前卡住。\n";
+    std::cout << "  update 的下载、校验、安装和版本复查步骤都有超时保护，超时会明确失败退出。\n";
     std::cout << "\nUbuntu 依赖:\n";
     std::cout << "  sudo apt update\n";
     std::cout << "  sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep curl mmdb-bin\n";
