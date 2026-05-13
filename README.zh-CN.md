@@ -52,16 +52,10 @@ sudo ltg
 以后更新推荐使用内置更新命令：
 
 ```bash
-sudo ltg update
+ltg update
 ```
 
-远程探针或其他非交互自动化场景，建议使用：
-
-```bash
-sudo -n ltg update
-```
-
-`sudo -n` 会在需要密码或 TTY 时立刻失败，避免程序还没启动就卡在 sudo。`ltg update` 内部的下载、校验、安装和版本复查步骤也都有超时保护，网络卡住时会明确失败退出，不会留下忙等的远程进程。
+`ltg update` 是统一入口。它如果发现当前不是 root，会在普通交互终端自动用 `sudo` 重新执行，在远程/非交互自动化里自动用 `sudo -n` 重新执行，避免 sudo 一直等密码。如果你手动在命令前加了 sudo，sudo 会先于 LTG 运行，远程场景仍建议写成 `sudo -n ltg update`。`ltg update` 内部的下载、校验、安装和版本复查步骤也都有超时保护，网络卡住时会明确失败退出，不会留下忙等的远程进程。
 
 也可以重复执行下载命令覆盖安装：
 
@@ -218,10 +212,10 @@ sudo ltg --f2b-audit
 sudo ltg --doctor
 sudo ltg --export-report
 sudo ltg --reliability-check
-sudo ltg update
+ltg update
 ```
 
-除 `--help`、`--version` 和 `--self-test` 外，工具必须以 root 权限运行。交互模式会进入 alternate screen，并在退出或收到信号时恢复终端状态。远程非交互执行更新时请用 `sudo -n ltg update`，避免 sudo 在 LTG 启动前等待密码输入。
+除 `--help`、`--version` 和 `--self-test` 外，工具必须以 root 权限运行。交互模式会进入 alternate screen，并在退出或收到信号时恢复终端状态。`ltg update` 可以不加 sudo 前缀运行，工具会根据终端环境自动选择交互 sudo 或非交互 `sudo -n`。
 
 ## 支持环境
 

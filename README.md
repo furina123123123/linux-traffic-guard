@@ -52,16 +52,10 @@ sudo ltg
 Update later with the built-in updater:
 
 ```bash
-sudo ltg update
+ltg update
 ```
 
-For remote probes or other non-interactive automation, prefer:
-
-```bash
-sudo -n ltg update
-```
-
-`sudo -n` makes sudo fail immediately if it would need a password or TTY. The updater itself also bounds download, checksum, install, and version-probe steps with timeouts, so a network stall should report failure instead of leaving a busy remote process behind.
+`ltg update` is the unified entry point. If it is not already running as root, LTG re-runs itself through `sudo` in an interactive terminal and through `sudo -n` in remote/non-interactive automation, so sudo cannot wait forever for a password prompt. If you explicitly prefix the command with sudo yourself, use `sudo -n ltg update` in remote runners because sudo runs before LTG can choose the safer mode. The updater also bounds download, checksum, install, and version-probe steps with timeouts, so a network stall should report failure instead of leaving a busy remote process behind.
 
 You can also repeat the direct download command to overwrite the installed binary:
 
@@ -220,10 +214,10 @@ sudo ltg --f2b-audit
 sudo ltg --doctor
 sudo ltg --export-report
 sudo ltg --reliability-check
-sudo ltg update
+ltg update
 ```
 
-All commands except `--help`, `--version`, and `--self-test` require root privileges. The TUI uses the alternate screen and restores the terminal on normal exit or signal handling. In remote non-interactive runners, use `sudo -n ltg update` so sudo cannot wait for a password prompt before LTG starts.
+All commands except `--help`, `--version`, and `--self-test` require root privileges. The TUI uses the alternate screen and restores the terminal on normal exit or signal handling. `ltg update` can be run without a sudo prefix; it will choose interactive sudo or non-interactive `sudo -n` based on the terminal.
 
 ## Requirements
 

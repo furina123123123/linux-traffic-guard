@@ -10,7 +10,7 @@
 ### Fixed
 
 - Bounded `ltg update` download, checksum, install, and version-probe steps with explicit timeouts so remote non-interactive runners fail cleanly instead of waiting indefinitely.
-- Documented `sudo -n ltg update` for remote probes, avoiding sudo password/TTY waits before LTG starts.
+- Made `ltg update` a unified root-escalating entry point: it re-runs through interactive `sudo` on terminals and `sudo -n` in remote/non-interactive automation.
 
 ## 4.12.23 - 2026-05-04
 

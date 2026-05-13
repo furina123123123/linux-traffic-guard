@@ -451,15 +451,19 @@ inline std::mutex &toolExistsCacheMutex() {
     return mutex;
 }
 
-inline bool shouldUseColor(int fd = STDOUT_FILENO) {
-    if (std::getenv("NO_COLOR") != nullptr) {
-        return false;
-    }
+inline bool fdIsTty(int fd) {
 #ifdef _WIN32
     return _isatty(fd) != 0;
 #else
     return isatty(fd) != 0;
 #endif
+}
+
+inline bool shouldUseColor(int fd = STDOUT_FILENO) {
+    if (std::getenv("NO_COLOR") != nullptr) {
+        return false;
+    }
+    return fdIsTty(fd);
 }
 
 inline std::string stripAnsi(const std::string &value) {
@@ -5690,7 +5694,7 @@ inline void verifyUpdateChainReadiness(ReliabilityReport &report) {
     addReliabilityResult(report, "更新链路", "覆盖权限", isRoot() ? ReliabilityStatus::Pass : ReliabilityStatus::Permission,
                          isRoot() ? "当前权限可覆盖安装" : "需要 sudo 才能覆盖当前 ltg",
                          target,
-                         isRoot() ? "" : "使用 sudo ltg update");
+                         isRoot() ? "" : "使用 ltg update，工具会自动选择 sudo 或 sudo -n");
 #endif
 }
 
@@ -9523,14 +9527,47 @@ inline void exportDiagnosticReport() {
     printScreenBuffer(buffer);
 }
 
+inline bool shouldUseNonInteractiveSudo() {
+#ifdef _WIN32
+    return false;
+#else
+    return !fdIsTty(STDIN_FILENO) || !fdIsTty(STDERR_FILENO);
+#endif
+}
+
+inline std::string sudoUpdateCommand(const std::string &selfPath, bool nonInteractive) {
+    return std::string("sudo ") + (nonInteractive ? "-n " : "") + shellQuote(selfPath) + " update";
+}
+
+inline int rerunUpdateWithSudo(const char *argv0) {
+#ifdef _WIN32
+    (void)argv0;
+    return 1;
+#else
+    if (!Shell::exists("sudo")) {
+        std::cerr << colorIf("更新需要 root 权限，但未找到 sudo。请切换 root 后运行: ltg update", ansi::yellow, STDERR_FILENO) << "\n";
+        return 77;
+    }
+    const std::string self = currentExecutablePath(argv0);
+    const bool nonInteractive = shouldUseNonInteractiveSudo();
+    const std::string command = sudoUpdateCommand(self, nonInteractive);
+    std::cerr << colorIf("更新需要 root 权限，正在重新执行: " + command, ansi::yellow, STDERR_FILENO) << "\n";
+    const int raw = std::system(command.c_str());
+    const int code = normalizedExitCode(raw);
+    if (nonInteractive && code != 0) {
+        std::cerr << colorIf("sudo 非交互提权失败。请确认当前用户有 NOPASSWD 权限，或在交互终端运行 ltg update。", ansi::yellow, STDERR_FILENO) << "\n";
+    }
+    return code;
+#endif
+}
+
 inline int updateFromRelease(const char *argv0) {
 #ifdef _WIN32
     std::cerr << "ltg update 只支持 Ubuntu/Linux 发布二进制。\n";
     return 1;
 #else
     if (!isRoot()) {
-        std::cerr << colorIf("更新需要写入当前 ltg 可执行文件。请使用: sudo ltg update", ansi::yellow, STDERR_FILENO) << "\n";
-        return 77;
+        return rerunUpdateWithSudo(argv0);
     }
     const std::string target = currentExecutablePath(argv0);
     const std::string temp = "/tmp/ltg-update-" + nowStamp();
@@ -9939,6 +9976,8 @@ inline int selfTest() {
                                   commandWithTimeout("ltg --version", 0) == "ltg --version");
     check("update 下载命令有边界", curlDownloadCommand("https://example.invalid/a", "/tmp/a").find("--max-time 180") != std::string::npos &&
                                   wgetDownloadCommand("https://example.invalid/a", "/tmp/a").find("--timeout=20") != std::string::npos);
+    check("update sudo 命令合并", sudoUpdateCommand("/usr/local/bin/ltg", true) == "sudo -n '/usr/local/bin/ltg' update" &&
+                                  sudoUpdateCommand("/usr/local/bin/ltg", false) == "sudo '/usr/local/bin/ltg' update");
     ReliabilityReport reliabilityReport;
     addReliabilityResult(reliabilityReport, "测试链路", "通过项", ReliabilityStatus::Pass, "ok");
     check("可靠性结果聚合", reliabilityReport.ok());
@@ -10080,7 +10119,8 @@ inline void usage(const char *argv0) {
     std::cout << "  --version         显示版本\n";
     std::cout << "  --help            显示帮助\n";
     std::cout << "\n远程执行提示:\n";
-    std::cout << "  自动化探针请使用 sudo -n ltg update；如果 sudo 需要密码/TTY，会在程序启动前卡住。\n";
+    std::cout << "  推荐统一使用 ltg update；非 root 时会自动选择 sudo 或 sudo -n。\n";
+    std::cout << "  如果命令前手写 sudo，则 sudo 行为发生在 LTG 启动前，远程场景仍建议 sudo -n。\n";
     std::cout << "  update 的下载、校验、安装和版本复查步骤都有超时保护，超时会明确失败退出。\n";
     std::cout << "\nUbuntu 依赖:\n";
     std::cout << "  sudo apt update\n";
