@@ -41,9 +41,12 @@ LTG 把这些路径合成一条工作流：
 curl -fL https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64 -o ltg
 chmod +x ltg
 sudo install -Dm755 ltg /usr/local/bin/ltg
+ltg bootstrap
 ```
 
-打开 TUI：
+`ltg bootstrap` 是首次安装入口。它会自动通过 `sudo` 提权、安装运行依赖、写入两条内置 fail2ban 防护策略（`sshd` 和 `ufw-slowscan-global`）、启用/reload fail2ban，并执行一次临时封禁探测，验证规则2能落地到 UFW 且能清理干净。它不会静默启用 UFW，因为这可能把 SSH 锁在外面；如果 UFW 处于 inactive，bootstrap 结果会明确告诉你哪一层还没有完全生效。
+
+bootstrap 完成后打开 TUI：
 
 ```bash
 sudo ltg
@@ -280,7 +283,7 @@ sudo make install
 make bootstrap
 ```
 
-`make bootstrap` 会执行 `apt-get update`、安装构建和运行依赖、编译 `ltg`，然后安装到 `PREFIX` 指定的位置。默认 `PREFIX=/usr/local`；非 root 用户会自动使用 `sudo`。
+`make bootstrap` 会执行 `apt-get update`、安装构建和运行依赖、编译 `ltg`，安装到 `PREFIX` 指定的位置，然后执行同一套 fail2ban 防护栈 bootstrap。默认 `PREFIX=/usr/local`；非 root 用户会自动使用 `sudo`。
 
 源码 checkout 更新：
 

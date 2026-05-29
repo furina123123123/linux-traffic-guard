@@ -68,6 +68,7 @@ jobs:
           curl -fL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/ltg-linux-x86_64 -o ltg
           chmod +x ltg
           sudo install -Dm755 ltg /usr/local/bin/ltg
+          ltg bootstrap
           \`\`\`
 
           Source users can keep using:

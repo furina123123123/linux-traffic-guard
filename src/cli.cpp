@@ -5616,12 +5616,18 @@ inline F2bDependencyReadiness fail2banStackDependencyReadiness() {
 }
 
 inline std::string fail2banStackInstallCommand() {
-    return "apt update && apt install -y fail2ban ufw";
+    return "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban ufw";
 }
 
 inline bool shouldOfferFail2banStackAptInstall(const F2bDependencyReadiness &readiness) {
     return std::find(readiness.missing.begin(), readiness.missing.end(), "fail2ban-client") != readiness.missing.end() ||
            std::find(readiness.missing.begin(), readiness.missing.end(), "ufw") != readiness.missing.end();
+}
+
+inline std::string ltgRuntimeDependencyInstallCommand() {
+    return "DEBIAN_FRONTEND=noninteractive apt-get update && "
+           "DEBIAN_FRONTEND=noninteractive apt-get install -y "
+           "fail2ban ufw nftables iproute2 conntrack gawk grep curl mmdb-bin libsqlite3-0";
 }
 
 inline void verifyDependencyChain(ReliabilityReport &report) {
@@ -5923,6 +5929,152 @@ inline void verifyFail2banUfwChain(ReliabilityReport &report, bool allowActivePr
                              " / ufwLanded=" + std::string(ufwLanded ? "yes" : "no") +
                              " / cleaned=" + std::string(cleaned ? "yes" : "no"),
                          fullyEffective ? "" : "检查 ufw-drop action、UFW 状态和 fail2ban-client set 输出");
+}
+
+inline ScreenBuffer reliabilityReportBuffer(const ReliabilityReport &report, bool allowActiveProbes);
+
+struct Fail2banBootstrapResult {
+    ScreenBuffer buffer;
+    bool ok = false;
+};
+
+inline CommandResult runDisplayedCommandToBuffer(ScreenBuffer &buffer, const std::string &command) {
+    buffer.add(ansi::gray + "$ " + command + ansi::plain);
+    CommandResult result = Shell::capture(command + " 2>&1");
+    buffer.add(result.ok() ? ansi::green + std::string("exit 0") + ansi::plain
+                           : ansi::yellow + "exit " + std::to_string(result.exitCode) + ansi::plain);
+    const std::string output = trim(result.output);
+    if (!output.empty()) {
+        buffer.addAll(splitLines(output));
+    }
+    buffer.add("");
+    return result;
+}
+
+inline Fail2banBootstrapResult ensureFail2banProtectionStack(bool installMissingDeps, bool activeProbe) {
+    Fail2banBootstrapResult result;
+    ScreenBuffer &buffer = result.buffer;
+    buffer.add(uiSection("fail2ban 防护栈引导"));
+
+    F2bDependencyReadiness readiness = fail2banStackDependencyReadiness();
+    if (!readiness.ok) {
+        buffer.add(ansi::yellow + std::string("防护核心依赖不完整。") + ansi::plain);
+        buffer.add("缺失工具: " + joinWords(readiness.missing, ", "));
+        buffer.add("");
+        if (!installMissingDeps || !shouldOfferFail2banStackAptInstall(readiness)) {
+            buffer.add("无法自动补齐当前缺失项。请先修复 systemd/journal 环境，或手动安装缺失工具。");
+            return result;
+        }
+        buffer.add("正在自动安装: fail2ban ufw");
+        CommandResult install = runDisplayedCommandToBuffer(buffer, fail2banStackInstallCommand());
+        Shell::clearExistsCache();
+        readiness = fail2banStackDependencyReadiness();
+        if (!install.ok() || !readiness.ok) {
+            buffer.add(ansi::yellow + std::string("依赖安装后仍未通过复查，已停止写入防护策略。") + ansi::plain);
+            buffer.add("仍缺失: " + joinWords(readiness.missing, ", "));
+            return result;
+        }
+    } else {
+        buffer.add(ansi::green + std::string("核心依赖已就绪: fail2ban-client/systemctl/ufw/journalctl") + ansi::plain);
+        buffer.add("");
+    }
+
+    std::vector<std::string> failures;
+    std::string backup;
+    std::string error;
+    bool ok = writeManagedFileWithBackup(kRule2FilterFile, renderRule2FilterFile(), backup, error);
+    buffer.add(ok ? "[OK] 规则2 filter 已写入" : "[WARN] 规则2 filter 写入失败: " + error);
+    if (!backup.empty()) buffer.add("  备份: " + backup);
+    if (!ok) failures.push_back(kRule2FilterFile + ": " + error);
+    backup.clear();
+    error.clear();
+
+    ok = writeManagedFileWithBackup(kUfwDropActionFile, renderUfwDropActionFile(), backup, error);
+    buffer.add(ok ? "[OK] ufw-drop action 已写入" : "[WARN] ufw-drop action 写入失败: " + error);
+    if (!backup.empty()) buffer.add("  备份: " + backup);
+    if (!ok) failures.push_back(kUfwDropActionFile + ": " + error);
+
+    IniConfig ini;
+    ini.load(kJailConf);
+    ini.set(kRule1Jail, "enabled", configValueOr(ini.get(kRule1Jail, "enabled"), "true"));
+    ini.set(kRule1Jail, "maxretry", configValueOr(ini.get(kRule1Jail, "maxretry"), "5"));
+    ini.set(kRule1Jail, "findtime", configValueOr(ini.get(kRule1Jail, "findtime"), "3600"));
+    ini.set(kRule1Jail, "bantime", configValueOr(ini.get(kRule1Jail, "bantime"), "600"));
+    ini.set(kRule2Jail, "enabled", configValueOr(ini.get(kRule2Jail, "enabled"), "true"));
+    ini.set(kRule2Jail, "filter", "ufw-slowscan-global");
+    ini.set(kRule2Jail, "backend", "systemd");
+    ini.set(kRule2Jail, "journalmatch", "_TRANSPORT=kernel");
+    ini.set(kRule2Jail, "maxretry", configValueOr(ini.get(kRule2Jail, "maxretry"), "50"));
+    ini.set(kRule2Jail, "findtime", configValueOr(ini.get(kRule2Jail, "findtime"), "3600"));
+    ini.set(kRule2Jail, "bantime", configValueOr(ini.get(kRule2Jail, "bantime"), "1d"));
+    ini.set(kRule2Jail, "banaction", "ufw-drop");
+    backup.clear();
+    ok = ini.save(backup);
+    buffer.add(ok ? "[OK] jail.local 已更新" : "[WARN] jail.local 写入失败");
+    if (!backup.empty()) buffer.add("  备份: " + backup);
+    if (!ok) failures.push_back(kJailConf + ": 无法写入");
+    buffer.add("");
+    if (!failures.empty()) {
+        buffer.add(ansi::yellow + std::string("关键配置写入失败，已停止重载 fail2ban。") + ansi::plain);
+        for (const auto &failure : failures) {
+            buffer.add("- " + failure);
+        }
+        return result;
+    }
+
+    buffer.add("> 配置检查与服务重载");
+    CommandResult check = runDisplayedCommandToBuffer(buffer, "fail2ban-client -t");
+    if (!check.ok()) {
+        buffer.add(ansi::yellow + std::string("fail2ban 配置检查失败，已停止重载。") + ansi::plain);
+        return result;
+    }
+    CommandResult enable = runDisplayedCommandToBuffer(buffer, "systemctl enable --now fail2ban");
+    if (!enable.ok()) {
+        buffer.add(ansi::yellow + std::string("fail2ban 服务启动失败，配置尚未真正生效。") + ansi::plain);
+        return result;
+    }
+    CommandResult reload = runDisplayedCommandToBuffer(buffer, "fail2ban-client reload");
+    if (!reload.ok()) {
+        buffer.add(ansi::yellow + std::string("fail2ban reload 失败，配置尚未真正生效。") + ansi::plain);
+        return result;
+    }
+    runDisplayedCommandToBuffer(buffer, "(ufw reload || true)");
+
+    buffer.add("> 生效状态验证");
+    CommandResult ping = runDisplayedCommandToBuffer(buffer, "fail2ban-client ping");
+    CommandResult status = runDisplayedCommandToBuffer(buffer, "fail2ban-client status");
+    (void)status;
+    CommandResult sshStatus = runDisplayedCommandToBuffer(buffer, "fail2ban-client status " + shellQuote(kRule1Jail));
+    CommandResult scanStatus = runDisplayedCommandToBuffer(buffer, "fail2ban-client status " + shellQuote(kRule2Jail));
+    const F2bJailRuntimeInfo sshRuntime = parseFail2banJailStatus(kRule1Jail, sshStatus.output, true);
+    const F2bJailRuntimeInfo scanRuntime = parseFail2banJailStatus(kRule2Jail, scanStatus.output, true);
+    const std::vector<int> statusWidths = {22, 48};
+    buffer.add(bufferTableRow({"运行态", "结果"}, statusWidths, true));
+    buffer.add(bufferTableRule(statusWidths));
+    buffer.add(bufferTableRow({"fail2ban ping", ping.ok() ? "正常" : "异常"}, statusWidths));
+    buffer.add(bufferTableRow({kRule1Jail, sshRuntime.label}, statusWidths));
+    buffer.add(bufferTableRow({kRule2Jail, scanRuntime.label}, statusWidths));
+
+    ReliabilityReport activeReport;
+    verifyFail2banUfwChain(activeReport, activeProbe);
+    buffer.add("");
+    buffer.add("> 统一可靠性口径");
+    buffer.addAll(reliabilityReportBuffer(activeReport, activeProbe).lines());
+    if (!ping.ok() || !sshRuntime.loaded() || !scanRuntime.loaded() || !activeReport.ok()) {
+        buffer.add("");
+        buffer.add(ansi::yellow + std::string("fail2ban 自动化未通过统一验收，不能视为已生效。") + ansi::plain);
+        if (!ping.ok()) buffer.add("- fail2ban ping 失败：socket 或服务状态不可用。");
+        if (!sshRuntime.loaded()) buffer.add("- sshd jail 未加载。");
+        if (!scanRuntime.loaded()) buffer.add("- 规则2未加载，未真正生效。");
+        if (!activeReport.ok()) buffer.add("- 临时 ban / UFW deny 落地 / 清理复查 未全部通过。");
+        buffer.add("请查看上方 fail2ban-client status 输出和 /etc/fail2ban/jail.local 配置。");
+        return result;
+    }
+
+    buffer.add("");
+    buffer.add(ansi::green + std::string("两条防护策略已正确运行：sshd 与 ufw-slowscan-global 已加载，规则2临时封禁已落地 UFW 并完成清理。") + ansi::plain);
+    result.ok = true;
+    return result;
 }
 
 inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSnapshotProbe) {
@@ -8700,126 +8852,9 @@ private:
             pushResult("安装/修复配置", buffer);
             return;
         }
-        ScreenBuffer buffer;
-        std::vector<std::string> failures;
-        std::string backup;
-        std::string error;
-        bool ok = writeManagedFileWithBackup(kRule2FilterFile, renderRule2FilterFile(), backup, error);
-        buffer.add(ok ? "[OK] 规则2 filter 已写入" : "[WARN] 规则2 filter 写入失败: " + error);
-        if (!backup.empty()) buffer.add("  备份: " + backup);
-        if (!ok) failures.push_back(kRule2FilterFile + ": " + error);
-        backup.clear();
-        error.clear();
-        ok = writeManagedFileWithBackup(kUfwDropActionFile, renderUfwDropActionFile(), backup, error);
-        buffer.add(ok ? "[OK] ufw-drop action 已写入" : "[WARN] ufw-drop action 写入失败: " + error);
-        if (!backup.empty()) buffer.add("  备份: " + backup);
-        if (!ok) failures.push_back(kUfwDropActionFile + ": " + error);
-
-        IniConfig ini;
-        ini.load(kJailConf);
-        ini.set(kRule1Jail, "enabled", configValueOr(ini.get(kRule1Jail, "enabled"), "true"));
-        ini.set(kRule1Jail, "maxretry", configValueOr(ini.get(kRule1Jail, "maxretry"), "5"));
-        ini.set(kRule1Jail, "findtime", configValueOr(ini.get(kRule1Jail, "findtime"), "3600"));
-        ini.set(kRule1Jail, "bantime", configValueOr(ini.get(kRule1Jail, "bantime"), "600"));
-        ini.set(kRule2Jail, "enabled", configValueOr(ini.get(kRule2Jail, "enabled"), "true"));
-        ini.set(kRule2Jail, "filter", "ufw-slowscan-global");
-        ini.set(kRule2Jail, "backend", "systemd");
-        ini.set(kRule2Jail, "journalmatch", "_TRANSPORT=kernel");
-        ini.set(kRule2Jail, "maxretry", configValueOr(ini.get(kRule2Jail, "maxretry"), "50"));
-        ini.set(kRule2Jail, "findtime", configValueOr(ini.get(kRule2Jail, "findtime"), "3600"));
-        ini.set(kRule2Jail, "bantime", configValueOr(ini.get(kRule2Jail, "bantime"), "1d"));
-        ini.set(kRule2Jail, "banaction", "ufw-drop");
-        backup.clear();
-        ok = ini.save(backup);
-        buffer.add(ok ? "[OK] jail.local 已更新" : "[WARN] jail.local 写入失败");
-        if (!backup.empty()) buffer.add("  备份: " + backup);
-        if (!ok) failures.push_back(kJailConf + ": 无法写入");
-        buffer.add("");
-        if (!failures.empty()) {
-            ScreenBuffer result;
-            result.add(ansi::yellow + std::string("关键配置写入失败，已停止重载 fail2ban。") + ansi::plain);
-            result.add("请先修复下面的问题，再重新执行安装/修复配置。");
-            result.add("");
-            for (const auto &failure : failures) {
-                result.add("- " + failure);
-            }
-            result.add("");
-            result.addAll(buffer.lines());
-            pushResult("安装/修复配置", result);
-            return;
-        }
-        buffer.add("> 配置检查与服务重载");
-        CommandResult check = runDisplayedCommand(buffer, "fail2ban-client -t");
-        if (!check.ok()) {
-            ScreenBuffer result;
-            result.add(ansi::yellow + std::string("fail2ban 配置检查失败，已停止重载。") + ansi::plain);
-            result.add("请先修复 fail2ban-client -t 输出中的配置错误。");
-            result.add("");
-            result.addAll(buffer.lines());
-            pushResult("安装/修复配置", result);
-            return;
-        }
-        CommandResult enable = runDisplayedCommand(buffer, "systemctl enable --now fail2ban");
-        if (!enable.ok()) {
-            ScreenBuffer result;
-            result.add(ansi::yellow + std::string("fail2ban 服务启动失败，配置尚未真正生效。") + ansi::plain);
-            result.add("");
-            result.addAll(buffer.lines());
-            pushResult("安装/修复配置", result);
-            return;
-        }
-        CommandResult reload = runDisplayedCommand(buffer, "fail2ban-client reload");
-        if (!reload.ok()) {
-            ScreenBuffer result;
-            result.add(ansi::yellow + std::string("fail2ban reload 失败，配置尚未真正生效。") + ansi::plain);
-            result.add("");
-            result.addAll(buffer.lines());
-            pushResult("安装/修复配置", result);
-            return;
-        }
-        runDisplayedCommand(buffer, "(ufw reload || true)");
-        buffer.add("> 生效状态验证");
-        CommandResult ping = runDisplayedCommand(buffer, "fail2ban-client ping");
-        CommandResult status = runDisplayedCommand(buffer, "fail2ban-client status");
-        (void)status;
-        CommandResult sshStatus = runDisplayedCommand(buffer, "fail2ban-client status " + shellQuote(kRule1Jail));
-        CommandResult scanStatus = runDisplayedCommand(buffer, "fail2ban-client status " + shellQuote(kRule2Jail));
-        const F2bJailRuntimeInfo sshRuntime = parseFail2banJailStatus(kRule1Jail, sshStatus.output, true);
-        const F2bJailRuntimeInfo scanRuntime = parseFail2banJailStatus(kRule2Jail, scanStatus.output, true);
-        addKeyValueTable(buffer, {
-            {"fail2ban ping", ping.ok() ? "正常" : "异常"},
-            {kRule1Jail, sshRuntime.label},
-            {kRule2Jail, scanRuntime.label},
-        });
-        ReliabilityReport activeReport;
-        verifyFail2banUfwChain(activeReport, true);
-        buffer.add("");
-        buffer.add("> 统一可靠性口径");
-        buffer.addAll(reliabilityReportBuffer(activeReport, true).lines());
-        if (!ping.ok() || !sshRuntime.loaded() || !scanRuntime.loaded() || !activeReport.ok()) {
-            ScreenBuffer result;
-            result.add(ansi::yellow + std::string("fail2ban 自动化未通过统一验收，不能视为已生效。") + ansi::plain);
-            if (!ping.ok()) {
-                result.add("- fail2ban ping 失败：socket 或服务状态不可用。");
-            }
-            if (!sshRuntime.loaded()) {
-                result.add("- sshd jail 未加载。");
-            }
-            if (!scanRuntime.loaded()) {
-                result.add("- 规则2未加载，未真正生效。");
-            }
-            if (!activeReport.ok()) {
-                result.add("- 临时 ban / UFW deny 落地 / 清理复查 未全部通过。");
-            }
-            result.add("请查看下方 fail2ban-client status 输出和 /etc/fail2ban/jail.local 配置。");
-            result.add("");
-            result.addAll(buffer.lines());
-            pushResult("安装/修复配置", result);
-            return;
-        }
-        buffer.add("");
-        buffer.add(ansi::green + std::string("两条防护策略已正确运行：sshd 与 ufw-slowscan-global 已加载，规则2临时封禁已落地 UFW 并完成清理。") + ansi::plain);
-        pushResult("安装/修复配置", buffer);
+        renderBusy("安装/修复配置", "正在写入策略、重载 fail2ban 并执行实效验收...");
+        Fail2banBootstrapResult result = ensureFail2banProtectionStack(false, true);
+        pushResult("安装/修复配置", result.buffer);
     }
 
     void actionSyncF2bToUfw() {
@@ -9273,7 +9308,7 @@ private:
                    "  " + kDbIpLiteMmdbPath);
         buffer.add("");
         buffer.add("Debian/Ubuntu 安装命令:");
-        buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl mmdb-bin");
+        buffer.add(ltgRuntimeDependencyInstallCommand());
         pushResult("依赖检查", buffer);
     }
 
@@ -9328,7 +9363,7 @@ private:
             return;
         }
         renderBusy("安装常见依赖", "正在执行 apt 命令...");
-        ScreenBuffer buffer = runCommandList({"apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl mmdb-bin"});
+        ScreenBuffer buffer = runCommandList({ltgRuntimeDependencyInstallCommand()});
         Shell::clearExistsCache();
         cachedDashboardValid() = false;
         buffer.add("");
@@ -9414,7 +9449,7 @@ inline ScreenBuffer dependencyDoctorBuffer() {
     buffer.add("DB-IP Lite MMDB: " + std::string(fileExists(kDbIpLiteMmdbPath) ? "已安装" : "未安装") + "  " + kDbIpLiteMmdbPath);
     buffer.add("");
     buffer.add("Debian/Ubuntu 安装命令:");
-    buffer.add("apt update && apt install -y fail2ban ufw nftables iproute2 conntrack gawk grep libsqlite3-dev curl mmdb-bin");
+    buffer.add(ltgRuntimeDependencyInstallCommand());
     return buffer;
 }
 
@@ -9535,27 +9570,40 @@ inline bool shouldUseNonInteractiveSudo() {
 #endif
 }
 
-inline std::string sudoUpdateCommand(const std::string &selfPath, bool nonInteractive) {
-    return std::string("sudo ") + (nonInteractive ? "-n " : "") + shellQuote(selfPath) + " update";
+inline std::string sudoSubcommand(const std::string &selfPath,
+                                  const std::string &subcommand,
+                                  bool nonInteractive,
+                                  const std::vector<std::string> &args = {}) {
+    std::string command = std::string("sudo ") + (nonInteractive ? "-n " : "") + shellQuote(selfPath) + " " + subcommand;
+    for (const auto &arg : args) {
+        command += " " + shellQuote(arg);
+    }
+    return command;
 }
 
-inline int rerunUpdateWithSudo(const char *argv0) {
+inline int rerunSubcommandWithSudo(const char *argv0,
+                                   const std::string &subcommand,
+                                   const std::string &actionName,
+                                   const std::vector<std::string> &args = {}) {
 #ifdef _WIN32
     (void)argv0;
+    (void)subcommand;
+    (void)actionName;
+    (void)args;
     return 1;
 #else
     if (!Shell::exists("sudo")) {
-        std::cerr << colorIf("更新需要 root 权限，但未找到 sudo。请切换 root 后运行: ltg update", ansi::yellow, STDERR_FILENO) << "\n";
+        std::cerr << colorIf(actionName + "需要 root 权限，但未找到 sudo。请切换 root 后运行: ltg " + subcommand, ansi::yellow, STDERR_FILENO) << "\n";
         return 77;
     }
     const std::string self = currentExecutablePath(argv0);
     const bool nonInteractive = shouldUseNonInteractiveSudo();
-    const std::string command = sudoUpdateCommand(self, nonInteractive);
-    std::cerr << colorIf("更新需要 root 权限，正在重新执行: " + command, ansi::yellow, STDERR_FILENO) << "\n";
+    const std::string command = sudoSubcommand(self, subcommand, nonInteractive, args);
+    std::cerr << colorIf(actionName + "需要 root 权限，正在重新执行: " + command, ansi::yellow, STDERR_FILENO) << "\n";
     const int raw = std::system(command.c_str());
     const int code = normalizedExitCode(raw);
     if (nonInteractive && code != 0) {
-        std::cerr << colorIf("sudo 非交互提权失败。请确认当前用户有 NOPASSWD 权限，或在交互终端运行 ltg update。", ansi::yellow, STDERR_FILENO) << "\n";
+        std::cerr << colorIf("sudo 非交互提权失败。请确认当前用户有 NOPASSWD 权限，或在交互终端运行 ltg " + subcommand + "。", ansi::yellow, STDERR_FILENO) << "\n";
     }
     return code;
 #endif
@@ -9567,7 +9615,7 @@ inline int updateFromRelease(const char *argv0) {
     return 1;
 #else
     if (!isRoot()) {
-        return rerunUpdateWithSudo(argv0);
+        return rerunSubcommandWithSudo(argv0, "update", "更新");
     }
     const std::string target = currentExecutablePath(argv0);
     const std::string temp = "/tmp/ltg-update-" + nowStamp();
@@ -9696,6 +9744,50 @@ inline int updateFromRelease(const char *argv0) {
     buffer.add("更新完成，目标文件版本已复查。");
     printScreenBuffer(buffer);
     return 0;
+#endif
+}
+
+inline int bootstrapFirstInstall(const char *argv0, bool installRuntimeDeps) {
+#ifdef _WIN32
+    std::cerr << "ltg bootstrap 只支持 Ubuntu/Linux。\n";
+    return 1;
+#else
+    if (!isRoot()) {
+        std::vector<std::string> args;
+        if (!installRuntimeDeps) {
+            args.push_back("--skip-deps");
+        }
+        return rerunSubcommandWithSudo(argv0, "bootstrap", "首次安装引导", args);
+    }
+    ScreenBuffer buffer;
+    addSection(buffer, "首次安装引导");
+    bool ok = true;
+    if (installRuntimeDeps) {
+        buffer.add("正在安装 LTG 运行依赖。源码构建依赖请使用 make bootstrap。");
+        CommandResult deps = runDisplayedCommandToBuffer(buffer, ltgRuntimeDependencyInstallCommand());
+        Shell::clearExistsCache();
+        ok = ok && deps.ok();
+        if (!deps.ok()) {
+            buffer.add(ansi::yellow + std::string("运行依赖安装失败，已停止 fail2ban 防护栈配置。") + ansi::plain);
+            printScreenBuffer(buffer);
+            return 1;
+        }
+    } else {
+        buffer.add("已跳过运行依赖安装，继续配置 fail2ban 防护栈。");
+        buffer.add("");
+    }
+
+    Fail2banBootstrapResult f2b = ensureFail2banProtectionStack(true, true);
+    buffer.addAll(f2b.buffer.lines());
+    ok = ok && f2b.ok;
+    buffer.add("");
+    if (ok) {
+        buffer.add(ansi::green + std::string("首次安装引导完成：依赖已就绪，fail2ban 两条默认防护策略已写入、加载并通过实效验收。") + ansi::plain);
+    } else {
+        buffer.add(ansi::yellow + std::string("首次安装引导未完全成功。请查看上方失败层级后重试 ltg bootstrap。") + ansi::plain);
+    }
+    printScreenBuffer(buffer);
+    return ok ? 0 : 1;
 #endif
 }
 
@@ -9928,7 +10020,7 @@ inline int selfTest() {
     missingSystemd.missing = {"systemctl"};
     check("fail2ban 缺失时提示自动安装", shouldOfferFail2banStackAptInstall(missingFail2ban) &&
                                               !shouldOfferFail2banStackAptInstall(missingSystemd) &&
-                                              fail2banStackInstallCommand().find("apt install -y fail2ban ufw") != std::string::npos);
+                                              fail2banStackInstallCommand().find("apt-get install -y fail2ban ufw") != std::string::npos);
     check("两条默认 jail 必须同时加载", parsedLoaded.loaded() && !parsedUnknown.loaded());
     F2bEffectProbe probeTest;
     probeTest.serviceOk = true;
@@ -9976,8 +10068,12 @@ inline int selfTest() {
                                   commandWithTimeout("ltg --version", 0) == "ltg --version");
     check("update 下载命令有边界", curlDownloadCommand("https://example.invalid/a", "/tmp/a").find("--max-time 180") != std::string::npos &&
                                   wgetDownloadCommand("https://example.invalid/a", "/tmp/a").find("--timeout=20") != std::string::npos);
-    check("update sudo 命令合并", sudoUpdateCommand("/usr/local/bin/ltg", true) == "sudo -n '/usr/local/bin/ltg' update" &&
-                                  sudoUpdateCommand("/usr/local/bin/ltg", false) == "sudo '/usr/local/bin/ltg' update");
+    check("update sudo 命令合并", sudoSubcommand("/usr/local/bin/ltg", "update", true) == "sudo -n '/usr/local/bin/ltg' update" &&
+                                  sudoSubcommand("/usr/local/bin/ltg", "update", false) == "sudo '/usr/local/bin/ltg' update");
+    check("bootstrap sudo 命令合并", sudoSubcommand("/usr/local/bin/ltg", "bootstrap", true, {"--skip-deps"}) ==
+                                       "sudo -n '/usr/local/bin/ltg' bootstrap '--skip-deps'" &&
+                                       ltgRuntimeDependencyInstallCommand().find("fail2ban ufw nftables") != std::string::npos &&
+                                       fail2banStackInstallCommand().find("fail2ban ufw") != std::string::npos);
     ReliabilityReport reliabilityReport;
     addReliabilityResult(reliabilityReport, "测试链路", "通过项", ReliabilityStatus::Pass, "ok");
     check("可靠性结果聚合", reliabilityReport.ok());
@@ -10114,6 +10210,7 @@ inline void usage(const char *argv0) {
     std::cout << "  --f2b-audit       防护链路双日志核验\n";
     std::cout << "  --ufw-analyze P   分析 UFW 日志，P=24h|7d|28d\n";
     std::cout << "  --export-report   导出诊断报告\n";
+    std::cout << "  bootstrap         首次安装引导：安装运行依赖并配置/验证 fail2ban 防护栈\n";
     std::cout << "  update, --update  从 GitHub Release 下载最新版并覆盖当前 ltg\n";
     std::cout << "  --self-test       运行非 root 纯逻辑自测\n";
     std::cout << "  --version         显示版本\n";
@@ -10130,7 +10227,8 @@ inline void usage(const char *argv0) {
     std::cout << "  make\n";
     std::cout << "  # 源码按 include/ 和 src/ 组织，makefile 会自动发现 src/*.cpp。\n";
     std::cout << "\n安装/卸载:\n";
-    std::cout << "  make bootstrap       # 首次安装: 依赖 + 编译 + 安装\n";
+    std::cout << "  ltg bootstrap        # Release 二进制首装后: 依赖 + fail2ban 防护栈验收\n";
+    std::cout << "  make bootstrap       # 源码首装: 依赖 + 编译 + 安装 + 防护栈验收\n";
     std::cout << "  make update          # 后续更新: git pull + 编译 + 安装\n";
     std::cout << "  sudo make install\n";
     std::cout << "  sudo make uninstall\n";
@@ -10163,6 +10261,10 @@ int appMain(int argc, char **argv) {
         }
         if (arg == "update" || arg == "--update") {
             return updateFromRelease(argv[0]);
+        }
+        if (arg == "bootstrap" || arg == "--bootstrap") {
+            const bool skipDeps = argc > 2 && std::string(argv[2]) == "--skip-deps";
+            return bootstrapFirstInstall(argv[0], !skipDeps);
         }
         if (arg == "--reliability-check") {
             const bool active = argc > 2 && std::string(argv[2]) == "--active-probes";

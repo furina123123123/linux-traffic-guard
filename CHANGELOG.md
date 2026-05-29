@@ -9,6 +9,9 @@
 
 ### Fixed
 
+- Added `ltg bootstrap` as a first-install path that installs runtime dependencies, configures both built-in fail2ban policies, starts/reloads fail2ban, and runs the active UFW landing verification.
+- Changed `make bootstrap` to run the same fail2ban protection bootstrap after installing the binary, so source and Release installs do not leave first-time users with an unconfigured protection stack.
+- Kept UFW enablement out of silent bootstrap to avoid SSH lockout; bootstrap reports the ineffective layer if UFW is inactive.
 - Bounded `ltg update` download, checksum, install, and version-probe steps with explicit timeouts so remote non-interactive runners fail cleanly instead of waiting indefinitely.
 - Made `ltg update` a unified root-escalating entry point: it re-runs through interactive `sudo` on terminals and `sudo -n` in remote/non-interactive automation.
 

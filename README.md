@@ -41,9 +41,12 @@ Most users should install the prebuilt Linux x86_64 binary from the latest GitHu
 curl -fL https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64 -o ltg
 chmod +x ltg
 sudo install -Dm755 ltg /usr/local/bin/ltg
+ltg bootstrap
 ```
 
-Open the TUI:
+`ltg bootstrap` is the first-install path. It auto-escalates with `sudo`, installs runtime dependencies, writes the two built-in fail2ban policies (`sshd` and `ufw-slowscan-global`), enables/reloads fail2ban, and runs a temporary ban probe to verify that rule 2 lands in UFW and is cleaned up. It does not silently enable UFW because that can lock out SSH; if UFW is inactive, the bootstrap result will say which layer is not fully effective.
+
+Open the TUI after bootstrap completes:
 
 ```bash
 sudo ltg
@@ -282,7 +285,7 @@ Bootstrap from a fresh Ubuntu/Debian checkout:
 make bootstrap
 ```
 
-`make bootstrap` runs `apt-get update`, installs build/runtime dependencies, builds `ltg`, and installs it under `PREFIX` (`/usr/local` by default). Non-root users will be prompted through `sudo`.
+`make bootstrap` runs `apt-get update`, installs build/runtime dependencies, builds `ltg`, installs it under `PREFIX` (`/usr/local` by default), and then runs the same fail2ban protection bootstrap. Non-root users will be prompted through `sudo`.
 
 Update a source checkout:
 

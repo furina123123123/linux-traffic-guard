@@ -59,6 +59,11 @@ ifeq ($(OS),Windows_NT)
 	@echo "bootstrap 目标只支持 Ubuntu/Debian。"
 else
 	$(SUDO) install -Dm755 $(BINARY) $(DESTDIR)$(BINDIR)/$(TARGET)
+	@if [ -z "$(DESTDIR)" ]; then \
+		$(SUDO) $(BINDIR)/$(TARGET) bootstrap --skip-deps; \
+	else \
+		echo "DESTDIR is set; skip live fail2ban bootstrap"; \
+	fi
 endif
 
 update:
@@ -119,7 +124,7 @@ help:
 	@echo "Linux 流量守卫 makefile"
 	@echo "  make          编译 ltg"
 	@echo "  make deps     安装 Ubuntu/Debian 依赖"
-	@echo "  make bootstrap 首次依赖安装、编译并安装 ltg"
+	@echo "  make bootstrap 首次依赖安装、编译、安装 ltg 并配置 fail2ban 防护栈"
 	@echo "  make update   git pull 后重新编译并安装 ltg"
 	@echo "  make run      编译并进入交互界面"
 	@echo "  make status   编译并打印仪表盘"
