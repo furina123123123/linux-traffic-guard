@@ -44,13 +44,25 @@ sudo install -Dm755 ltg /usr/local/bin/ltg
 ltg bootstrap
 ```
 
-`ltg bootstrap` 是首次安装入口。它会自动通过 `sudo` 提权、安装运行依赖、写入两条内置 fail2ban 防护策略（`sshd` 和 `ufw-slowscan-global`）、启用/reload fail2ban，并执行一次临时封禁探测，验证规则2能落地到 UFW 且能清理干净。它不会静默启用 UFW，因为这可能把 SSH 锁在外面；如果 UFW 处于 inactive，bootstrap 结果会明确告诉你哪一层还没有完全生效。
+`ltg bootstrap` 是首次安装入口。它会自动通过 `sudo` 提权、检查必需运行工具、只安装缺失的运行依赖、写入两条内置 fail2ban 防护策略（`sshd` 和 `ufw-slowscan-global`）、启用/reload fail2ban，执行一次临时封禁探测来验证规则2能落地到 UFW 且能清理干净，并自动为检测到的外部监听端口启用流量统计。它不会静默启用 UFW，因为这可能把 SSH 锁在外面；如果 UFW 处于 inactive，bootstrap 结果会明确告诉你哪一层还没有完全生效。
 
 bootstrap 完成后打开 TUI：
 
 ```bash
-sudo ltg
+ltg
 ```
+
+在普通交互终端里，`ltg` 发现需要 root 时会自动用 `sudo` 重新执行；你也可以继续手动运行 `sudo ltg`。普通确认页支持单键决策（`y`、`n`、`q`、`Esc`，或 `Enter` 选择默认值），结果页可用 `Enter`、`Backspace`、`q` 或 `Esc` 返回，长预览页仍保留 vim 风格滚动，远程会话不需要多打一轮回车。
+
+如果还没执行 `ltg bootstrap` 就直接打开 TUI，LTG 现在会自动检测首次/未就绪环境，并显示一个简洁的“一键初始化/修复”页面。该页面会补齐缺失运行工具、写入两条默认 fail2ban 防护策略、启动/reload fail2ban，用临时封禁验证 UFW 落地链路，并自动为检测到的外部监听端口启用流量统计。已经就绪的系统会跳过这个页面，直接进入仪表盘。
+
+如果防护策略已经就绪，但流量统计还没启用且 LTG 能检测到外部监听端口，也会显示这个一键初始化页；这种情况下会跳过重复的 fail2ban 临时封禁探测，只修复缺失的部分。
+
+后续也可以在 TUI 的“诊断 -> 修复运行环境”里走同一条修复路径。它只有在核心工具缺失时才会跑 apt；依赖已经就绪时会直接验证并修复 fail2ban 防护栈和流量统计链路。依赖检查页发现核心工具缺失或有可自动启用的统计端口时，也会直接给出修复入口。
+
+常用动作也会在执行前检查自己的前置依赖。例如流量统计和 UFW 威胁分析会先提示自动安装缺失运行工具，而不是等到底层命令失败后才让用户排查。UFW 威胁分析发现国家/地区列会为空时，也会主动提示安装可选的 DB-IP Lite 国家库。IP 处置、双日志核验、补齐 UFW deny、当前封禁详情、实效自检等 fail2ban 动作发现默认 jail 缺失或未加载时，也会在当前动作里提示自动修复。fail2ban 配置编辑写入成功后也会自动执行 `fail2ban-client -t` 和 `fail2ban-client reload`，不再要求用户记得额外重启服务。
+
+流量统计入口也会按“修复优先”的方式处理：首次初始化会自动发现外部监听端口并启用采样；如果已经有统计端口，在端口输入框直接按 Enter 会复用现有端口，刷新 nftables 规则和 systemd timer，并立即记录一次采样，不需要用户重新输入同一组端口。
 
 以后更新推荐使用内置更新命令：
 
@@ -124,6 +136,7 @@ ssh -p 新端口 root@你的服务器IP
 LTG 的流量统计目标是“端口级 vnStat + IP 明细”：
 
 - 默认追加统计端口，不重建整张统计表。
+- 自动发现外部监听服务端口，并作为首次统计的推荐值预填。
 - 追加新端口时保留已有历史日/月/年数据。
 - 通过 systemd timer 每 5 分钟采样 nftables counter。
 - 日/月/年支持滚动窗口和绝对时间两种查询。
@@ -218,7 +231,7 @@ sudo ltg --reliability-check
 ltg update
 ```
 
-除 `--help`、`--version` 和 `--self-test` 外，工具必须以 root 权限运行。交互模式会进入 alternate screen，并在退出或收到信号时恢复终端状态。`ltg update` 可以不加 sudo 前缀运行，工具会根据终端环境自动选择交互 sudo 或非交互 `sudo -n`。
+除 `--help`、`--version` 和 `--self-test` 外，工具需要 root 权限。交互 TUI 和 `ltg update` 都可以不加 sudo 前缀运行，工具会根据终端环境自动选择交互 sudo 或非交互 `sudo -n`。交互模式会进入 alternate screen，并在退出或收到信号时恢复终端状态。
 
 ## 支持环境
 
@@ -239,6 +252,8 @@ sudo apt install -y g++ make libsqlite3-dev fail2ban ufw nftables iproute2 connt
 ```bash
 make deps
 ```
+
+`make deps` 会使用和 `make bootstrap` 相同的“只安装缺失包”检查；已经就绪的系统会跳过 apt，不会重复安装。
 
 运行时会调用系统工具：`nft`、`ufw`、`fail2ban-client`、`journalctl`、`ss`、`conntrack`、`systemctl`，以及可选的 `mmdblookup`。
 
@@ -283,7 +298,7 @@ sudo make install
 make bootstrap
 ```
 
-`make bootstrap` 会执行 `apt-get update`、安装构建和运行依赖、编译 `ltg`，安装到 `PREFIX` 指定的位置，然后执行同一套 fail2ban 防护栈 bootstrap。默认 `PREFIX=/usr/local`；非 root 用户会自动使用 `sudo`。
+`make bootstrap` 会检查构建和运行依赖、只安装缺失的软件包、编译 `ltg`，安装到 `PREFIX` 指定的位置，然后执行同一套 fail2ban 防护栈 bootstrap。默认 `PREFIX=/usr/local`；非 root 用户会自动使用 `sudo`。
 
 源码 checkout 更新：
 
@@ -292,7 +307,7 @@ cd linux-traffic-guard
 make update
 ```
 
-`make update` 会执行 `git pull --ff-only`，然后重新编译并覆盖安装 `ltg`。普通 `make install` 不会隐式联网或修改系统包。
+`make update` 会执行 `git pull --ff-only`，检查是否有新增缺失依赖，重新编译并覆盖安装 `ltg`，然后用跳过依赖安装的模式执行同一套已安装防护栈 bootstrap。普通 `make install` 不会隐式联网或修改系统包。
 
 卸载：
 

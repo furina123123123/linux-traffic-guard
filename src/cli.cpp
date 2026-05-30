@@ -834,6 +834,41 @@ inline std::string humanPortList(const std::set<int> &ports, std::size_t limit =
     return out.str();
 }
 
+struct TrafficPortInputResolution {
+    bool ok = false;
+    bool repairExisting = false;
+    std::set<int> ports;
+    std::string error;
+};
+
+inline TrafficPortInputResolution resolveTrafficPortInput(const std::string &input,
+                                                          const std::set<int> &knownPorts,
+                                                          const std::set<int> &recommendedPorts) {
+    TrafficPortInputResolution result;
+    const std::string value = removeSpaces(input);
+    if (value.empty()) {
+        if (!knownPorts.empty()) {
+            result.ok = true;
+            result.repairExisting = true;
+            result.ports = knownPorts;
+            return result;
+        }
+        if (!recommendedPorts.empty()) {
+            result.ok = true;
+            result.ports = recommendedPorts;
+            return result;
+        }
+        result.error = "未发现可自动启用的监听端口，也没有输入端口。";
+        return result;
+    }
+    if (!isSafePortList(value) || !expandPortList(value, result.ports)) {
+        result.error = "端口列表不合法。";
+        return result;
+    }
+    result.ok = true;
+    return result;
+}
+
 inline std::set<int> setDifference(const std::set<int> &left, const std::set<int> &right) {
     std::set<int> out;
     std::set_difference(left.begin(), left.end(), right.begin(), right.end(), std::inserter(out, out.begin()));
@@ -843,6 +878,12 @@ inline std::set<int> setDifference(const std::set<int> &left, const std::set<int
 inline std::set<int> setIntersection(const std::set<int> &left, const std::set<int> &right) {
     std::set<int> out;
     std::set_intersection(left.begin(), left.end(), right.begin(), right.end(), std::inserter(out, out.begin()));
+    return out;
+}
+
+inline std::set<int> setUnion(const std::set<int> &left, const std::set<int> &right) {
+    std::set<int> out;
+    std::set_union(left.begin(), left.end(), right.begin(), right.end(), std::inserter(out, out.begin()));
     return out;
 }
 
@@ -1896,6 +1937,12 @@ inline std::string fail2banJailStatusLine(const std::string &jail) {
     return info.label + ": " + firstLine;
 }
 
+inline bool defaultFail2banRuntimeReady(const F2bJailRuntimeInfo &ssh,
+                                        const F2bJailRuntimeInfo &scan,
+                                        bool requireScanRule) {
+    return ssh.loaded() && (!requireScanRule || scan.loaded());
+}
+
 inline std::string recentBanLineForJail(const std::string &jail) {
     const std::string cmd =
         "(grep -h '\\[" + jail + "\\].* Ban ' /var/log/fail2ban.log* 2>/dev/null || "
@@ -2103,6 +2150,54 @@ inline std::map<std::string, std::string> listeningProcesses() {
         out[portMatch[1].str()] = proc;
     }
     return out;
+}
+
+inline bool ssLocalAddressIsLoopback(std::string address) {
+    if (!address.empty() && address.front() == '[' && address.back() == ']') {
+        address = address.substr(1, address.size() - 2);
+    }
+    return address == "localhost" || address == "::1" || startsWith(address, "127.") ||
+           startsWith(address, "[::1]") || address.find("%lo") != std::string::npos;
+}
+
+inline bool extractListeningPortFromSsLocalField(const std::string &localField, int &port) {
+    const std::size_t colon = localField.rfind(':');
+    if (colon == std::string::npos || colon + 1 >= localField.size()) {
+        return false;
+    }
+    const std::string text = localField.substr(colon + 1);
+    if (!isSafeSinglePort(text)) {
+        return false;
+    }
+    const std::string address = localField.substr(0, colon);
+    if (ssLocalAddressIsLoopback(address)) {
+        return false;
+    }
+    port = std::stoi(text);
+    return true;
+}
+
+inline std::set<int> recommendedTrafficPortsFromSsOutput(const std::string &output) {
+    std::set<int> ports;
+    const std::set<int> noisyPorts = {68, 123, 323, 5353};
+    for (const auto &line : splitLines(output)) {
+        const auto fields = splitWords(line);
+        if (fields.size() < 5) {
+            continue;
+        }
+        int port = 0;
+        if (extractListeningPortFromSsLocalField(fields[4], port) && noisyPorts.count(port) == 0) {
+            ports.insert(port);
+        }
+    }
+    return ports;
+}
+
+inline std::set<int> detectRecommendedTrafficPorts() {
+    if (!Shell::exists("ss")) {
+        return {};
+    }
+    return recommendedTrafficPortsFromSsOutput(Shell::capture("ss -H -lntup 2>/dev/null || true").output);
 }
 
 inline std::string serviceNameForPort(const std::string &port) {
@@ -2521,6 +2616,11 @@ inline std::mutex &ipGeoLabelCacheMutex() {
 inline void clearIpGeoLabelCache() {
     std::lock_guard<std::mutex> lock(ipGeoLabelCacheMutex());
     ipGeoLabelCache().clear();
+}
+
+inline bool &skipGeoDatabasePromptThisSession() {
+    static bool skip = false;
+    return skip;
 }
 
 inline std::string ipGeoLabel(const std::string &rawIp) {
@@ -3915,6 +4015,36 @@ inline bool isScrollInput(const InputEvent &event) {
     return event.kind == InputKind::Character &&
            (event.ch == 'j' || event.ch == 'k' || event.ch == 'g' || event.ch == 'G' ||
             event.ch == 2 || event.ch == 4 || event.ch == 6 || event.ch == 21);
+}
+
+inline int confirmKeyDecision(const InputEvent &event, bool defaultYes) {
+    if (event.kind == InputKind::Escape) {
+        return 0;
+    }
+    if (event.kind != InputKind::Character) {
+        return -1;
+    }
+    if (event.ch == '\n') {
+        return defaultYes ? 1 : 0;
+    }
+    if (event.ch == 'y' || event.ch == 'Y') {
+        return 1;
+    }
+    if (event.ch == 'n' || event.ch == 'N' || event.ch == 'q' || event.ch == 'Q') {
+        return 0;
+    }
+    return -1;
+}
+
+inline bool isResultReturnInput(const InputEvent &event) {
+    if (event.kind == InputKind::Escape) {
+        return true;
+    }
+    if (event.kind != InputKind::Character) {
+        return false;
+    }
+    return event.ch == '\n' || event.ch == 'q' || event.ch == 'Q' ||
+           event.ch == 8 || event.ch == 127;
 }
 
 inline std::string cursorMoveSequence(int row, int col) {
@@ -5616,7 +5746,9 @@ inline F2bDependencyReadiness fail2banStackDependencyReadiness() {
 }
 
 inline std::string fail2banStackInstallCommand() {
-    return "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban ufw";
+    return commandWithTimeout(
+        "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban ufw",
+        300);
 }
 
 inline bool shouldOfferFail2banStackAptInstall(const F2bDependencyReadiness &readiness) {
@@ -5625,9 +5757,106 @@ inline bool shouldOfferFail2banStackAptInstall(const F2bDependencyReadiness &rea
 }
 
 inline std::string ltgRuntimeDependencyInstallCommand() {
-    return "DEBIAN_FRONTEND=noninteractive apt-get update && "
-           "DEBIAN_FRONTEND=noninteractive apt-get install -y "
-           "fail2ban ufw nftables iproute2 conntrack gawk grep curl mmdb-bin libsqlite3-0";
+    return commandWithTimeout(
+        "DEBIAN_FRONTEND=noninteractive apt-get update && "
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y "
+        "fail2ban ufw nftables iproute2 conntrack gawk grep curl mmdb-bin libsqlite3-0",
+        300);
+}
+
+inline bool shouldInstallRuntimeDependencies(const std::vector<std::string> &missingCoreTools) {
+    return !missingCoreTools.empty();
+}
+
+inline std::vector<std::string> coreRuntimeTools() {
+    return {"nft", "ufw", "fail2ban-client", "systemctl", "journalctl", "ss", "conntrack", "awk", "grep", "curl"};
+}
+
+inline std::vector<std::string> missingCoreRuntimeTools() {
+    std::vector<std::string> missing;
+    for (const auto &tool : coreRuntimeTools()) {
+        if (!Shell::exists(tool)) {
+            missing.push_back(tool);
+        }
+    }
+    return missing;
+}
+
+struct FirstRunSetupReadiness {
+    std::vector<std::string> missingTools;
+    bool sshJailLoaded = false;
+    bool scanJailLoaded = false;
+    bool geoReaderReady = false;
+    bool geoDatabaseReady = false;
+    bool trafficConfigured = false;
+    std::set<int> existingTrafficPorts;
+    std::set<int> recommendedTrafficPorts;
+
+    bool needsBootstrap() const {
+        return !missingTools.empty() || !sshJailLoaded || !scanJailLoaded ||
+               (!trafficConfigured && (!existingTrafficPorts.empty() || !recommendedTrafficPorts.empty()));
+    }
+};
+
+inline FirstRunSetupReadiness firstRunSetupReadiness() {
+    FirstRunSetupReadiness readiness;
+    readiness.missingTools = missingCoreRuntimeTools();
+    readiness.geoReaderReady = Shell::exists("mmdblookup");
+    readiness.geoDatabaseReady = fileExists(kDbIpLiteMmdbPath);
+    readiness.trafficConfigured = trafficHistoryConfiguredFast();
+    if (Shell::exists("nft")) {
+        readiness.existingTrafficPorts = detectExistingTrafficPorts();
+    }
+    if (Shell::exists("ss")) {
+        readiness.recommendedTrafficPorts = detectRecommendedTrafficPorts();
+    }
+    if (std::find(readiness.missingTools.begin(), readiness.missingTools.end(), "fail2ban-client") ==
+        readiness.missingTools.end()) {
+        readiness.sshJailLoaded = fail2banJailRuntimeStatus(kRule1Jail).loaded();
+        readiness.scanJailLoaded = fail2banJailRuntimeStatus(kRule2Jail).loaded();
+    }
+    return readiness;
+}
+
+inline bool dependencyDoctorShouldOfferRepair(const std::vector<std::string> &missingCoreTools,
+                                              bool trafficConfigured,
+                                              const std::set<int> &recommendedPorts) {
+    return !missingCoreTools.empty() || (!trafficConfigured && !recommendedPorts.empty());
+}
+
+inline ScreenBuffer firstRunSetupSummaryBuffer(const FirstRunSetupReadiness &readiness) {
+    ScreenBuffer buffer;
+    buffer.add(uiSection("自动初始化建议"));
+    if (!readiness.missingTools.empty()) {
+        buffer.add(ansi::yellow + std::string("关键依赖缺失: ") + joinWords(readiness.missingTools, ", ") + ansi::plain);
+        buffer.add("一键初始化会自动补齐缺失运行依赖，不需要用户逐个查包名。");
+    } else {
+        buffer.add(ansi::green + std::string("关键运行依赖已就绪。") + ansi::plain);
+    }
+    buffer.add(std::string("SSH 防护 jail: ") +
+               (readiness.sshJailLoaded ? Ui::badge("已加载", ansi::green) : Ui::badge("未加载", ansi::yellow)));
+    buffer.add(std::string("扫描升级 jail: ") +
+               (readiness.scanJailLoaded ? Ui::badge("已加载", ansi::green) : Ui::badge("未加载", ansi::yellow)));
+    buffer.add(std::string("流量统计: ") +
+               (readiness.trafficConfigured ? Ui::badge("已启用", ansi::green) : Ui::badge("未启用", ansi::yellow)));
+    if (!readiness.trafficConfigured) {
+        const std::set<int> autoPorts = setUnion(readiness.existingTrafficPorts, readiness.recommendedTrafficPorts);
+        if (!autoPorts.empty()) {
+            buffer.add("可自动启用统计端口: " + humanPortList(autoPorts));
+        } else {
+            buffer.add("可自动启用统计端口: 暂未发现外部监听服务");
+        }
+    }
+    buffer.add(std::string("IP 国家库: ") +
+               ((readiness.geoReaderReady && readiness.geoDatabaseReady) ? Ui::badge("可用", ansi::green)
+                                                                          : Ui::badge("可选未就绪", ansi::gray)));
+    buffer.add("");
+    buffer.add("建议动作: 选择“一键初始化/修复”。LTG 会安装缺失依赖，写入两条默认 fail2ban 策略，启动服务，验证 UFW 落地，并自动处理可发现的统计端口。");
+    buffer.add("安全边界: 不会静默启用 UFW，避免远程 SSH 被锁在服务器外。");
+    if (!readiness.trafficConfigured) {
+        buffer.add("流量统计会优先自动发现外部监听端口并启用采样；没有监听端口时再提示手动输入。");
+    }
+    return buffer;
 }
 
 inline void verifyDependencyChain(ReliabilityReport &report) {
@@ -5949,6 +6178,123 @@ inline CommandResult runDisplayedCommandToBuffer(ScreenBuffer &buffer, const std
     }
     buffer.add("");
     return result;
+}
+
+inline bool applyTrafficAccountingPortsToBuffer(ScreenBuffer &buffer,
+                                                const std::set<int> &managed,
+                                                const std::set<int> &requestedPorts,
+                                                bool repairExisting) {
+    std::set<int> finalPorts = requestedPorts;
+    finalPorts.insert(managed.begin(), managed.end());
+    if (finalPorts.empty()) {
+        buffer.add(ansi::yellow + std::string("没有可启用的统计端口。") + ansi::plain);
+        buffer.add("请先启动对外监听服务，或手动输入端口，例如 80,443。");
+        return false;
+    }
+    const std::set<int> newPorts = setDifference(requestedPorts, managed);
+    const bool updatePortSetOnly = trafficTrackedPortsSetEnabled();
+    const std::vector<std::string> commands = updatePortSetOnly
+        ? trafficPortSetUpdateCommands(finalPorts)
+        : trafficAccountingRuleCommands(finalPorts, false);
+
+    bool commandOk = true;
+    for (const auto &command : commands) {
+        const CommandResult result = runDisplayedCommandToBuffer(buffer, command);
+        if (!result.ok()) {
+            commandOk = false;
+        }
+    }
+    const TrafficAccountingVerification verification = verifyTrafficAccountingApplied(finalPorts);
+    if (!commandOk || !verification.ok) {
+        buffer.add(ansi::yellow + std::string("统计规则未能确认生效，已停止写入本地端口记录和后台 timer。") + ansi::plain);
+        buffer.add("目标端口: " + humanPortList(finalPorts));
+        buffer.add("下一步: 修复 nftables 权限/语法后，重新执行“开启/追加端口”或“一键初始化/修复”。");
+        if (!verification.ok) {
+            buffer.add("");
+            buffer.add("> 生效验证失败");
+            for (const auto &failure : verification.failures) {
+                buffer.add("- " + failure);
+            }
+            buffer.add(verification.evidence);
+        }
+        return false;
+    }
+
+    std::string storeError;
+    storeTrackedTrafficPorts(finalPorts, storeError);
+    if (!storeError.empty()) {
+        buffer.add(ansi::yellow + std::string("统计规则已生效，但本地端口记录写入失败，已停止安装后台 timer。") + ansi::plain);
+        buffer.add("影响: 可靠性自检会看到“历史记录有/实时规则有”状态不一致，后台采样不会自动启用。");
+        buffer.add("端口记录写入失败: " + storeError);
+        buffer.add("当前 nft 端口: " + humanPortList(verification.nftPorts));
+        return false;
+    }
+
+    std::string timerError;
+    const bool timerWritten = writeTrafficSnapshotTimerUnits("", timerError);
+    if (timerWritten && Shell::exists("systemctl")) {
+        buffer.add("");
+        buffer.add("> 后台采样 timer");
+        runDisplayedCommandToBuffer(buffer, "systemctl daemon-reload");
+        runDisplayedCommandToBuffer(buffer, "systemctl enable --now " + kTrafficSnapshotTimer);
+    }
+
+    buffer.add("");
+    buffer.add("> 统计端口");
+    buffer.add("原有端口: " + std::to_string(managed.size()) + " 个  " + humanPortList(managed));
+    buffer.add("本次输入: " + (repairExisting ? std::string("未输入，自动使用现有统计端口") : humanPortList(requestedPorts)));
+    buffer.add("新增端口: " + (newPorts.empty() ? std::string("无，输入端口已在统计范围内") : humanPortList(newPorts)));
+    buffer.add("当前端口: " + std::to_string(finalPorts.size()) + " 个  " + humanPortList(finalPorts));
+    if (updatePortSetOnly) {
+        buffer.add("已只更新统计端口集合，原有端口计数和历史数据已保留。");
+    } else {
+        buffer.add("已使用端口集合管理统计范围；保留实时计数和历史数据。之后追加端口只更新端口集合。");
+    }
+    buffer.add("生效验证: " + verification.evidence);
+
+    const TrafficSnapshotResult snapshotResult = recordTrafficSnapshot();
+    buffer.add("");
+    buffer.add("> 历史采样基线");
+    buffer.add(snapshotResult.ok ? ansi::green + std::string("已记录一次基线采样。") + ansi::plain
+                                 : ansi::yellow + std::string("基线采样未完成: ") + snapshotResult.message + ansi::plain);
+    buffer.add("说明: 第一轮采样用于建立基线，下一轮采样后日/月/年视图开始出现增量。");
+    if (!timerWritten) {
+        buffer.add(ansi::yellow + std::string("后台采样 timer 未安装: ") + timerError + ansi::plain);
+    } else {
+        buffer.add("后台采样: " + kTrafficSnapshotTimer + " 每 5 分钟记录一次历史增量。");
+    }
+    return true;
+}
+
+inline bool appendAutomaticTrafficSetupToBuffer(ScreenBuffer &buffer) {
+    buffer.add("");
+    buffer.add(uiSection("流量统计"));
+    const std::vector<std::string> required = {"nft", "ss", "systemctl"};
+    std::vector<std::string> missing;
+    for (const auto &tool : required) {
+        if (!Shell::exists(tool)) {
+            missing.push_back(tool);
+        }
+    }
+    if (!missing.empty()) {
+        buffer.add(ansi::yellow + std::string("跳过自动流量统计，缺失工具: ") + joinWords(missing, ", ") + ansi::plain);
+        buffer.add("运行环境修复会先补齐这些工具；补齐后可再次执行一键初始化。");
+        return false;
+    }
+    const std::set<int> knownPorts = detectExistingTrafficPorts();
+    const std::set<int> recommendedPorts = detectRecommendedTrafficPorts();
+    std::set<int> requestedPorts = knownPorts;
+    requestedPorts.insert(recommendedPorts.begin(), recommendedPorts.end());
+    if (requestedPorts.empty()) {
+        buffer.add(ansi::yellow + std::string("未发现对外监听服务端口，暂不启用流量统计。") + ansi::plain);
+        buffer.add("后续启动 Web/SSH/应用服务后，再执行“一键初始化/修复”或“流量统计 -> 开启/追加端口”。");
+        return false;
+    }
+    buffer.add("自动发现监听端口: " + humanPortList(recommendedPorts));
+    buffer.add("当前统计端口: " + std::to_string(knownPorts.size()) + " 个  " + humanPortList(knownPorts));
+    buffer.add("将自动启用/修复统计端口: " + humanPortList(requestedPorts));
+    const bool repairExisting = requestedPorts == knownPorts;
+    return applyTrafficAccountingPortsToBuffer(buffer, knownPorts, requestedPorts, repairExisting);
 }
 
 inline Fail2banBootstrapResult ensureFail2banProtectionStack(bool installMissingDeps, bool activeProbe) {
@@ -6656,7 +7002,12 @@ public:
     void run() {
         pages_.clear();
         pushMainMenu();
-        pushDashboard();
+        const FirstRunSetupReadiness readiness = firstRunSetupReadiness();
+        if (readiness.needsBootstrap()) {
+            pushSetupAssistant(readiness);
+        } else {
+            pushDashboard();
+        }
         bool dirty = true;
         while (!exit_ && !pages_.empty()) {
             Page &page = pages_.back();
@@ -6707,6 +7058,7 @@ private:
         PageKind kind = PageKind::Menu;
         std::string title;
         std::string subtitle;
+        std::vector<std::string> introLines;
         std::vector<ActionItem> items;
         std::vector<std::string> lines;
         int selected = 0;
@@ -6857,6 +7209,10 @@ private:
         }
     }
 
+    static int firstMenuItemLine(const Page &page) {
+        return page.introLines.empty() ? 6 : 7 + static_cast<int>(page.introLines.size());
+    }
+
     void pushMainMenu() {
         Page page;
         page.kind = PageKind::Menu;
@@ -6869,6 +7225,20 @@ private:
             {"3", "安全中心", "威胁分析、fail2ban、UFW 和处置核验", false, [this] { pushSecurityMenu(); }},
             {"4", "下钻检查", "较慢，按端口/连接/底层规则排障", false, [this] { pushInspectMenu(); }},
             {"5", "诊断", "较慢，依赖、日志、报告和导出", false, [this] { pushDiagnoseMenu(); }},
+        };
+        pages_.push_back(std::move(page));
+    }
+
+    void pushSetupAssistant(const FirstRunSetupReadiness &readiness) {
+        Page page;
+        page.kind = PageKind::Menu;
+        page.title = kName + " v" + kVersion;
+        page.subtitle = "检测到首次/未就绪环境。建议先一键初始化，后续日常使用会直接进入仪表盘。";
+        page.introLines = firstRunSetupSummaryBuffer(readiness).lines();
+        page.items = {
+            {"1", "一键初始化/修复", "自动安装缺失依赖、配置并验收两条 fail2ban 防护策略", true, [this] { actionRunSetupAssistant(); }},
+            {"2", "先看仪表盘", "跳过初始化，只查看已有流量和缓存摘要", false, [this] { pushDashboard(); }},
+            {"3", "依赖检查/修复", "发现缺失后可直接补齐", false, [this] { actionDependencyDoctor(); }},
         };
         pages_.push_back(std::move(page));
     }
@@ -7034,11 +7404,11 @@ private:
         pushMenu("服务诊断", "只放底层状态和排障动作，日常操作不用绕到这里",
                  {
                      {"1", "服务控制", "fail2ban 与 UFW 服务动作", true, [this] { actionServiceControl(); }},
-                     {"2", "依赖检查", "检查工具是否可用", false, [this] { actionDependencyDoctor(); }},
+                     {"2", "依赖检查/修复", "发现缺失后可直接补齐", false, [this] { actionDependencyDoctor(); }},
                      {"3", "日志摘要", "fail2ban 与 UFW 原始日志", false, [this] { actionLogSummary(); }},
                      {"4", "导出报告", "写入 /tmp 诊断报告", false, [this] { actionExportReport(); }},
                      {"5", "导出防护诊断", "导出 fail2ban/UFW 配置与日志", false, [this] { actionExportF2bDiagnostic(); }},
-                     {"6", "安装依赖", "Debian/Ubuntu apt 命令", true, [this] { actionInstallDependencies(); }},
+                     {"6", "修复运行环境", "自动补齐依赖、防护和统计", true, [this] { actionInstallDependencies(); }},
                  });
     }
 
@@ -7054,10 +7424,10 @@ private:
     void pushDiagnoseMenu() {
         pushMenu("诊断", "底层依赖、原始日志、报告导出",
                  {
-                     {"1", "依赖检查", "检查工具是否可用", false, [this] { actionDependencyDoctor(); }},
+                     {"1", "依赖检查/修复", "发现缺失后可直接补齐", false, [this] { actionDependencyDoctor(); }},
                      {"2", "日志摘要", "fail2ban 与 UFW 日志", false, [this] { actionLogSummary(); }},
                      {"3", "导出报告", "写入 /tmp 报告", false, [this] { actionExportReport(); }},
-                     {"4", "安装依赖", "Debian/Ubuntu apt 命令", true, [this] { actionInstallDependencies(); }},
+                     {"4", "修复运行环境", "自动补齐依赖、防护和统计", true, [this] { actionInstallDependencies(); }},
                      {"5", "安装/更新 IP 国家库", "DB-IP Lite 免费 MMDB，用于来源国家展示", true, [this] { actionInstallGeoDatabase(); }},
                  });
     }
@@ -7102,6 +7472,10 @@ private:
         ScreenBuffer buffer;
         buffer.add("  " + ansi::cyan + page.subtitle + ansi::plain);
         buffer.add("");
+        if (!page.introLines.empty()) {
+            buffer.addAll(page.introLines);
+            buffer.add("");
+        }
         buffer.add(ansi::gray + std::string("  ↑/↓、j/k 或滚轮移动，Ctrl-f/b 翻页，Ctrl-d/u 半页。当前选中项会高亮。") + ansi::plain);
         buffer.add("");
         buffer.add(ansi::bold + ansi::cyan + std::string("  序号  操作                    说明") + ansi::plain);
@@ -7170,7 +7544,7 @@ private:
             return "j/k/↑↓ 滚动  Ctrl-f/b 翻页  Ctrl-d/u 半页  r 刷新  q 返回";
         }
         if (page.kind == PageKind::Result) {
-            return "j/k/↑↓ 滚动  Ctrl-f/b/PgUp/PgDn 翻页  Ctrl-d/u 半页  g/G 顶底  q 返回";
+            return "j/k/↑↓ 滚动  Ctrl-f/b/PgUp/PgDn 翻页  Enter/Backspace/q 返回";
         }
         return "j/k/↑↓ 选择  Ctrl-f/b 翻页  Ctrl-d/u 半页  Enter 确认  q 返回";
     }
@@ -7244,7 +7618,7 @@ private:
                 else if (event.ch == 'G') selectionKind = InputKind::End;
             }
             const bool selectedChanged = adjustSelection(selectionKind, page.selected, selectableCount);
-            ensureLineVisible(6 + page.selected, page.scrollOffset, buffer.size());
+            ensureLineVisible(firstMenuItemLine(page) + page.selected, page.scrollOffset, buffer.size());
             return selectedChanged || page.scrollOffset != beforeScroll;
         }
         if (event.kind == InputKind::PageUp || event.kind == InputKind::PageDown ||
@@ -7311,11 +7685,12 @@ private:
         if (isScrollInput(event)) {
             return adjustScrollForEvent(event, page.scrollOffset, buffer.size());
         }
-        if (event.kind == InputKind::Escape) {
+        if (page.kind == PageKind::Result && isResultReturnInput(event)) {
             popPage();
             return true;
         }
-        if (event.kind == InputKind::Character && (event.ch == 'q' || event.ch == 'Q')) {
+        if (event.kind == InputKind::Escape ||
+            (event.kind == InputKind::Character && (event.ch == 'q' || event.ch == 'Q'))) {
             popPage();
             return true;
         }
@@ -7436,48 +7811,33 @@ private:
     }
 
     bool confirmYesNo(const std::string &summary, bool defaultYes = false) {
-        const std::string defaultText = defaultYes ? "默认: 是" : "默认: 否";
-        const std::string prompt = defaultYes ? "执行? [Y/n]: " : "执行? [y/N]: ";
-        PromptAnswer answer = promptLine("确认操作",
-                                         {ansi::yellow + summary + ansi::plain,
-                                          defaultText + "。输入 y 或 n，然后按 Enter。"},
-                                         prompt);
-        if (!answer.ok) {
-            return false;
-        }
-        const std::string value = trim(answer.value);
-        if (value.empty()) {
-            return defaultYes;
-        }
-        if (value == "y" || value == "Y" || value == "yes" || value == "YES") {
-            return true;
-        }
-        if (value == "n" || value == "N" || value == "no" || value == "NO") {
-            return false;
-        }
-        return false;
+        return confirmYesNoWithBody("确认操作", {ansi::yellow + summary + ansi::plain}, defaultYes);
     }
 
     bool confirmYesNoWithBody(const std::string &title, std::vector<std::string> body, bool defaultYes = false) {
-        const std::string defaultText = defaultYes ? "默认: 是" : "默认: 否";
-        const std::string prompt = defaultYes ? "执行? [Y/n]: " : "执行? [y/N]: ";
+        int scrollOffset = 0;
         body.push_back("");
-        body.push_back(defaultText + "。输入 y 或 n，然后按 Enter。");
-        PromptAnswer answer = promptLine(title, body, prompt);
-        if (!answer.ok) {
-            return false;
+        body.push_back(defaultYes ? "按 y 或 Enter 执行，按 n/q/Esc 取消。"
+                                  : "按 y 执行，按 n/q/Esc 或 Enter 取消。");
+        const std::string footer = defaultYes ? "y/Enter 执行  n/q/Esc 取消  j/k 滚动  Ctrl-f/b 翻页"
+                                              : "y 执行  n/q/Esc/Enter 取消  j/k 滚动  Ctrl-f/b 翻页";
+        while (true) {
+            ScreenBuffer buffer;
+            buffer.addAll(body);
+            viewport_.render(title, buffer, scrollOffset, footer, false);
+            const InputEvent event = inputReader().readEvent(1000);
+            if (event.kind == InputKind::CtrlC) {
+                std::raise(SIGINT);
+            }
+            if (isScrollInput(event)) {
+                adjustScrollForEvent(event, scrollOffset, buffer.size());
+                continue;
+            }
+            const int decision = confirmKeyDecision(event, defaultYes);
+            if (decision >= 0) {
+                return decision == 1;
+            }
         }
-        const std::string value = trim(answer.value);
-        if (value.empty()) {
-            return defaultYes;
-        }
-        if (value == "y" || value == "Y" || value == "yes" || value == "YES") {
-            return true;
-        }
-        if (value == "n" || value == "N" || value == "no" || value == "NO") {
-            return false;
-        }
-        return false;
     }
 
     bool confirmRemoveTrafficPorts(const std::set<int> &existingPorts,
@@ -7520,6 +7880,31 @@ private:
         return result;
     }
 
+    bool appendFail2banAutoReload(ScreenBuffer &buffer) {
+        buffer.add("");
+        buffer.add(uiSection("自动生效"));
+        if (!Shell::exists("fail2ban-client")) {
+            buffer.add(ansi::yellow + std::string("fail2ban-client 不可用，无法自动检查和 reload。") + ansi::plain);
+            buffer.add("请先执行“一键初始化/修复”或“修复运行环境”，LTG 会自动安装依赖并写入默认防护策略。");
+            return false;
+        }
+        CommandResult check = runDisplayedCommand(buffer, "fail2ban-client -t");
+        if (!check.ok()) {
+            buffer.add(ansi::yellow + std::string("配置检查失败，已停止 reload；当前修改未进入运行态。") + ansi::plain);
+            buffer.add("请根据上方 fail2ban-client -t 输出修复配置后重试。");
+            return false;
+        }
+        CommandResult reload = runDisplayedCommand(buffer, "fail2ban-client reload");
+        if (!reload.ok()) {
+            buffer.add(ansi::yellow + std::string("fail2ban reload 失败，当前修改未确认生效。") + ansi::plain);
+            buffer.add("请查看上方输出，或执行“策略安装/修复”让 LTG 重新验收默认防护栈。");
+            return false;
+        }
+        cachedDashboardValid() = false;
+        buffer.add(ansi::green + std::string("fail2ban 已 reload，本次配置已进入运行态。") + ansi::plain);
+        return true;
+    }
+
     ScreenBuffer runCommandList(const std::vector<std::string> &commands) {
         ScreenBuffer buffer;
         bool ok = true;
@@ -7538,6 +7923,230 @@ private:
         buffer.add(ok ? ansi::green + std::string("操作完成。") + ansi::plain
                       : ansi::yellow + std::string("部分命令失败，请查看上方输出。") + ansi::plain);
         return buffer;
+    }
+
+    bool ensureToolsForAction(const std::string &title,
+                              const std::vector<std::string> &tools,
+                              const std::string &purpose) {
+        std::vector<std::string> missing;
+        for (const auto &tool : tools) {
+            if (!Shell::exists(tool)) {
+                missing.push_back(tool);
+            }
+        }
+        if (missing.empty()) {
+            return true;
+        }
+        std::vector<std::string> body = {
+            purpose,
+            "",
+            "缺失工具: " + joinWords(missing, ", "),
+            "LTG 可以自动通过 apt 补齐运行依赖，然后重新检查这些工具。",
+            "",
+            "将执行:",
+            ltgRuntimeDependencyInstallCommand(),
+        };
+        if (!confirmYesNoWithBody(title + " - 自动补齐依赖", body, false)) {
+            ScreenBuffer cancel;
+            cancel.add("操作已取消。未安装依赖。");
+            cancel.add("缺失工具: " + joinWords(missing, ", "));
+            pushResult(title, cancel);
+            return false;
+        }
+        renderBusy(title, "正在自动补齐依赖...");
+        ScreenBuffer buffer;
+        buffer.add(uiSection("自动补齐依赖"));
+        CommandResult deps = runDisplayedCommand(buffer, ltgRuntimeDependencyInstallCommand());
+        Shell::clearExistsCache();
+        std::vector<std::string> stillMissing;
+        for (const auto &tool : tools) {
+            if (!Shell::exists(tool)) {
+                stillMissing.push_back(tool);
+            }
+        }
+        if (!deps.ok() || !stillMissing.empty()) {
+            buffer.add(ansi::yellow + std::string("依赖补齐后复查仍未通过，已停止当前操作。") + ansi::plain);
+            if (!stillMissing.empty()) {
+                buffer.add("仍缺失: " + joinWords(stillMissing, ", "));
+            }
+            buffer.add("请检查 apt 输出、软件源和当前系统是否为 Ubuntu/Debian。");
+            pushResult(title, buffer);
+            return false;
+        }
+        buffer.add(ansi::green + std::string("依赖已补齐并复查通过，继续执行当前操作。") + ansi::plain);
+        cachedDashboardValid() = false;
+        return true;
+    }
+
+    bool offerGeoDatabaseForAnalysis() {
+        if (dbIpLiteDatabaseReady() || skipGeoDatabasePromptThisSession()) {
+            return true;
+        }
+        if (!ensureToolsForAction("安装/更新 IP 国家库", {"curl", "grep", "mmdblookup"},
+                                  "UFW 威胁分析可以显示国家/地区；需要 curl/grep 下载 DB-IP Lite MMDB，并需要 mmdblookup 读取。")) {
+            return false;
+        }
+        if (dbIpLiteDatabaseReady()) {
+            return true;
+        }
+        std::vector<std::string> body = {
+            "UFW 威胁分析会显示“国家/地区”列，但当前本地 DB-IP Lite MMDB 不可用。",
+            "",
+            "可以现在下载免费的 DB-IP IP to City Lite MMDB 到:",
+            kDbIpLiteMmdbPath,
+            "",
+            "说明:",
+            "- 只读取国家字段，不使用城市结果做判断。",
+            "- 国家/地区只用于展示，不参与排序、计数或 fail2ban 决策。",
+            "- 选择否会继续分析，国家/地区列显示 -，本次会话不再重复提示。",
+        };
+        if (!confirmYesNoWithBody("安装/更新 IP 国家库", body, false)) {
+            skipGeoDatabasePromptThisSession() = true;
+            return true;
+        }
+        renderBusy("安装/更新 IP 国家库", "正在下载并验证 DB-IP Lite MMDB...");
+        ScreenBuffer buffer = runCommandList({dbIpLiteDownloadCommand()});
+        Shell::clearExistsCache();
+        clearIpGeoLabelCache();
+        cachedDashboardValid() = false;
+        buffer.add("");
+        if (dbIpLiteDatabaseReady()) {
+            buffer.add(ansi::green + std::string("IP 国家库已安装，继续威胁分析时会显示国家/地区。") + ansi::plain);
+            return true;
+        }
+        buffer.add(ansi::yellow + std::string("IP 国家库仍不可用，已停止当前分析。") + ansi::plain);
+        buffer.add("可以稍后从“诊断 -> 安装/更新 IP 国家库”重试，或跳过国家/地区继续使用核心分析。");
+        pushResult("安装/更新 IP 国家库", buffer);
+        return false;
+    }
+
+    bool ensureFail2banForAction(const std::string &title,
+                                 const std::string &purpose,
+                                 bool requireScanRule = true) {
+        if (!ensureToolsForAction(title, {"fail2ban-client", "ufw", "systemctl", "journalctl"},
+                                  purpose + " 需要 fail2ban、UFW、systemd 和日志读取能力。")) {
+            return false;
+        }
+        F2bJailRuntimeInfo ssh = fail2banJailRuntimeStatus(kRule1Jail);
+        F2bJailRuntimeInfo scan = fail2banJailRuntimeStatus(kRule2Jail);
+        if (defaultFail2banRuntimeReady(ssh, scan, requireScanRule)) {
+            return true;
+        }
+        std::vector<std::string> body = {
+            purpose,
+            "",
+            "当前防护链路未就绪:",
+            "sshd: " + ssh.label,
+            std::string(kRule2Jail) + ": " + scan.label,
+            "",
+            "LTG 可以现在自动写入/修复两条默认策略，启动并 reload fail2ban，并执行临时 ban 验证 UFW 落地。",
+            "修复成功后会继续当前操作。",
+        };
+        if (!confirmYesNoWithBody(title + " - 自动修复 fail2ban", body, false)) {
+            ScreenBuffer cancel;
+            cancel.add("操作已取消。防护链路未修复。");
+            cancel.add("sshd: " + ssh.label);
+            cancel.add(std::string(kRule2Jail) + ": " + scan.label);
+            pushResult(title, cancel);
+            return false;
+        }
+        renderBusy(title, "正在自动修复 fail2ban 防护链路...");
+        Fail2banBootstrapResult result = ensureFail2banProtectionStack(true, true);
+        if (!result.ok) {
+            pushResult(title + " - fail2ban 修复失败", result.buffer);
+            return false;
+        }
+        Shell::clearExistsCache();
+        ssh = fail2banJailRuntimeStatus(kRule1Jail);
+        scan = fail2banJailRuntimeStatus(kRule2Jail);
+        if (!defaultFail2banRuntimeReady(ssh, scan, requireScanRule)) {
+            ScreenBuffer buffer;
+            buffer.add(ansi::yellow + std::string("修复命令完成，但 jail 运行态仍未通过复查。") + ansi::plain);
+            buffer.add("sshd: " + ssh.label);
+            buffer.add(std::string(kRule2Jail) + ": " + scan.label);
+            buffer.add("");
+            buffer.addAll(result.buffer.lines());
+            pushResult(title + " - fail2ban 复查失败", buffer);
+            return false;
+        }
+        cachedDashboardValid() = false;
+        return true;
+    }
+
+    void actionRunSetupAssistant() {
+        const FirstRunSetupReadiness readiness = firstRunSetupReadiness();
+        std::vector<std::string> body = firstRunSetupSummaryBuffer(readiness).lines();
+        body.push_back("");
+        body.push_back("将自动执行:");
+        body.push_back("1. 检查并安装缺失的运行依赖。");
+        body.push_back("2. 必要时写入/修复 sshd 与 ufw-slowscan-global 两条默认防护策略。");
+        body.push_back("3. 防护策略缺失时启动并 reload fail2ban，然后用临时 ban 验证 UFW 规则真实落地。");
+        body.push_back("4. 自动发现外部监听端口，启用/修复端口级流量统计和后台采样。");
+        body.push_back("5. 清理临时测试 IP。");
+        body.push_back("");
+        body.push_back("不会静默启用 UFW。");
+        if (!confirmYesNoWithBody("一键初始化/修复", body, false)) {
+            ScreenBuffer cancel;
+            cancel.add("操作已取消。未安装依赖，也未修改 fail2ban/UFW 配置。");
+            pushResult("一键初始化/修复", cancel);
+            return;
+        }
+
+        renderBusy("一键初始化/修复", "正在自动补齐依赖并验收防护链路...");
+        ScreenBuffer buffer;
+        buffer.add(uiSection("运行依赖"));
+        std::vector<std::string> missing = readiness.missingTools;
+        if (!missing.empty()) {
+            buffer.add("缺失工具: " + joinWords(missing, ", "));
+            CommandResult deps = runDisplayedCommand(buffer, ltgRuntimeDependencyInstallCommand());
+            Shell::clearExistsCache();
+            missing = missingCoreRuntimeTools();
+            if (!deps.ok() || !missing.empty()) {
+                buffer.add(ansi::yellow + std::string("运行依赖仍未完整可用，已停止后续防护配置。") + ansi::plain);
+                if (!missing.empty()) {
+                    buffer.add("仍缺失: " + joinWords(missing, ", "));
+                }
+                buffer.add("请检查 apt 输出、软件源和当前系统是否为 Ubuntu/Debian。");
+                pushResult("一键初始化/修复", buffer);
+                return;
+            }
+            buffer.add(ansi::green + std::string("运行依赖已自动补齐并复查通过。") + ansi::plain);
+        } else {
+            buffer.add(ansi::green + std::string("运行依赖已就绪，跳过 apt 安装。") + ansi::plain);
+        }
+
+        buffer.add("");
+        buffer.add(uiSection("防护策略"));
+        bool f2bOk = true;
+        const bool needsProtectionSetup = !readiness.sshJailLoaded || !readiness.scanJailLoaded ||
+                                          std::find(readiness.missingTools.begin(), readiness.missingTools.end(), "fail2ban-client") != readiness.missingTools.end();
+        if (needsProtectionSetup) {
+            Fail2banBootstrapResult f2b = ensureFail2banProtectionStack(true, true);
+            f2bOk = f2b.ok;
+            buffer.addAll(f2b.buffer.lines());
+        } else {
+            buffer.add(ansi::green + std::string("两条默认 fail2ban jail 已加载，跳过重复临时 ban 验收。") + ansi::plain);
+        }
+        const bool trafficOk = appendAutomaticTrafficSetup(buffer);
+        buffer.add("");
+        buffer.add(uiSection("后续"));
+        if (trafficOk) {
+            buffer.add("流量统计已自动启用/修复，仪表盘会读取最近31天端口历史。");
+        } else if (!trafficHistoryConfiguredFast()) {
+            buffer.add("未自动启用流量统计。启动服务后再次执行一键初始化，或进入“流量统计 -> 开启/追加端口”。");
+        } else {
+            buffer.add("流量统计历史已存在，但本次自动修复未完全通过；可进入“可靠性自检”查看具体层级。");
+        }
+        if (!dbIpLiteDatabaseReady()) {
+            buffer.add("IP 国家库是可选能力。需要国家/地区展示时，进入“诊断 -> 安装/更新 IP 国家库”。");
+        }
+        cachedDashboardValid() = false;
+        if (f2bOk) {
+            pages_.clear();
+            pushMainMenu();
+            pushDashboard();
+        }
+        pushResult("一键初始化/修复", buffer);
     }
 
     void addPortIpBreakdown(ScreenBuffer &buffer,
@@ -7700,6 +8309,10 @@ private:
     }
 
     void actionShowTrafficRanking() {
+        if (!ensureToolsForAction("实时累计明细", {"nft"},
+                                  "实时累计明细需要读取 nftables 统计规则。")) {
+            return;
+        }
         renderBusy("实时累计明细", "正在读取底层实时计数...");
         ScreenBuffer buffer;
         if (!trafficTableEnabled()) {
@@ -7722,18 +8335,49 @@ private:
         pushResult("实时累计明细", buffer);
     }
 
+    bool applyTrafficAccountingPorts(ScreenBuffer &buffer,
+                                     const std::set<int> &managed,
+                                     const std::set<int> &requestedPorts,
+                                     bool repairExisting) {
+        const bool ok = applyTrafficAccountingPortsToBuffer(buffer, managed, requestedPorts, repairExisting);
+        cachedDashboardValid() = false;
+        return ok;
+    }
+
+    bool appendAutomaticTrafficSetup(ScreenBuffer &buffer) {
+        const bool ok = appendAutomaticTrafficSetupToBuffer(buffer);
+        cachedDashboardValid() = false;
+        return ok;
+    }
+
     void actionInstallTraffic() {
+        if (!ensureToolsForAction("开启/追加统计端口", {"nft", "ss", "systemctl"},
+                                  "开启端口级流量统计需要 nftables 计数规则、ss 监听端口发现和 systemd 采样 timer。")) {
+            return;
+        }
         const std::set<int> knownPorts = detectExistingTrafficPorts();
+        const std::set<int> recommendedPorts = detectRecommendedTrafficPorts();
+        const std::set<int> recommendedNewPorts = setDifference(recommendedPorts, knownPorts);
+        const std::string defaultPortInput = joinPorts(recommendedNewPorts);
         const std::string month = currentTrafficPeriodLabel(TrafficPeriodMode::Month);
         const auto monthRows = aggregateTrafficHistoryByPort(TrafficPeriodMode::Month, month);
         const TrafficSummaryRow monthTotal = sumTrafficSummaryRows(monthRows);
         std::vector<std::string> intro = {
             "默认追加到现有端口，不清空已有统计。",
             "当前统计端口: " + std::to_string(knownPorts.size()) + " 个  " + humanPortList(knownPorts),
+            "自动发现监听端口: " + (recommendedPorts.empty() ? std::string("未发现外部监听服务") : humanPortList(recommendedPorts)),
             "本月流量(" + month + "): 入站 " + humanBytes(monthTotal.downloadBytes) +
                 " / 出站 " + humanBytes(monthTotal.uploadBytes) +
                 " / 合计 " + humanBytes(monthTotal.totalBytes()),
         };
+        if (!recommendedNewPorts.empty()) {
+            intro.push_back("推荐追加: " + humanPortList(recommendedNewPorts) + "。直接按 Enter 会使用这个推荐值。");
+        } else if (!recommendedPorts.empty()) {
+            intro.push_back("自动发现的监听端口都已在统计范围内；如需追加其它端口，请直接输入。");
+            intro.push_back("直接按 Enter 会修复现有统计规则、后台 timer，并立即记录一次采样。");
+        } else if (!knownPorts.empty()) {
+            intro.push_back("没有发现新的监听端口；直接按 Enter 会修复现有统计规则、后台 timer，并立即记录一次采样。");
+        }
         if (monthRows.empty()) {
             intro.push_back("本月还没有采样增量；第一轮采样建立基线，下一轮开始显示变化。");
         } else {
@@ -7751,108 +8395,28 @@ private:
         intro.push_back("输入需要统计的服务端口，支持单端口、逗号和范围。示例: 80,443,10000-10100");
         PromptAnswer ports = promptLine("开启/追加统计端口",
                                         intro,
-                                        "端口列表: ");
+                                        "端口列表: ",
+                                        defaultPortInput);
         if (!ports.ok) {
             return;
         }
-        const std::string value = removeSpaces(ports.value);
-        if (!isSafePortList(value)) {
+        const TrafficPortInputResolution resolved = resolveTrafficPortInput(ports.value, knownPorts, recommendedPorts);
+        if (!resolved.ok) {
             ScreenBuffer buffer;
-            buffer.add(ansi::yellow + std::string("端口列表不合法。") + ansi::plain);
-            buffer.add("示例: 80,443,10000-10100");
+            buffer.add(ansi::yellow + resolved.error + ansi::plain);
+            if (knownPorts.empty() && recommendedPorts.empty()) {
+                buffer.add("请先启动要统计的服务，或手动输入端口，例如 80,443。");
+            } else {
+                buffer.add("示例: 80,443,10000-10100");
+            }
             pushResult("开启/追加统计端口", buffer);
             return;
         }
 
-        std::set<int> requestedPorts;
-        expandPortList(value, requestedPorts);
-        std::set<int> finalPorts = requestedPorts;
-        std::set<int> managed = knownPorts;
-        finalPorts.insert(managed.begin(), managed.end());
-        const std::set<int> newPorts = setDifference(requestedPorts, managed);
-
-        const bool updatePortSetOnly = trafficTrackedPortsSetEnabled();
-        std::vector<std::string> commands = updatePortSetOnly
-            ? trafficPortSetUpdateCommands(finalPorts)
-            : trafficAccountingRuleCommands(finalPorts, false);
-        std::string timerError;
+        std::set<int> requestedPorts = resolved.ports;
         renderBusy("开启/追加统计端口", "正在应用统计规则...");
-        cachedDashboardValid() = false;
         ScreenBuffer buffer;
-        bool commandOk = true;
-        for (const auto &command : commands) {
-            const CommandResult result = runDisplayedCommand(buffer, command);
-            if (!result.ok()) {
-                commandOk = false;
-            }
-        }
-        const TrafficAccountingVerification verification = verifyTrafficAccountingApplied(finalPorts);
-        if (!commandOk || !verification.ok) {
-            ScreenBuffer result;
-            result.add(ansi::yellow + std::string("统计规则未能确认生效，已停止写入本地端口记录和后台 timer。") + ansi::plain);
-            result.add("未生效端口: " + humanPortList(finalPorts));
-            result.add("下一步: 修复 nftables 权限/语法后，重新进入“流量统计 -> 开启/追加端口”。");
-            result.add("");
-            if (!verification.ok) {
-                result.add("> 生效验证失败");
-                for (const auto &failure : verification.failures) {
-                    result.add("- " + failure);
-                }
-                result.add(verification.evidence);
-                result.add("");
-            }
-            result.add("> 命令输出");
-            result.addAll(buffer.lines());
-            pushResult("开启/追加统计端口", result);
-            return;
-        }
-        std::string storeError;
-        storeTrackedTrafficPorts(finalPorts, storeError);
-        if (!storeError.empty()) {
-            ScreenBuffer result;
-            result.add(ansi::yellow + std::string("统计规则已生效，但本地端口记录写入失败，已停止安装后台 timer。") + ansi::plain);
-            result.add("影响: 可靠性自检会看到“历史记录有/实时规则有”状态不一致，后台采样不会自动启用。");
-            result.add("端口记录写入失败: " + storeError);
-            result.add("当前 nft 端口: " + humanPortList(verification.nftPorts));
-            result.add("");
-            result.add("> 命令输出");
-            result.addAll(buffer.lines());
-            pushResult("开启/追加统计端口", result);
-            return;
-        }
-        const bool timerWritten = writeTrafficSnapshotTimerUnits("", timerError);
-        if (timerWritten && Shell::exists("systemctl")) {
-            buffer.add("");
-            buffer.add("> 后台采样 timer");
-            runDisplayedCommand(buffer, "systemctl daemon-reload");
-            runDisplayedCommand(buffer, "systemctl enable --now " + kTrafficSnapshotTimer);
-        }
-        buffer.add("");
-        buffer.add("> 统计端口");
-        buffer.add("原有端口: " + std::to_string(managed.size()) + " 个  " + humanPortList(managed));
-        buffer.add("本次输入: " + humanPortList(requestedPorts));
-        buffer.add("新增端口: " + (newPorts.empty() ? std::string("无，输入端口已在统计范围内") : humanPortList(newPorts)));
-        buffer.add("当前端口: " + std::to_string(finalPorts.size()) + " 个  " + humanPortList(finalPorts));
-        if (updatePortSetOnly) {
-            buffer.add("已只更新统计端口集合，原有端口计数和历史数据已保留。");
-        } else {
-            buffer.add("已使用端口集合管理统计范围；保留实时计数和历史数据。之后追加端口只更新端口集合。");
-        }
-        buffer.add("生效验证: " + verification.evidence);
-        const TrafficSnapshotResult snapshotResult = recordTrafficSnapshot();
-        buffer.add("");
-        buffer.add("> 历史采样基线");
-        buffer.add(snapshotResult.ok ? ansi::green + std::string("已记录一次基线采样。") + ansi::plain
-                                     : ansi::yellow + std::string("基线采样未完成: ") + snapshotResult.message + ansi::plain);
-        buffer.add("说明: 第一轮采样用于建立基线，下一轮采样后日/月/年视图开始出现增量。");
-        if (!storeError.empty()) {
-            buffer.add(ansi::yellow + std::string("端口记录写入失败: ") + storeError + ansi::plain);
-        }
-        if (!timerWritten) {
-            buffer.add(ansi::yellow + std::string("后台采样 timer 未安装: ") + timerError + ansi::plain);
-        } else {
-            buffer.add("后台采样: " + kTrafficSnapshotTimer + " 每 5 分钟记录一次历史增量。");
-        }
+        applyTrafficAccountingPorts(buffer, knownPorts, requestedPorts, resolved.repairExisting);
         pushResult("开启/追加统计端口", buffer);
     }
 
@@ -8163,6 +8727,11 @@ private:
             buffer.add(std::string(ok ? "[OK] " : "[WARN] ") + "filter: " + path);
             if (!backup.empty()) buffer.add("  备份: " + backup);
             if (!error.empty()) buffer.add("  原因: " + error);
+            if (!ok) {
+                buffer.add(ansi::yellow + std::string("filter 写入失败，已停止创建策略，避免生成无法加载的 jail。") + ansi::plain);
+                pushResult("新增自定义策略", buffer);
+                return;
+            }
         }
         if (action.value == "ufw-drop") {
             backup.clear();
@@ -8171,6 +8740,11 @@ private:
             buffer.add(std::string(ok ? "[OK] " : "[WARN] ") + "action: " + kUfwDropActionFile);
             if (!backup.empty()) buffer.add("  备份: " + backup);
             if (!error.empty()) buffer.add("  原因: " + error);
+            if (!ok) {
+                buffer.add(ansi::yellow + std::string("action 写入失败，已停止创建策略，避免生成无法执行封禁动作的 jail。") + ansi::plain);
+                pushResult("新增自定义策略", buffer);
+                return;
+            }
         }
 
         IniConfig ini;
@@ -8189,8 +8763,11 @@ private:
         const bool ok = ini.save(backup);
         buffer.add(std::string(ok ? "[OK] " : "[WARN] ") + kJailConf + " 已写入");
         if (!backup.empty()) buffer.add("  备份: " + backup);
-        buffer.add("");
-        buffer.add("建议执行: systemctl restart fail2ban");
+        if (ok) {
+            appendFail2banAutoReload(buffer);
+        } else {
+            buffer.add(ansi::yellow + std::string("jail.local 写入失败，已停止 reload。") + ansi::plain);
+        }
         pushResult("新增自定义策略", buffer);
     }
 
@@ -8366,9 +8943,13 @@ private:
     void actionIpDisposition() {
         PromptAnswer op = promptLine("IP 处置向导",
                                      {"1 = fail2ban 封禁 IP", "2 = fail2ban 解封 IP", "3 = 加入 fail2ban 忽略列表",
-                                      "4 = UFW 拒绝来源 IP", "5 = UFW 放行来源 IP"},
+                                     "4 = UFW 拒绝来源 IP", "5 = UFW 放行来源 IP"},
                                      "操作 [1-5]: ");
         if (!op.ok) return;
+        if ((op.value == "1" || op.value == "2" || op.value == "3") &&
+            !ensureFail2banForAction("IP 处置向导", "fail2ban IP 处置", true)) {
+            return;
+        }
         PromptAnswer ip = promptLine("IP 处置向导", {"请输入 IP 或 CIDR。"}, "IP/CIDR: ");
         if (!ip.ok || ip.value.empty()) {
             ScreenBuffer buffer;
@@ -8586,9 +9167,7 @@ private:
             buffer.add("原因: " + error);
         }
         if (ok) {
-            buffer.add("");
-            buffer.add("建议重载:");
-            buffer.add("systemctl restart fail2ban");
+            appendFail2banAutoReload(buffer);
         }
         pushResult(title, buffer);
     }
@@ -8670,16 +9249,25 @@ private:
         std::string backup;
         std::string error;
         ScreenBuffer buffer;
+        bool allOk = true;
         bool ok = writeManagedFileWithBackup(kUfwDropActionFile, renderUfwDropActionFile(), backup, error);
+        allOk = allOk && ok;
         buffer.add(ok ? ansi::green + std::string("ufw-drop action 已写入。") + ansi::plain
                       : ansi::yellow + "ufw-drop action 写入失败: " + error + ansi::plain);
         if (!backup.empty()) buffer.add("备份: " + backup);
         backup.clear();
         error.clear();
         ok = applyJailConfigValue(jail, "banaction", "ufw-drop", backup, error);
+        allOk = allOk && ok;
         buffer.add(ok ? ansi::green + std::string("banaction 已设置。") + ansi::plain
                       : ansi::yellow + "banaction 设置失败: " + error + ansi::plain);
         if (!backup.empty()) buffer.add("备份: " + backup);
+        if (allOk) {
+            appendFail2banAutoReload(buffer);
+        } else {
+            buffer.add("");
+            buffer.add(ansi::yellow + std::string("存在写入失败，已停止 reload，避免把半配置推入运行态。") + ansi::plain);
+        }
         pushResult("强制全端口动作", buffer);
     }
 
@@ -8729,18 +9317,29 @@ private:
             return;
         }
         ScreenBuffer buffer;
+        bool allOk = true;
         for (const auto &jail : {kRule1Jail, kRule2Jail}) {
             std::string backup;
             error.clear();
             const bool ok = applyJailConfigValue(jail, key, value.value, backup, error);
+            allOk = allOk && ok;
             buffer.add(std::string(ok ? "[OK] " : "[WARN] ") + jail + " " + key + " = " + value.value);
             if (!backup.empty()) buffer.add("  备份: " + backup);
             if (!error.empty()) buffer.add("  原因: " + error);
+        }
+        if (allOk) {
+            appendFail2banAutoReload(buffer);
+        } else {
+            buffer.add("");
+            buffer.add(ansi::yellow + std::string("至少一个规则写入失败，已停止 reload。") + ansi::plain);
         }
         pushResult("全局同步: " + title, buffer);
     }
 
     void actionF2bUnban(const std::string &scope) {
+        if (!ensureFail2banForAction("Fail2ban 解封", "fail2ban 解封", scope != kRule1Jail)) {
+            return;
+        }
         PromptAnswer ip = promptLine("Fail2ban 解封", {"请输入要解封的 IP。"}, "IP: ");
         if (!ip.ok || ip.value.empty()) return;
         if (!isValidIpOrCidr(ip.value)) {
@@ -8790,9 +9389,14 @@ private:
         ScreenBuffer buffer;
         const std::vector<std::string> targets =
             scope == "both" ? std::vector<std::string>{kRule1Jail, kRule2Jail} : std::vector<std::string>{scope};
+        bool allOk = true;
         for (const auto &target : targets) {
             IniConfig ini;
-            ini.load(kJailConf);
+            if (!ini.load(kJailConf)) {
+                allOk = false;
+                buffer.add("[WARN] 无法读取 " + std::string(kJailConf));
+                continue;
+            }
             const std::string current = ini.get(target, "ignoreip");
             std::vector<std::string> words = splitWords(current);
             if (std::find(words.begin(), words.end(), ip.value) == words.end()) {
@@ -8801,8 +9405,15 @@ private:
             ini.set(target, "ignoreip", joinWords(words));
             std::string backup;
             const bool ok = ini.save(backup);
+            allOk = allOk && ok;
             buffer.add(std::string(ok ? "[OK] " : "[WARN] ") + target + " ignoreip = " + joinWords(words));
             if (!backup.empty()) buffer.add("  备份: " + backup);
+        }
+        if (allOk) {
+            appendFail2banAutoReload(buffer);
+        } else {
+            buffer.add("");
+            buffer.add(ansi::yellow + std::string("白名单写入未完全成功，已停止 reload。") + ansi::plain);
         }
         pushResult("白名单管理", buffer);
     }
@@ -8858,6 +9469,9 @@ private:
     }
 
     void actionSyncF2bToUfw() {
+        if (!ensureFail2banForAction("防护链路同步", "补齐 UFW deny 需要读取 fail2ban 当前封禁列表", true)) {
+            return;
+        }
         if (!confirmYesNo("将为 fail2ban 当前封禁 IP 补齐 UFW deny 规则。", false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
@@ -8899,6 +9513,9 @@ private:
 
     void actionDualAudit(bool forceFix) {
         (void)forceFix;
+        if (!ensureFail2banForAction("双日志核验", "双日志核验需要读取两条默认 fail2ban jail 状态", true)) {
+            return;
+        }
         const F2bJailConfig cfg = readJailConfig(kRule2Jail);
         long long seconds = 3600;
         parseTimeToSeconds(configValueOr(cfg.findtime, "3600"), seconds);
@@ -8940,6 +9557,9 @@ private:
     }
 
     void actionBanDualAuditCandidates() {
+        if (!ensureFail2banForAction("补封禁候选 IP", "补封禁候选 IP 需要规则2 jail 已加载", true)) {
+            return;
+        }
         const F2bJailConfig cfg = readJailConfig(kRule2Jail);
         long long seconds = 3600;
         parseTimeToSeconds(configValueOr(cfg.findtime, "3600"), seconds);
@@ -8986,6 +9606,9 @@ private:
     }
 
     void actionFail2banEffectProbe() {
+        if (!ensureFail2banForAction("防护链路实效自检", "实效自检需要规则2 jail 已加载并可写入 UFW", true)) {
+            return;
+        }
         ScreenBuffer preview;
         preview.add(ansi::yellow + std::string("实效自检会临时封禁测试 IP: ") + kFail2banEffectProbeIp + ansi::plain);
         preview.add("流程: fail2ban banip -> 检查 jail 封禁列表 -> 检查 UFW deny -> unbanip -> 删除 UFW 残留规则。");
@@ -9057,12 +9680,19 @@ private:
     }
 
     void actionF2bBanLogs() {
+        if (!ensureToolsForAction("查看封禁日志", {"journalctl", "grep"},
+                                  "查看封禁日志需要读取 fail2ban/systemd 日志。")) {
+            return;
+        }
         renderBusy("查看封禁日志", "正在读取 fail2ban 日志...");
         pushResult("查看封禁日志", runCommandList({
             "journalctl -u fail2ban --no-pager -n 240 2>/dev/null | grep ' Ban ' || tail -n 240 /var/log/fail2ban.log 2>/dev/null | grep ' Ban ' || true"}));
     }
 
     void actionCurrentBanDetails() {
+        if (!ensureFail2banForAction("当前封禁详情", "当前封禁详情需要读取两条默认 fail2ban jail", true)) {
+            return;
+        }
         renderBusy("当前封禁详情", "正在读取当前封禁列表...");
         ScreenBuffer buffer;
         const std::vector<int> widths = {20, 34, 20, 18};
@@ -9158,6 +9788,13 @@ private:
     }
 
     void pushUfwAnalysisReport(const std::string &title, std::time_t start, std::time_t end, const std::string &traceIp = "") {
+        if (!ensureToolsForAction("威胁分析", {"journalctl", "grep"},
+                                  "威胁分析需要读取系统日志并解析 UFW 事件。")) {
+            return;
+        }
+        if (!offerGeoDatabaseForAnalysis()) {
+            return;
+        }
         renderBusy("威胁分析", "正在加载日志与分析缓存...");
         const UfwAnalysisReport report = analyzeUfwEvents(title, start, end, false);
         ScreenBuffer buffer;
@@ -9298,9 +9935,15 @@ private:
     void actionDependencyDoctor() {
         ScreenBuffer buffer;
         const std::vector<std::string> tools = {"nft", "ufw", "fail2ban-client", "conntrack", "ss", "journalctl", "systemctl", "awk", "grep", "mmdblookup"};
+        const std::vector<std::string> coreTools = coreRuntimeTools();
         std::vector<std::pair<std::string, std::string>> rows;
+        std::vector<std::string> missingCore;
         for (const auto &tool : tools) {
-            rows.push_back({tool, Shell::exists(tool) ? Ui::badge("可用", ansi::green) : Ui::badge("缺失", ansi::yellow)});
+            const bool ok = Shell::exists(tool);
+            rows.push_back({tool, ok ? Ui::badge("可用", ansi::green) : Ui::badge("缺失", ansi::yellow)});
+            if (!ok && std::find(coreTools.begin(), coreTools.end(), tool) != coreTools.end()) {
+                missingCore.push_back(tool);
+            }
         }
         addKeyValueTable(buffer, rows);
         buffer.add("");
@@ -9309,7 +9952,27 @@ private:
         buffer.add("");
         buffer.add("Debian/Ubuntu 安装命令:");
         buffer.add(ltgRuntimeDependencyInstallCommand());
-        pushResult("依赖检查", buffer);
+        const std::set<int> autoTrafficPorts = Shell::exists("ss") ? detectRecommendedTrafficPorts() : std::set<int>{};
+        const bool trafficConfigured = trafficHistoryConfiguredFast();
+        const bool canAutoTraffic = !trafficConfigured && !autoTrafficPorts.empty();
+        if (!dependencyDoctorShouldOfferRepair(missingCore, trafficConfigured, autoTrafficPorts)) {
+            pushResult("依赖检查", buffer);
+            return;
+        }
+        buffer.add("");
+        buffer.add(uiSection("可自动处理"));
+        if (!missingCore.empty()) {
+            buffer.add("缺失核心工具: " + joinWords(missingCore, ", "));
+            buffer.add("LTG 可以执行“修复运行环境”，自动安装依赖并继续验收防护栈。");
+        }
+        if (canAutoTraffic) {
+            buffer.add("检测到外部监听端口，但流量统计尚未启用。LTG 可以顺手启用统计和后台采样。");
+        }
+        if (!confirmYesNoWithBody("依赖检查 - 自动修复", buffer.lines(), false)) {
+            pushResult("依赖检查", buffer);
+            return;
+        }
+        actionInstallDependencies(false);
     }
 
     void actionReliabilitySelfCheck() {
@@ -9355,20 +10018,63 @@ private:
         pushResult("导出诊断报告", buffer);
     }
 
-    void actionInstallDependencies() {
-        if (!confirmYesNo("将通过 apt 安装 fail2ban/ufw/nftables/iproute2/conntrack/curl/mmdb-bin。", false)) {
+    void actionInstallDependencies(bool askConfirm = true) {
+        std::vector<std::string> body = {
+            "将自动补齐 LTG 运行依赖，并在依赖可用后验收 fail2ban 防护栈和流量统计链路。",
+            "",
+            "会执行:",
+            "1. 先检查运行依赖；只有缺核心工具时才执行 apt 安装。",
+            "2. 重新检查 nft/ufw/fail2ban-client/systemctl/journalctl/ss/conntrack 等命令。",
+            "3. 写入/修复 sshd 与 ufw-slowscan-global 两条默认防护策略。",
+            "4. 启动并 reload fail2ban，执行临时 ban 验证 UFW 落地并清理测试 IP。",
+            "5. 自动发现外部监听端口，启用/修复流量统计和后台采样。",
+            "",
+            "不会静默启用 UFW，避免远程 SSH 被锁在服务器外。",
+        };
+        if (askConfirm && !confirmYesNoWithBody("修复运行环境", body, false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
-            pushResult("安装常见依赖", buffer);
+            pushResult("修复运行环境", buffer);
             return;
         }
-        renderBusy("安装常见依赖", "正在执行 apt 命令...");
-        ScreenBuffer buffer = runCommandList({ltgRuntimeDependencyInstallCommand()});
-        Shell::clearExistsCache();
+        renderBusy("修复运行环境", "正在补齐依赖并验收防护链路...");
+        ScreenBuffer buffer;
+        buffer.add(uiSection("运行依赖"));
         cachedDashboardValid() = false;
+        std::vector<std::string> missing = missingCoreRuntimeTools();
+        if (shouldInstallRuntimeDependencies(missing)) {
+            buffer.add("缺失核心工具: " + joinWords(missing, ", "));
+            CommandResult deps = runDisplayedCommand(buffer, ltgRuntimeDependencyInstallCommand());
+            Shell::clearExistsCache();
+            missing = missingCoreRuntimeTools();
+            if (!deps.ok() || !missing.empty()) {
+                buffer.add(ansi::yellow + std::string("依赖复查未通过，已停止后续防护配置。") + ansi::plain);
+                if (!missing.empty()) {
+                    buffer.add("仍缺失: " + joinWords(missing, ", "));
+                }
+                buffer.add("请检查 apt 输出、软件源和系统是否为 Ubuntu/Debian。");
+                pushResult("修复运行环境", buffer);
+                return;
+            }
+            buffer.add(ansi::green + std::string("运行依赖已自动补齐并复查通过。") + ansi::plain);
+        } else {
+            buffer.add(ansi::green + std::string("核心运行依赖已就绪，跳过 apt 安装。") + ansi::plain);
+        }
         buffer.add("");
-        buffer.add("已刷新依赖检测缓存。返回仪表盘后会重新读取工具状态。");
-        pushResult("安装常见依赖", buffer);
+        buffer.add(uiSection("fail2ban 防护"));
+        Fail2banBootstrapResult f2b = ensureFail2banProtectionStack(true, true);
+        buffer.addAll(f2b.buffer.lines());
+        buffer.add("");
+        const bool trafficOk = appendAutomaticTrafficSetup(buffer);
+        buffer.add("");
+        if (f2b.ok && trafficOk) {
+            buffer.add(ansi::green + std::string("运行环境、防护策略和流量统计链路已通过自动修复。") + ansi::plain);
+        } else if (f2b.ok) {
+            buffer.add(ansi::yellow + std::string("运行环境和防护策略已通过验收；流量统计未完全自动启用，请查看上方原因。") + ansi::plain);
+        } else {
+            buffer.add(ansi::yellow + std::string("依赖已补齐，但防护栈未完全通过验收，请查看上方失败层级。") + ansi::plain);
+        }
+        pushResult("修复运行环境", buffer);
     }
 
     void actionInstallGeoDatabase() {
@@ -9394,6 +10100,7 @@ private:
         buffer.add("鸣谢: " + kDbIpLiteAttribution);
         buffer.add("国家/地区会显示在 UFW 来源 Top 与流量 IP 明细表中；未命中时显示 -。");
         buffer.add("已刷新国家/地区查询缓存。");
+        skipGeoDatabasePromptThisSession() = false;
         pushResult("安装/更新 IP 国家库", buffer);
     }
 };
@@ -9581,6 +10288,16 @@ inline std::string sudoSubcommand(const std::string &selfPath,
     return command;
 }
 
+inline std::string sudoSelfCommand(const std::string &selfPath,
+                                   bool nonInteractive,
+                                   const std::vector<std::string> &args = {}) {
+    std::string command = std::string("sudo ") + (nonInteractive ? "-n " : "") + shellQuote(selfPath);
+    for (const auto &arg : args) {
+        command += " " + shellQuote(arg);
+    }
+    return command;
+}
+
 inline int rerunSubcommandWithSudo(const char *argv0,
                                    const std::string &subcommand,
                                    const std::string &actionName,
@@ -9604,6 +10321,32 @@ inline int rerunSubcommandWithSudo(const char *argv0,
     const int code = normalizedExitCode(raw);
     if (nonInteractive && code != 0) {
         std::cerr << colorIf("sudo 非交互提权失败。请确认当前用户有 NOPASSWD 权限，或在交互终端运行 ltg " + subcommand + "。", ansi::yellow, STDERR_FILENO) << "\n";
+    }
+    return code;
+#endif
+}
+
+inline int rerunSelfWithSudo(const char *argv0,
+                             const std::string &actionName,
+                             const std::vector<std::string> &args = {}) {
+#ifdef _WIN32
+    (void)argv0;
+    (void)actionName;
+    (void)args;
+    return 1;
+#else
+    if (!Shell::exists("sudo")) {
+        std::cerr << colorIf(actionName + "需要 root 权限，但未找到 sudo。请切换 root 后运行 ltg。", ansi::yellow, STDERR_FILENO) << "\n";
+        return 77;
+    }
+    const std::string self = currentExecutablePath(argv0);
+    const bool nonInteractive = shouldUseNonInteractiveSudo();
+    const std::string command = sudoSelfCommand(self, nonInteractive, args);
+    std::cerr << colorIf(actionName + "需要 root 权限，正在重新执行: " + command, ansi::yellow, STDERR_FILENO) << "\n";
+    const int raw = std::system(command.c_str());
+    const int code = normalizedExitCode(raw);
+    if (nonInteractive && code != 0) {
+        std::cerr << colorIf("sudo 非交互提权失败。请确认当前用户有 NOPASSWD 权限，或在交互终端运行 sudo ltg。", ansi::yellow, STDERR_FILENO) << "\n";
     }
     return code;
 #endif
@@ -9763,26 +10506,41 @@ inline int bootstrapFirstInstall(const char *argv0, bool installRuntimeDeps) {
     addSection(buffer, "首次安装引导");
     bool ok = true;
     if (installRuntimeDeps) {
-        buffer.add("正在安装 LTG 运行依赖。源码构建依赖请使用 make bootstrap。");
-        CommandResult deps = runDisplayedCommandToBuffer(buffer, ltgRuntimeDependencyInstallCommand());
-        Shell::clearExistsCache();
-        ok = ok && deps.ok();
-        if (!deps.ok()) {
-            buffer.add(ansi::yellow + std::string("运行依赖安装失败，已停止 fail2ban 防护栈配置。") + ansi::plain);
-            printScreenBuffer(buffer);
-            return 1;
+        std::vector<std::string> missing = missingCoreRuntimeTools();
+        if (shouldInstallRuntimeDependencies(missing)) {
+            buffer.add("缺失运行工具: " + joinWords(missing, ", "));
+            buffer.add("正在通过 apt 补齐 LTG 运行依赖。源码构建依赖请使用 make bootstrap。");
+            CommandResult deps = runDisplayedCommandToBuffer(buffer, ltgRuntimeDependencyInstallCommand());
+            Shell::clearExistsCache();
+            missing = missingCoreRuntimeTools();
+            ok = ok && deps.ok() && missing.empty();
+            if (!deps.ok() || !missing.empty()) {
+                buffer.add(ansi::yellow + std::string("运行依赖安装后复查仍未通过，已停止 fail2ban 防护栈配置。") + ansi::plain);
+                if (!missing.empty()) {
+                    buffer.add("仍缺失: " + joinWords(missing, ", "));
+                }
+                buffer.add("请检查 apt 输出、软件源和当前系统是否为 Ubuntu/Debian。");
+                printScreenBuffer(buffer);
+                return 1;
+            }
+            buffer.add(ansi::green + std::string("运行依赖已自动补齐并复查通过。") + ansi::plain);
+        } else {
+            buffer.add(ansi::green + std::string("核心运行依赖已就绪，跳过 apt 安装。") + ansi::plain);
         }
     } else {
         buffer.add("已跳过运行依赖安装，继续配置 fail2ban 防护栈。");
-        buffer.add("");
     }
+    buffer.add("");
 
-    Fail2banBootstrapResult f2b = ensureFail2banProtectionStack(true, true);
+    Fail2banBootstrapResult f2b = ensureFail2banProtectionStack(installRuntimeDeps, true);
     buffer.addAll(f2b.buffer.lines());
     ok = ok && f2b.ok;
+    const bool trafficOk = appendAutomaticTrafficSetupToBuffer(buffer);
     buffer.add("");
     if (ok) {
         buffer.add(ansi::green + std::string("首次安装引导完成：依赖已就绪，fail2ban 两条默认防护策略已写入、加载并通过实效验收。") + ansi::plain);
+        buffer.add(trafficOk ? ansi::green + std::string("流量统计也已自动启用/修复。") + ansi::plain
+                             : ansi::yellow + std::string("流量统计未自动启用；请查看上方流量统计段落。") + ansi::plain);
     } else {
         buffer.add(ansi::yellow + std::string("首次安装引导未完全成功。请查看上方失败层级后重试 ltg bootstrap。") + ansi::plain);
     }
@@ -9820,9 +10578,29 @@ inline int selfTest() {
                                       return cmd.find("tracked_ports") != std::string::npos;
                                   }) &&
                                   resetCommands.front().find("delete table") != std::string::npos);
+    const auto keepExistingTrafficPorts = resolveTrafficPortInput("", std::set<int>{443, 8443}, std::set<int>{443, 8443});
+    const auto useRecommendedTrafficPorts = resolveTrafficPortInput("", std::set<int>{}, std::set<int>{80, 443});
+    check("统计端口空输入自动修复", keepExistingTrafficPorts.ok &&
+                                          keepExistingTrafficPorts.repairExisting &&
+                                          keepExistingTrafficPorts.ports.count(443) == 1 &&
+                                          useRecommendedTrafficPorts.ok &&
+                                          !useRecommendedTrafficPorts.repairExisting &&
+                                          useRecommendedTrafficPorts.ports.count(80) == 1 &&
+                                          !resolveTrafficPortInput("", {}, {}).ok);
     check("单端口校验", isSafeSinglePort("22") && isSafeSinglePort("65535") &&
                             !isSafeSinglePort("0") && !isSafeSinglePort("80,443") &&
                             !isSafeSinglePort("80-90") && !isSafeSinglePort("abc"));
+    const std::string ssSample =
+        "tcp LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\n"
+        "tcp LISTEN 0 4096 127.0.0.1:5432 0.0.0.0:* users:((\"postgres\",pid=2,fd=3))\n"
+        "udp UNCONN 0 0 0.0.0.0:68 0.0.0.0:* users:((\"dhclient\",pid=3,fd=3))\n"
+        "tcp LISTEN 0 4096 [::]:443 [::]:* users:((\"nginx\",pid=4,fd=3))\n";
+    const auto recommendedPorts = recommendedTrafficPortsFromSsOutput(ssSample);
+    check("监听端口自动推荐", recommendedPorts.size() == 2 &&
+                                  recommendedPorts.count(22) == 1 &&
+                                  recommendedPorts.count(443) == 1 &&
+                                  recommendedPorts.count(5432) == 0 &&
+                                  recommendedPorts.count(68) == 0);
     check("IP/CIDR 校验", isValidIpOrCidr("192.168.1.1") && isValidIpOrCidr("10.0.0.0/8") &&
                               isValidIpOrCidr("2001:db8::1/64") && isValidIpOrCidr("::1") &&
                               isValidIpOrCidr("::ffff:192.0.2.128") &&
@@ -10009,6 +10787,9 @@ inline int selfTest() {
         "ERROR Command ['status', 'ufw-slowscan-global'] has failed. Received UnknownJailException('ufw-slowscan-global')",
         true);
     check("fail2ban UnknownJail 解析", parsedUnknown.state == F2bJailRuntimeState::NotLoaded);
+    check("fail2ban 动作预检口径", defaultFail2banRuntimeReady(parsedLoaded, parsedLoaded, true) &&
+                                      defaultFail2banRuntimeReady(parsedLoaded, parsedUnknown, false) &&
+                                      !defaultFail2banRuntimeReady(parsedLoaded, parsedUnknown, true));
     const F2bJailRuntimeInfo parsedDenied = parseFail2banJailStatus(
         "sshd",
         "ERROR Permission denied to socket: /var/run/fail2ban/fail2ban.sock, (you must be root)",
@@ -10073,7 +10854,42 @@ inline int selfTest() {
     check("bootstrap sudo 命令合并", sudoSubcommand("/usr/local/bin/ltg", "bootstrap", true, {"--skip-deps"}) ==
                                        "sudo -n '/usr/local/bin/ltg' bootstrap '--skip-deps'" &&
                                        ltgRuntimeDependencyInstallCommand().find("fail2ban ufw nftables") != std::string::npos &&
-                                       fail2banStackInstallCommand().find("fail2ban ufw") != std::string::npos);
+                                       ltgRuntimeDependencyInstallCommand().find("timeout --foreground 300s") != std::string::npos &&
+                                       fail2banStackInstallCommand().find("fail2ban ufw") != std::string::npos &&
+                                       fail2banStackInstallCommand().find("timeout --foreground 300s") != std::string::npos);
+    check("TUI sudo 命令合并", sudoSelfCommand("/usr/local/bin/ltg", true) == "sudo -n '/usr/local/bin/ltg'" &&
+                                  sudoSelfCommand("/usr/local/bin/ltg", false) == "sudo '/usr/local/bin/ltg'");
+    const auto runtimeTools = coreRuntimeTools();
+    check("运行环境修复覆盖核心工具", std::find(runtimeTools.begin(), runtimeTools.end(), "nft") != runtimeTools.end() &&
+                                              std::find(runtimeTools.begin(), runtimeTools.end(), "fail2ban-client") != runtimeTools.end() &&
+                                              std::find(runtimeTools.begin(), runtimeTools.end(), "curl") != runtimeTools.end());
+    check("动作前依赖补齐命令", ltgRuntimeDependencyInstallCommand().find("nftables") != std::string::npos &&
+                                      ltgRuntimeDependencyInstallCommand().find("iproute2") != std::string::npos &&
+                                      ltgRuntimeDependencyInstallCommand().find("libsqlite3-0") != std::string::npos);
+    check("bootstrap/运行环境修复按需安装", shouldInstallRuntimeDependencies({"nft"}) &&
+                                      !shouldInstallRuntimeDependencies({}));
+    check("依赖检查可直接修复", dependencyDoctorShouldOfferRepair({"nft"}, true, {}) &&
+                                      dependencyDoctorShouldOfferRepair({}, false, {80}) &&
+                                      !dependencyDoctorShouldOfferRepair({}, true, {80}) &&
+                                      !dependencyDoctorShouldOfferRepair({}, false, {}));
+    FirstRunSetupReadiness setupProbe;
+    setupProbe.missingTools = {"nft", "fail2ban-client"};
+    setupProbe.sshJailLoaded = false;
+    setupProbe.scanJailLoaded = false;
+    const std::string setupText = joinWords(firstRunSetupSummaryBuffer(setupProbe).lines(), "\n");
+    check("首次启动一键初始化提示", setupProbe.needsBootstrap() &&
+                                          setupText.find("关键依赖缺失") != std::string::npos &&
+                                          setupText.find("不会静默启用 UFW") != std::string::npos &&
+                                          setupText.find("自动发现外部监听端口") != std::string::npos);
+    FirstRunSetupReadiness trafficOnlyProbe;
+    trafficOnlyProbe.sshJailLoaded = true;
+    trafficOnlyProbe.scanJailLoaded = true;
+    trafficOnlyProbe.trafficConfigured = false;
+    trafficOnlyProbe.recommendedTrafficPorts = {80, 443};
+    const std::string trafficOnlyText = joinWords(firstRunSetupSummaryBuffer(trafficOnlyProbe).lines(), "\n");
+    check("首次启动自动统计触发", trafficOnlyProbe.needsBootstrap() &&
+                                          trafficOnlyText.find("可自动启用统计端口") != std::string::npos &&
+                                          trafficOnlyText.find("80") != std::string::npos);
     ReliabilityReport reliabilityReport;
     addReliabilityResult(reliabilityReport, "测试链路", "通过项", ReliabilityStatus::Pass, "ok");
     check("可靠性结果聚合", reliabilityReport.ok());
@@ -10115,6 +10931,17 @@ inline int selfTest() {
     const bool vimPageUp = adjustScrollForEvent({InputKind::Character, 2}, vimScrollProbe, 100);
     const bool vimBottom = adjustScrollForEvent({InputKind::Character, 'G'}, vimScrollProbe, 100);
     check("Vim 风格滚动快捷键", vimDown && vimHalfDown && vimPageUp && vimBottom && vimScrollProbe > 0);
+    check("确认页单键决策", confirmKeyDecision({InputKind::Character, 'y'}, false) == 1 &&
+                                  confirmKeyDecision({InputKind::Character, 'n'}, true) == 0 &&
+                                  confirmKeyDecision({InputKind::Character, 'q'}, true) == 0 &&
+                                  confirmKeyDecision({InputKind::Character, '\n'}, true) == 1 &&
+                                  confirmKeyDecision({InputKind::Character, '\n'}, false) == 0 &&
+                                  confirmKeyDecision({InputKind::Escape, 0}, true) == 0);
+    check("结果页快速返回键", isResultReturnInput({InputKind::Character, '\n'}) &&
+                                      isResultReturnInput({InputKind::Character, 127}) &&
+                                      isResultReturnInput({InputKind::Character, 'q'}) &&
+                                      isResultReturnInput({InputKind::Escape, 0}) &&
+                                      !isResultReturnInput({InputKind::Character, 'j'}));
     check("MMDB 输出解析", parseMmdbLookupString("  \"美国\" <utf8_string>\n") == "美国" &&
                               parseMmdbLookupString("  \"Mountain View\" <utf8_string>\n") == "Mountain View");
     ipGeoLabelCache()["8.8.8.8"] = "-";
@@ -10123,6 +10950,10 @@ inline int selfTest() {
     check("DB-IP Lite 下载命令", dbIpLiteDownloadCommand().find(kDbIpLiteDownloadPage) != std::string::npos &&
                                   dbIpLiteDownloadCommand().find(".mmdb.gz") != std::string::npos &&
                                   dbIpLiteDownloadCommand().find(kDbIpLiteMmdbPath) != std::string::npos);
+    skipGeoDatabasePromptThisSession() = false;
+    skipGeoDatabasePromptThisSession() = true;
+    check("国家库提示会话开关", skipGeoDatabasePromptThisSession());
+    skipGeoDatabasePromptThisSession() = false;
 
 #if LTG_HAS_SQLITE
     check("SQLite 编译模式", true, "LTG_HAS_SQLITE=1");
@@ -10198,7 +11029,9 @@ inline void usage(const char *argv0) {
     std::cout << "用法: " << argv0 << " [选项]\n\n";
     std::cout << "说明:\n";
     std::cout << "  除 --help / --version / --self-test / --reliability-check 外，本工具必须以 root 权限运行。\n";
-    std::cout << "  交互模式会进入全屏 TUI；命令行参数模式输出普通文本，方便脚本/日志收集。\n";
+    std::cout << "  交互模式会进入全屏 TUI；非 root 交互终端会自动通过 sudo 重进。\n";
+    std::cout << "  首次/未就绪环境会先显示一键初始化/修复页。\n";
+    std::cout << "  命令行参数模式输出普通文本，方便脚本/日志收集。\n";
     std::cout << "  会调用系统工具 nft/ufw/fail2ban-client/journalctl/ss/conntrack，不依赖 .sh/.py。\n\n";
     std::cout << "选项:\n";
     std::cout << "  --status          打印仪表盘\n";
@@ -10210,7 +11043,7 @@ inline void usage(const char *argv0) {
     std::cout << "  --f2b-audit       防护链路双日志核验\n";
     std::cout << "  --ufw-analyze P   分析 UFW 日志，P=24h|7d|28d\n";
     std::cout << "  --export-report   导出诊断报告\n";
-    std::cout << "  bootstrap         首次安装引导：安装运行依赖并配置/验证 fail2ban 防护栈\n";
+    std::cout << "  bootstrap         首次安装引导：补齐缺失运行依赖并配置/验证 fail2ban 防护栈\n";
     std::cout << "  update, --update  从 GitHub Release 下载最新版并覆盖当前 ltg\n";
     std::cout << "  --self-test       运行非 root 纯逻辑自测\n";
     std::cout << "  --version         显示版本\n";
@@ -10228,8 +11061,8 @@ inline void usage(const char *argv0) {
     std::cout << "  # 源码按 include/ 和 src/ 组织，makefile 会自动发现 src/*.cpp。\n";
     std::cout << "\n安装/卸载:\n";
     std::cout << "  ltg bootstrap        # Release 二进制首装后: 依赖 + fail2ban 防护栈验收\n";
-    std::cout << "  make bootstrap       # 源码首装: 依赖 + 编译 + 安装 + 防护栈验收\n";
-    std::cout << "  make update          # 后续更新: git pull + 编译 + 安装\n";
+    std::cout << "  make bootstrap       # 源码首装: 补齐缺失依赖 + 编译 + 安装 + 防护栈验收\n";
+    std::cout << "  make update          # 后续更新: git pull + 补齐缺失依赖 + 编译 + 安装 + 验收\n";
     std::cout << "  sudo make install\n";
     std::cout << "  sudo make uninstall\n";
 }
@@ -10311,9 +11144,8 @@ int appMain(int argc, char **argv) {
         return 1;
     }
 
-    const int rootCheck = requireRootOrExit();
-    if (rootCheck != 0) {
-        return rootCheck;
+    if (!isRoot()) {
+        return rerunSelfWithSudo(argv[0], "交互模式");
     }
     TerminalGuard terminal;
     TuiApp app;

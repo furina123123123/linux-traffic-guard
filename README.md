@@ -44,13 +44,25 @@ sudo install -Dm755 ltg /usr/local/bin/ltg
 ltg bootstrap
 ```
 
-`ltg bootstrap` is the first-install path. It auto-escalates with `sudo`, installs runtime dependencies, writes the two built-in fail2ban policies (`sshd` and `ufw-slowscan-global`), enables/reloads fail2ban, and runs a temporary ban probe to verify that rule 2 lands in UFW and is cleaned up. It does not silently enable UFW because that can lock out SSH; if UFW is inactive, the bootstrap result will say which layer is not fully effective.
+`ltg bootstrap` is the first-install path. It auto-escalates with `sudo`, checks for required runtime tools, installs only the missing runtime dependencies, writes the two built-in fail2ban policies (`sshd` and `ufw-slowscan-global`), enables/reloads fail2ban, runs a temporary ban probe to verify that rule 2 lands in UFW and is cleaned up, and auto-enables traffic accounting for detected externally listening ports. It does not silently enable UFW because that can lock out SSH; if UFW is inactive, the bootstrap result will say which layer is not fully effective.
 
 Open the TUI after bootstrap completes:
 
 ```bash
-sudo ltg
+ltg
 ```
+
+In an interactive terminal, `ltg` auto-re-runs itself through `sudo` when root is required. You can still run `sudo ltg` directly if you prefer. Normal confirmation pages use single-key decisions (`y`, `n`, `q`, `Esc`, or `Enter` for the default), result pages return with `Enter`, `Backspace`, `q`, or `Esc`, and long previews keep vim-style scrolling, so remote sessions do not need extra prompt round trips.
+
+If you open the TUI before running `ltg bootstrap`, LTG now detects an incomplete first-run environment and shows a compact one-click setup page. That page installs missing runtime tools, configures the two default fail2ban protections, starts/reloads fail2ban, verifies the temporary UFW landing path, and auto-enables traffic accounting for detected externally listening ports. Normal ready systems skip this page and go straight to the dashboard.
+
+The same setup page also appears when protection is already ready but traffic accounting is still off and LTG can detect externally listening ports. In that case it skips the repeated fail2ban active probe and only repairs the missing pieces.
+
+The same repair path is available later in the TUI as `Diagnostics -> Repair runtime environment`. It installs packages only when core tools are missing; otherwise it skips apt and goes straight to validating and repairing the fail2ban protection stack and traffic accounting chain. The dependency check page also offers this repair path directly when it sees missing core tools or auto-detectable traffic ports.
+
+Common actions also check their own prerequisites before doing work. For example, traffic accounting and UFW analysis offer to install missing runtime tools before showing a command failure. UFW analysis also offers to install the optional DB-IP Lite country database when the country/region column would otherwise be empty. Fail2ban actions such as IP disposition, dual-log audit, UFW sync, ban details, and active probes can repair missing or unloaded default jails in place. Fail2ban configuration edits also run `fail2ban-client -t` and `fail2ban-client reload` automatically after a successful write, so users do not need to remember a separate restart step.
+
+Traffic accounting setup is also repair-friendly: first-run setup auto-detects externally listening ports and enables sampling for them. If ports are already being tracked, pressing Enter on the port prompt reuses the existing port set, refreshes the nftables rules and systemd timer, and records a fresh snapshot instead of forcing you to retype the same ports.
 
 Update later with the built-in updater:
 
@@ -126,6 +138,7 @@ For cloud servers, also open the new TCP port in the provider security group or 
 LTG is meant to behave like a port-level vnStat with IP visibility:
 
 - Add or remove tracked ports without rebuilding the whole accounting table by default.
+- Auto-detect externally listening service ports and prefill them as the recommended first tracking set.
 - Keep historical day/month/year data when appending new ports.
 - Sample nftables counters every 5 minutes through a systemd timer.
 - View day/month/year traffic in rolling-window or absolute-period mode.
@@ -220,7 +233,7 @@ sudo ltg --reliability-check
 ltg update
 ```
 
-All commands except `--help`, `--version`, and `--self-test` require root privileges. The TUI uses the alternate screen and restores the terminal on normal exit or signal handling. `ltg update` can be run without a sudo prefix; it will choose interactive sudo or non-interactive `sudo -n` based on the terminal.
+Commands except `--help`, `--version`, and `--self-test` require root privileges. The interactive TUI and `ltg update` can be run without a sudo prefix; LTG will choose interactive sudo or non-interactive `sudo -n` based on the terminal. The TUI uses the alternate screen and restores the terminal on normal exit or signal handling.
 
 ## Requirements
 
@@ -241,6 +254,8 @@ From a source checkout:
 ```bash
 make deps
 ```
+
+`make deps` performs the same missing-only package check used by `make bootstrap`; ready systems skip apt instead of reinstalling packages.
 
 At runtime, LTG calls system tools such as `nft`, `ufw`, `fail2ban-client`, `journalctl`, `ss`, `conntrack`, `systemctl`, and optionally `mmdblookup`.
 
@@ -285,7 +300,7 @@ Bootstrap from a fresh Ubuntu/Debian checkout:
 make bootstrap
 ```
 
-`make bootstrap` runs `apt-get update`, installs build/runtime dependencies, builds `ltg`, installs it under `PREFIX` (`/usr/local` by default), and then runs the same fail2ban protection bootstrap. Non-root users will be prompted through `sudo`.
+`make bootstrap` checks build/runtime dependencies, installs only missing packages, builds `ltg`, installs it under `PREFIX` (`/usr/local` by default), and then runs the same fail2ban protection bootstrap. Non-root users will be prompted through `sudo`.
 
 Update a source checkout:
 
@@ -294,7 +309,7 @@ cd linux-traffic-guard
 make update
 ```
 
-`make update` performs `git pull --ff-only`, rebuilds, and reinstalls `ltg`. Ordinary `make install` does not access the network or change system packages.
+`make update` performs `git pull --ff-only`, checks for newly missing packages, rebuilds, reinstalls `ltg`, and runs the same installed protection bootstrap with dependency installation skipped. Ordinary `make install` does not access the network or change system packages.
 
 Uninstall:
 

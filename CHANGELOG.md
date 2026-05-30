@@ -4,12 +4,30 @@
 
 ### Changed
 
+- Added a first-run TUI setup assistant that appears only when runtime dependencies or the two default fail2ban jails are not ready, giving users one obvious repair path instead of separate dependency and policy menus.
+- Changed the TUI dependency installer into a runtime-environment repair action: after installing packages it rechecks tools and runs the same fail2ban policy bootstrap/verification path.
+- Made traffic accounting setup auto-detect externally listening service ports and prefill new untracked listeners as the recommended append set.
+- Added action-level dependency repair prompts so traffic accounting and UFW analysis can offer apt-based fixes before failing on missing tools.
+- Made UFW analysis offer to install the optional DB-IP Lite MMDB country database at the analysis entry point, while allowing users to continue without it.
+- Added action-level fail2ban readiness checks so IP disposition, ban details, dual-log audit, UFW sync, and active probes can offer to repair missing/unloaded default jails in place.
+- Made fail2ban configuration edits automatically run config validation and reload after successful writes, removing the old manual restart follow-up.
+- Made traffic accounting setup treat an empty port input with existing tracked ports as a repair action, refreshing rules, timer, and sampling without asking users to retype ports.
+- Extended the first-run TUI setup assistant to auto-detect externally listening ports and enable/repair traffic accounting during the same one-click initialization flow.
+- Made the first-run TUI setup assistant appear when traffic accounting is not configured but externally listening ports can be auto-detected, while skipping repeat fail2ban active probes when both default jails are already loaded.
+- Changed dependency-check pages from read-only reports into repair entry points when core tools are missing or traffic accounting can be auto-enabled, and extended runtime repair to validate traffic accounting as well as fail2ban.
+- Made interactive `ltg` auto-re-run through sudo when launched without root, while keeping existing CLI root-guard behavior for explicit commands.
+- Made runtime-environment repair skip apt when core tools are already present, going straight to fail2ban and traffic-accounting validation.
+- Made `ltg bootstrap` use the same missing-tool check, so first install still auto-fills dependencies while repeat runs skip unnecessary apt work and continue to fail2ban/traffic verification.
+- Made `make deps` / `make bootstrap` install only missing Ubuntu/Debian packages instead of running apt install unconditionally on every source bootstrap.
+- Added timeout boundaries to in-app apt repairs and made `make update` recheck missing packages plus rerun the installed protection bootstrap after reinstalling.
+- Changed normal TUI confirmations to single-key decisions (`y`, `n`, `q`, `Esc`, or `Enter` for the default) while keeping scroll support on long confirmation pages.
+- Let result pages return with `Enter`, `Backspace`, `q`, or `Esc`, so keyboard-only workflows can continue without hunting for the exact back key.
 - Added restrained color accents to TUI menus, section headers, table headers, status badges, and traffic metric values.
 - Kept the color layer compatible with `NO_COLOR` and redirected output through the existing ANSI-stripping path.
 
 ### Fixed
 
-- Added `ltg bootstrap` as a first-install path that installs runtime dependencies, configures both built-in fail2ban policies, starts/reloads fail2ban, and runs the active UFW landing verification.
+- Added `ltg bootstrap` as a first-install path that installs missing runtime dependencies, configures both built-in fail2ban policies, starts/reloads fail2ban, and runs the active UFW landing verification.
 - Changed `make bootstrap` to run the same fail2ban protection bootstrap after installing the binary, so source and Release installs do not leave first-time users with an unconfigured protection stack.
 - Kept UFW enablement out of silent bootstrap to avoid SSH lockout; bootstrap reports the ineffective layer if UFW is inactive.
 - Bounded `ltg update` download, checksum, install, and version-probe steps with explicit timeouts so remote non-interactive runners fail cleanly instead of waiting indefinitely.

@@ -10,6 +10,8 @@ VERSION := $(shell sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' include/ltg/versio
 DISTDIR := linux-traffic-guard-$(VERSION)
 DEPS := g++ make libsqlite3-dev fail2ban ufw nftables iproute2 conntrack gawk grep curl mmdb-bin
 APT_GET ?= apt-get
+APT_TIMEOUT ?= 180
+APT_RUN ?= timeout --foreground $(APT_TIMEOUT)s
 
 ifeq ($(OS),Windows_NT)
 EXEEXT := .exe
@@ -22,7 +24,7 @@ EXEEXT :=
 RM := rm -f
 NULL := 2>/dev/null
 LDLIBS += -lsqlite3
-SUDO ?= $(shell if [ "$$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then echo sudo; fi)
+SUDO ?= $(shell if [ "$$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then if [ -t 0 ]; then echo sudo; else echo sudo -n; fi; fi)
 RMDIR := rm -rf
 endif
 
@@ -50,8 +52,35 @@ deps:
 ifeq ($(OS),Windows_NT)
 	@echo "deps 目标只支持 Ubuntu/Debian。Windows 下请在目标 Linux 服务器或 WSL 中执行。"
 else
-	$(SUDO) $(APT_GET) update
-	$(SUDO) $(APT_GET) install -y $(DEPS)
+	@missing=""; \
+	for pkg in $(DEPS); do \
+		tool=""; \
+		case "$$pkg" in \
+			g++) tool="g++" ;; \
+			make) tool="make" ;; \
+			fail2ban) tool="fail2ban-client" ;; \
+			ufw) tool="ufw" ;; \
+			nftables) tool="nft" ;; \
+			iproute2) tool="ss" ;; \
+			conntrack) tool="conntrack" ;; \
+			gawk) tool="awk" ;; \
+			grep) tool="grep" ;; \
+			curl) tool="curl" ;; \
+			mmdb-bin) tool="mmdblookup" ;; \
+		esac; \
+		if [ "$$pkg" = "libsqlite3-dev" ]; then \
+			dpkg-query -W -f='$${Status}' "$$pkg" 2>/dev/null | grep -q "install ok installed" || missing="$$missing $$pkg"; \
+		elif [ -n "$$tool" ] && ! command -v "$$tool" >/dev/null 2>&1; then \
+			missing="$$missing $$pkg"; \
+		fi; \
+	done; \
+	if [ -z "$$missing" ]; then \
+		echo "Ubuntu/Debian 依赖已就绪，跳过 apt 安装。"; \
+	else \
+		echo "将安装缺失依赖:$$missing"; \
+		$(SUDO) $(APT_RUN) $(APT_GET) update; \
+		$(SUDO) $(APT_RUN) $(APT_GET) install -y $$missing; \
+	fi
 endif
 
 bootstrap: deps all
@@ -71,8 +100,14 @@ ifeq ($(OS),Windows_NT)
 	@echo "update 目标只支持 Ubuntu/Debian。"
 else
 	git pull --ff-only
+	$(MAKE) deps
 	$(MAKE) all
 	$(SUDO) install -Dm755 $(BINARY) $(DESTDIR)$(BINDIR)/$(TARGET)
+	@if [ -z "$(DESTDIR)" ]; then \
+		$(SUDO) $(BINDIR)/$(TARGET) bootstrap --skip-deps; \
+	else \
+		echo "DESTDIR is set; skip live fail2ban bootstrap"; \
+	fi
 endif
 
 run: $(BINARY)
@@ -123,9 +158,9 @@ clean:
 help:
 	@echo "Linux 流量守卫 makefile"
 	@echo "  make          编译 ltg"
-	@echo "  make deps     安装 Ubuntu/Debian 依赖"
-	@echo "  make bootstrap 首次依赖安装、编译、安装 ltg 并配置 fail2ban 防护栈"
-	@echo "  make update   git pull 后重新编译并安装 ltg"
+	@echo "  make deps     检查并安装缺失的 Ubuntu/Debian 依赖"
+	@echo "  make bootstrap 补齐缺失依赖、编译、安装 ltg 并配置 fail2ban 防护栈"
+	@echo "  make update   git pull 后补齐缺失依赖、重新编译、安装并验收"
 	@echo "  make run      编译并进入交互界面"
 	@echo "  make status   编译并打印仪表盘"
 	@echo "  make doctor   编译并检查依赖"
