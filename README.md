@@ -58,7 +58,7 @@ If you open the TUI before running `ltg bootstrap`, LTG now detects an incomplet
 
 The same setup page also appears when protection is already ready but traffic accounting is still off and LTG can detect externally listening ports. In that case it skips the repeated fail2ban active probe and only repairs the missing pieces.
 
-The same repair path is available later in the TUI as `Diagnostics -> Repair runtime environment`. It installs packages only when core tools are missing; otherwise it skips apt and goes straight to validating and repairing the fail2ban protection stack and traffic accounting chain. The dependency check page also offers this repair path directly when it sees missing core tools or auto-detectable traffic ports.
+The same repair path is available later from the TUI main menu as `One-click repair`. It installs packages only when core tools are missing; otherwise it skips apt and goes straight to validating and repairing the fail2ban protection stack and traffic accounting chain. The dependency check page also offers this repair path directly when it sees missing core tools or auto-detectable traffic ports.
 
 Common actions also check their own prerequisites before doing work. For example, traffic accounting and UFW analysis offer to install missing runtime tools before showing a command failure. UFW analysis also offers to install the optional DB-IP Lite country database when the country/region column would otherwise be empty. Fail2ban actions such as IP disposition, dual-log audit, UFW sync, ban details, and active probes can repair missing or unloaded default jails in place. Fail2ban configuration edits also run `fail2ban-client -t` and `fail2ban-client reload` automatically after a successful write, so users do not need to remember a separate restart step.
 
@@ -267,7 +267,7 @@ Install or update the local database from the TUI:
 
 ```text
 sudo ltg
-Diagnostics -> Install/update IP country database
+Advanced/Diagnostics -> Install/update IP country database
 ```
 
 The database is stored at:

@@ -4513,15 +4513,15 @@ inline std::string serviceSuggestion(const std::string &name, const std::string 
         return name == "fail2ban" ? "一致性核验" : "查看规则";
     }
     if (state == "未启用") {
-        return name == "fail2ban" ? "服务诊断->启动" : "服务诊断->启用";
+        return name == "fail2ban" ? "一键修复" : "高级/诊断->服务控制";
     }
     if (state == "异常") {
-        return "服务诊断->日志";
+        return "高级/诊断->日志摘要";
     }
     if (state == "缺失") {
-        return "服务诊断->安装";
+        return "一键修复";
     }
-    return "服务诊断";
+    return "高级/诊断";
 }
 
 inline bool trafficTableEnabled() {
@@ -5884,7 +5884,7 @@ inline void verifyGeoDatabaseChain(ReliabilityReport &report) {
         addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", ReliabilityStatus::Skipped,
                              "未安装本地国家库，表格国家/地区显示为 -",
                              kDbIpLiteMmdbPath,
-                             "诊断 -> 安装/更新 IP 国家库");
+                             "高级/诊断 -> 安装/更新 IP 国家库");
         return;
     }
     addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", reader ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
@@ -6927,7 +6927,7 @@ inline std::string dashboardFastHeaderLine() {
     std::ostringstream deps;
     deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow));
     deps << "  首屏: 最近31天历史";
-    deps << "  实时检查: 安全中心/诊断";
+    deps << "  实时检查: 安全中心/高级";
     return deps.str();
 }
 
@@ -6946,8 +6946,8 @@ inline void addTrafficOnboarding(ScreenBuffer &buffer, bool configured, bool has
         return;
     }
     buffer.add("1. 看趋势用“流量统计 -> 日流量 / 月流量 / 年流量”。");
-    buffer.add("2. 查具体 IP 用“流量统计 -> 实时明细”或“下钻检查”。");
-    buffer.add("3. 查服务、防火墙、fail2ban 运行态用“安全中心”或“诊断”。");
+    buffer.add("2. 查具体 IP 用“流量统计 -> 实时明细”，底层排障进“高级/诊断”。");
+    buffer.add("3. 查服务、防火墙、fail2ban 运行态用“安全中心”，深度日志进“高级/诊断”。");
 }
 
 inline std::vector<std::string> tableLines(const Table &table, const std::string &emptyMessage = "暂无数据") {
@@ -7217,14 +7217,14 @@ private:
         Page page;
         page.kind = PageKind::Menu;
         page.title = kName + " v" + kVersion;
-        page.subtitle = "常用先看仪表盘和流量统计；慢查询放在安全中心、诊断和下钻里。";
+        page.subtitle = "按用户目标组织：观察、修复、流量、安全；底层细节放进高级。";
         page.root = true;
         page.items = {
             {"1", "仪表盘", "最快入口，最近31天端口流量和下一步建议", false, [this] { pushDashboard(); }},
-            {"2", "流量统计", "开启/追加端口，查看日/月/年流量", false, [this] { pushTrafficMenu(); }},
-            {"3", "安全中心", "威胁分析、fail2ban、UFW 和处置核验", false, [this] { pushSecurityMenu(); }},
-            {"4", "下钻检查", "较慢，按端口/连接/底层规则排障", false, [this] { pushInspectMenu(); }},
-            {"5", "诊断", "较慢，依赖、日志、报告和导出", false, [this] { pushDiagnoseMenu(); }},
+            {"2", "一键修复", "自动补齐依赖、防护策略和流量采样链路", true, [this] { actionInstallDependencies(); }},
+            {"3", "流量统计", "开启/追加端口，查看日/月/年流量", false, [this] { pushTrafficMenu(); }},
+            {"4", "安全中心", "威胁分析、fail2ban、UFW 和处置核验", false, [this] { pushSecurityMenu(); }},
+            {"5", "高级/诊断", "日志、依赖、导出、conntrack 和底层规则", false, [this] { pushAdvancedMenu(); }},
         };
         pages_.push_back(std::move(page));
     }
@@ -7294,19 +7294,17 @@ private:
                      {"5", "实时明细", "较慢，读取底层实时计数和 IP 明细", false, [this] { actionShowTrafficRanking(); }},
                      {"6", "删除统计端口", "停止统计指定端口，保留历史", true, [this] { actionRemoveTrafficPorts(); }},
                      {"7", "高级：删除全部统计规则", "高风险，删除底层统计规则", true, [this] { actionRemoveTrafficAccounting(); }},
-                     {"0", "高级：底层计数规则", "查看 nftables 原始输出", false, [this] { actionRawNftTable(); }},
                  });
     }
 
     void pushSecurityMenu() {
-        pushMenu("安全中心", "总览、分析、策略、处置、诊断按同一条防护链路组织",
+        pushMenu("安全中心", "先看总览，再分析来源；需要改系统时走处置或策略",
                  {
                      {"1", "安全总览", "一屏看服务、策略、封禁和下一步", false, [this] { actionSecurityStatus(); }},
-                     {"2", "可靠性自检", "验证依赖、更新、防护、统计、诊断是否真落地", true, [this] { actionReliabilitySelfCheck(); }},
-                     {"3", "分析追查", "来源 Top、端口扫描、IP 下钻、缓存", false, [this] { pushUfwAnalyzeMenu(); }},
-                     {"4", "策略配置", "SSH 防护、扫描升级、白名单", true, [this] { pushFail2banPanel(); }},
-                     {"5", "处置修复", "封禁/解封、端口规则、核验、同步", true, [this] { pushSecurityOpsMenu(); }},
-                     {"6", "服务诊断", "服务控制、依赖、日志和报告", false, [this] { pushSecurityServiceMenu(); }},
+                     {"2", "分析追查", "来源 Top、端口扫描、IP 下钻、缓存", false, [this] { pushUfwAnalyzeMenu(); }},
+                     {"3", "处置修复", "封禁/解封、端口规则、核验、同步", true, [this] { pushSecurityOpsMenu(); }},
+                     {"4", "策略管理", "SSH 防护、扫描升级、白名单", true, [this] { pushFail2banPanel(); }},
+                     {"5", "可靠性自检", "验证依赖、更新、防护、统计、诊断是否真落地", true, [this] { actionReliabilitySelfCheck(); }},
                  });
     }
 
@@ -7396,39 +7394,20 @@ private:
                      {"3", "一致性核验", "检查 UFW 命中、封禁列表和规则落地", false, [this] { pushF2bAuditMenu(); }},
                      {"4", "补齐 UFW deny", "为当前封禁 IP 补齐防火墙规则", true, [this] { actionSyncF2bToUfw(); }},
                      {"5", "清理异常规则", "清理重复/失效 deny 规则", true, [this] { actionRepairUfwAnomalies(); }},
-                     {"6", "策略安装/修复", "补齐 filter/action/jail 配置", true, [this] { actionEnsureFail2banStack(); }},
                  });
     }
 
-    void pushSecurityServiceMenu() {
-        pushMenu("服务诊断", "只放底层状态和排障动作，日常操作不用绕到这里",
-                 {
-                     {"1", "服务控制", "fail2ban 与 UFW 服务动作", true, [this] { actionServiceControl(); }},
-                     {"2", "依赖检查/修复", "发现缺失后可直接补齐", false, [this] { actionDependencyDoctor(); }},
-                     {"3", "日志摘要", "fail2ban 与 UFW 原始日志", false, [this] { actionLogSummary(); }},
-                     {"4", "导出报告", "写入 /tmp 诊断报告", false, [this] { actionExportReport(); }},
-                     {"5", "导出防护诊断", "导出 fail2ban/UFW 配置与日志", false, [this] { actionExportF2bDiagnostic(); }},
-                     {"6", "修复运行环境", "自动补齐依赖、防护和统计", true, [this] { actionInstallDependencies(); }},
-                 });
-    }
-
-    void pushInspectMenu() {
-        pushMenu("下钻检查", "面向排障的聚焦原始详情",
-                 {
-                     {"1", "端口下钻", "监听、防火墙、计数、conntrack", false, [this] { actionFocusedPortInspect(); }},
-                     {"2", "conntrack 快照", "当前活跃连接视图", false, [this] { actionConntrackSnapshot(); }},
-                     {"3", "高级：底层计数规则", "查看 nftables 原始输出", false, [this] { actionRawNftTable(); }},
-                 });
-    }
-
-    void pushDiagnoseMenu() {
-        pushMenu("诊断", "底层依赖、原始日志、报告导出",
+    void pushAdvancedMenu() {
+        pushMenu("高级/诊断", "日常路径之外的底层排障、日志、依赖和导出",
                  {
                      {"1", "依赖检查/修复", "发现缺失后可直接补齐", false, [this] { actionDependencyDoctor(); }},
-                     {"2", "日志摘要", "fail2ban 与 UFW 日志", false, [this] { actionLogSummary(); }},
-                     {"3", "导出报告", "写入 /tmp 报告", false, [this] { actionExportReport(); }},
-                     {"4", "修复运行环境", "自动补齐依赖、防护和统计", true, [this] { actionInstallDependencies(); }},
-                     {"5", "安装/更新 IP 国家库", "DB-IP Lite 免费 MMDB，用于来源国家展示", true, [this] { actionInstallGeoDatabase(); }},
+                     {"2", "端口下钻", "监听、防火墙、计数、conntrack", false, [this] { actionFocusedPortInspect(); }},
+                     {"3", "conntrack 快照", "当前活跃连接视图", false, [this] { actionConntrackSnapshot(); }},
+                     {"4", "日志摘要", "fail2ban 与 UFW 日志", false, [this] { actionLogSummary(); }},
+                     {"5", "导出报告", "写入 /tmp 报告", false, [this] { actionExportReport(); }},
+                     {"6", "服务控制", "fail2ban 与 UFW 服务动作", true, [this] { actionServiceControl(); }},
+                     {"7", "安装/更新 IP 国家库", "DB-IP Lite 免费 MMDB，用于来源国家展示", true, [this] { actionInstallGeoDatabase(); }},
+                     {"8", "底层计数规则", "查看 nftables 原始输出", false, [this] { actionRawNftTable(); }},
                  });
     }
 
@@ -7535,7 +7514,7 @@ private:
         buffer.add("");
         addTrafficOnboarding(buffer, snapshot->tableEnabled, snapshot->trafficHistoryAvailable);
         buffer.add("");
-        buffer.add(ansi::gray + std::string("提示: 实时状态和慢查询在安全中心、诊断、下钻检查中执行。") + ansi::plain);
+        buffer.add(ansi::gray + std::string("提示: 实时状态在安全中心，底层慢查询在高级/诊断中执行。") + ansi::plain);
         return buffer;
     }
 
@@ -8015,7 +7994,7 @@ private:
             return true;
         }
         buffer.add(ansi::yellow + std::string("IP 国家库仍不可用，已停止当前分析。") + ansi::plain);
-        buffer.add("可以稍后从“诊断 -> 安装/更新 IP 国家库”重试，或跳过国家/地区继续使用核心分析。");
+        buffer.add("可以稍后从“高级/诊断 -> 安装/更新 IP 国家库”重试，或跳过国家/地区继续使用核心分析。");
         pushResult("安装/更新 IP 国家库", buffer);
         return false;
     }
@@ -8138,7 +8117,7 @@ private:
             buffer.add("流量统计历史已存在，但本次自动修复未完全通过；可进入“可靠性自检”查看具体层级。");
         }
         if (!dbIpLiteDatabaseReady()) {
-            buffer.add("IP 国家库是可选能力。需要国家/地区展示时，进入“诊断 -> 安装/更新 IP 国家库”。");
+            buffer.add("IP 国家库是可选能力。需要国家/地区展示时，进入“高级/诊断 -> 安装/更新 IP 国家库”。");
         }
         cachedDashboardValid() = false;
         if (f2bOk) {
@@ -10200,7 +10179,7 @@ inline ScreenBuffer dashboardBufferForCli() {
     } else if (totalRows.empty()) {
         buffer.add("等待下一轮 5 分钟采样，或用 sudo ltg --traffic-snapshot 手动记录一次。");
     } else {
-        buffer.add("趋势看流量统计，实时排障看 --ip-traffic 或 TUI 下钻检查。");
+        buffer.add("趋势看流量统计，实时排障看 --ip-traffic 或 TUI 高级/诊断。");
     }
     return buffer;
 }

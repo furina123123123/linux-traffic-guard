@@ -22,6 +22,7 @@
 - Added timeout boundaries to in-app apt repairs and made `make update` recheck missing packages plus rerun the installed protection bootstrap after reinstalling.
 - Changed normal TUI confirmations to single-key decisions (`y`, `n`, `q`, `Esc`, or `Enter` for the default) while keeping scroll support on long confirmation pages.
 - Let result pages return with `Enter`, `Backspace`, `q`, or `Esc`, so keyboard-only workflows can continue without hunting for the exact back key.
+- Reduced TUI path sprawl by reorganizing the main menu around user goals: dashboard, one-click repair, traffic accounting, security center, and advanced diagnostics; repeated service/diagnostic routes were folded into the advanced area.
 - Added restrained color accents to TUI menus, section headers, table headers, status badges, and traffic metric values.
 - Kept the color layer compatible with `NO_COLOR` and redirected output through the existing ANSI-stripping path.
 
