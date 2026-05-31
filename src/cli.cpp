@@ -40,6 +40,7 @@
 #include <thread>
 #include <vector>
 
+#include "ltg/runtime_repair.hpp"
 #include "ltg/tui_routes.hpp"
 #include "ltg/version.hpp"
 
@@ -341,11 +342,6 @@ struct F2bEffectProbe {
     CommandResult unban;
     CommandResult ufwCleanup;
     F2bJailRuntimeInfo jailStatus;
-};
-
-struct F2bDependencyReadiness {
-    bool ok = false;
-    std::vector<std::string> missing;
 };
 
 enum class ReliabilityStatus {
@@ -5724,16 +5720,6 @@ inline void addReliabilityResult(ReliabilityReport &report,
     report.results.push_back({group, name, status, summary, evidence, suggestion});
 }
 
-inline std::string dependencyPackageForTool(const std::string &tool) {
-    if (tool == "nft") return "nftables";
-    if (tool == "ss") return "iproute2";
-    if (tool == "awk") return "gawk";
-    if (tool == "fail2ban-client") return "fail2ban";
-    if (tool == "mmdblookup") return "mmdb-bin";
-    if (tool == "curl" || tool == "wget") return tool;
-    return tool;
-}
-
 inline F2bDependencyReadiness fail2banStackDependencyReadiness() {
     Shell::clearExistsCache();
     F2bDependencyReadiness readiness;
@@ -5746,33 +5732,6 @@ inline F2bDependencyReadiness fail2banStackDependencyReadiness() {
     return readiness;
 }
 
-inline std::string fail2banStackInstallCommand() {
-    return commandWithTimeout(
-        "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban ufw",
-        300);
-}
-
-inline bool shouldOfferFail2banStackAptInstall(const F2bDependencyReadiness &readiness) {
-    return std::find(readiness.missing.begin(), readiness.missing.end(), "fail2ban-client") != readiness.missing.end() ||
-           std::find(readiness.missing.begin(), readiness.missing.end(), "ufw") != readiness.missing.end();
-}
-
-inline std::string ltgRuntimeDependencyInstallCommand() {
-    return commandWithTimeout(
-        "DEBIAN_FRONTEND=noninteractive apt-get update && "
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y "
-        "fail2ban ufw nftables iproute2 conntrack gawk grep curl mmdb-bin libsqlite3-0",
-        300);
-}
-
-inline bool shouldInstallRuntimeDependencies(const std::vector<std::string> &missingCoreTools) {
-    return !missingCoreTools.empty();
-}
-
-inline std::vector<std::string> coreRuntimeTools() {
-    return {"nft", "ufw", "fail2ban-client", "systemctl", "journalctl", "ss", "conntrack", "awk", "grep", "curl"};
-}
-
 inline std::vector<std::string> missingCoreRuntimeTools() {
     std::vector<std::string> missing;
     for (const auto &tool : coreRuntimeTools()) {
@@ -5782,22 +5741,6 @@ inline std::vector<std::string> missingCoreRuntimeTools() {
     }
     return missing;
 }
-
-struct FirstRunSetupReadiness {
-    std::vector<std::string> missingTools;
-    bool sshJailLoaded = false;
-    bool scanJailLoaded = false;
-    bool geoReaderReady = false;
-    bool geoDatabaseReady = false;
-    bool trafficConfigured = false;
-    std::set<int> existingTrafficPorts;
-    std::set<int> recommendedTrafficPorts;
-
-    bool needsBootstrap() const {
-        return !missingTools.empty() || !sshJailLoaded || !scanJailLoaded ||
-               (!trafficConfigured && (!existingTrafficPorts.empty() || !recommendedTrafficPorts.empty()));
-    }
-};
 
 inline FirstRunSetupReadiness firstRunSetupReadiness() {
     FirstRunSetupReadiness readiness;
@@ -5817,12 +5760,6 @@ inline FirstRunSetupReadiness firstRunSetupReadiness() {
         readiness.scanJailLoaded = fail2banJailRuntimeStatus(kRule2Jail).loaded();
     }
     return readiness;
-}
-
-inline bool dependencyDoctorShouldOfferRepair(const std::vector<std::string> &missingCoreTools,
-                                              bool trafficConfigured,
-                                              const std::set<int> &recommendedPorts) {
-    return !missingCoreTools.empty() || (!trafficConfigured && !recommendedPorts.empty());
 }
 
 inline ScreenBuffer firstRunSetupSummaryBuffer(const FirstRunSetupReadiness &readiness) {
@@ -5867,8 +5804,8 @@ inline void verifyDependencyChain(ReliabilityReport &report) {
         const bool ok = Shell::exists(tool);
         addReliabilityResult(report, "依赖链路", tool, ok ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
                              ok ? "命令可执行" : "命令不可用",
-                             "apt 包: " + dependencyPackageForTool(tool),
-                             ok ? "" : "执行“安装常见依赖”，或 apt install -y " + dependencyPackageForTool(tool));
+                             "apt 包: " + runtimeDependencyPackageForTool(tool),
+                             ok ? "" : "执行“安装常见依赖”，或 apt install -y " + runtimeDependencyPackageForTool(tool));
     }
     const bool downloader = Shell::exists("curl") || Shell::exists("wget");
     addReliabilityResult(report, "依赖链路", "curl/wget", downloader ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,

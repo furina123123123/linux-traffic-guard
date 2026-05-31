@@ -383,7 +383,7 @@ linux_traffic_guard.hpp
 makefile           构建、安装、检查、发布打包
 ```
 
-TUI 导航模型放在 `include/ltg/tui_routes.hpp` 和 `src/tui_routes.cpp`，用户路径可以独立于命令执行和系统修复逻辑继续演进。
+TUI 导航模型放在 `include/ltg/tui_routes.hpp` 和 `src/tui_routes.cpp`，用户路径可以独立于命令执行继续演进。运行环境修复策略，例如核心工具、apt 包映射和首次启动引导判断，放在 `include/ltg/runtime_repair.hpp` 和 `src/runtime_repair.cpp`。
 
 ## License
 

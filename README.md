@@ -387,7 +387,9 @@ makefile           Build, install, check, release packaging
 
 The TUI navigation model lives in `include/ltg/tui_routes.hpp` and
 `src/tui_routes.cpp`, so user-facing paths can evolve separately from command
-execution and system-repair logic.
+execution. Runtime repair policy such as core tools, apt package mapping, and
+first-run bootstrap decisions lives in `include/ltg/runtime_repair.hpp` and
+`src/runtime_repair.cpp`.
 
 ## License
 
