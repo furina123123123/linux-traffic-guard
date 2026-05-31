@@ -40,6 +40,7 @@
 #include <thread>
 #include <vector>
 
+#include "ltg/tui_routes.hpp"
 #include "ltg/version.hpp"
 
 #ifdef _WIN32
@@ -4513,15 +4514,15 @@ inline std::string serviceSuggestion(const std::string &name, const std::string 
         return name == "fail2ban" ? "一致性核验" : "查看规则";
     }
     if (state == "未启用") {
-        return name == "fail2ban" ? "一键修复" : "高级/诊断->服务控制";
+        return name == "fail2ban" ? "一键修复" : "安全中心->高级/诊断->服务控制";
     }
     if (state == "异常") {
-        return "高级/诊断->日志摘要";
+        return "安全中心->高级/诊断->日志摘要";
     }
     if (state == "缺失") {
         return "一键修复";
     }
-    return "高级/诊断";
+    return "安全中心->高级/诊断";
 }
 
 inline bool trafficTableEnabled() {
@@ -5884,7 +5885,7 @@ inline void verifyGeoDatabaseChain(ReliabilityReport &report) {
         addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", ReliabilityStatus::Skipped,
                              "未安装本地国家库，表格国家/地区显示为 -",
                              kDbIpLiteMmdbPath,
-                             "高级/诊断 -> 安装/更新 IP 国家库");
+                             "安全中心 -> 高级/诊断 -> 安装/更新 IP 国家库");
         return;
     }
     addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", reader ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
@@ -6946,8 +6947,8 @@ inline void addTrafficOnboarding(ScreenBuffer &buffer, bool configured, bool has
         return;
     }
     buffer.add("1. 看趋势用“流量统计 -> 日流量 / 月流量 / 年流量”。");
-    buffer.add("2. 查具体 IP 用“流量统计 -> 实时明细”，底层排障进“高级/诊断”。");
-    buffer.add("3. 查服务、防火墙、fail2ban 运行态用“安全中心”，深度日志进“高级/诊断”。");
+    buffer.add("2. 查具体 IP 用“流量统计 -> 实时明细”，底层排障进“安全中心 -> 高级/诊断”。");
+    buffer.add("3. 查服务、防火墙、fail2ban 运行态用“安全中心”，深度日志进“安全中心 -> 高级/诊断”。");
 }
 
 inline std::vector<std::string> tableLines(const Table &table, const std::string &emptyMessage = "暂无数据") {
@@ -6997,7 +6998,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     return buffer;
 }
 
-class TuiApp {
+class TuiApp : public TuiRouteCallbacks {
 public:
     void run() {
         pages_.clear();
@@ -7214,32 +7215,24 @@ private:
     }
 
     void pushMainMenu() {
+        TuiMenuDefinition definition = tuiMainMenuDefinition(kName + " v" + kVersion);
         Page page;
         page.kind = PageKind::Menu;
-        page.title = kName + " v" + kVersion;
-        page.subtitle = "按用户目标组织：观察、修复、流量、安全；底层细节放进高级。";
+        page.title = definition.title;
+        page.subtitle = definition.subtitle;
         page.root = true;
-        page.items = {
-            {"1", "仪表盘", "最快入口，最近31天端口流量和下一步建议", false, [this] { pushDashboard(); }},
-            {"2", "一键修复", "自动补齐依赖、防护策略和流量采样链路", true, [this] { actionInstallDependencies(); }},
-            {"3", "流量统计", "开启/追加端口，查看日/月/年流量", false, [this] { pushTrafficMenu(); }},
-            {"4", "安全中心", "威胁分析、fail2ban、UFW 和处置核验", false, [this] { pushSecurityMenu(); }},
-            {"5", "高级/诊断", "日志、依赖、导出、conntrack 和底层规则", false, [this] { pushAdvancedMenu(); }},
-        };
+        page.items = actionItemsForRoutes(definition.items);
         pages_.push_back(std::move(page));
     }
 
     void pushSetupAssistant(const FirstRunSetupReadiness &readiness) {
+        TuiMenuDefinition definition = tuiSetupAssistantMenuDefinition(kName + " v" + kVersion);
         Page page;
         page.kind = PageKind::Menu;
-        page.title = kName + " v" + kVersion;
-        page.subtitle = "检测到首次/未就绪环境。建议先一键初始化，后续日常使用会直接进入仪表盘。";
+        page.title = definition.title;
+        page.subtitle = definition.subtitle;
         page.introLines = firstRunSetupSummaryBuffer(readiness).lines();
-        page.items = {
-            {"1", "一键初始化/修复", "自动安装缺失依赖、配置并验收两条 fail2ban 防护策略", true, [this] { actionRunSetupAssistant(); }},
-            {"2", "先看仪表盘", "跳过初始化，只查看已有流量和缓存摘要", false, [this] { pushDashboard(); }},
-            {"3", "依赖检查/修复", "发现缺失后可直接补齐", false, [this] { actionDependencyDoctor(); }},
-        };
+        page.items = actionItemsForRoutes(definition.items);
         pages_.push_back(std::move(page));
     }
 
@@ -7284,28 +7277,66 @@ private:
         pages_.push_back(std::move(page));
     }
 
+    ActionItem actionItemForRoute(const TuiRouteItem &route) {
+        return {route.key, route.title, route.detail, route.needsRoot, [this, action = route.action] {
+                    dispatchTuiRoute(action, *this);
+                }};
+    }
+
+    std::vector<ActionItem> actionItemsForRoutes(const std::vector<TuiRouteItem> &routes) {
+        std::vector<ActionItem> items;
+        items.reserve(routes.size());
+        for (const TuiRouteItem &route : routes) {
+            items.push_back(actionItemForRoute(route));
+        }
+        return items;
+    }
+
+    void pushRouteMenu(const TuiMenuDefinition &definition) {
+        pushMenu(definition.title, definition.subtitle, actionItemsForRoutes(definition.items));
+    }
+
+    void routeShowDashboard() override { pushDashboard(); }
+    void routeOneClickRepair() override { actionInstallDependencies(); }
+    void routeShowTrafficMenu() override { pushTrafficMenu(); }
+    void routeShowSecurityMenu() override { pushSecurityMenu(); }
+    void routeShowAdvancedMenu() override { pushAdvancedMenu(); }
+    void routeRunSetupAssistant() override { actionRunSetupAssistant(); }
+    void routeDependencyDoctor() override { actionDependencyDoctor(); }
+    void routeInstallTraffic() override { actionInstallTraffic(); }
+    void routeTrafficDay() override { actionTrafficPeriodQuery(TrafficPeriodMode::Day); }
+    void routeTrafficMonth() override { actionTrafficPeriodQuery(TrafficPeriodMode::Month); }
+    void routeTrafficYear() override { actionTrafficPeriodQuery(TrafficPeriodMode::Year); }
+    void routeTrafficRealtime() override { actionShowTrafficRanking(); }
+    void routeRemoveTrafficPorts() override { actionRemoveTrafficPorts(); }
+    void routeRemoveTrafficAccounting() override { actionRemoveTrafficAccounting(); }
+    void routeSecurityStatus() override { actionSecurityStatus(); }
+    void routeShowUfwAnalyzeMenu() override { pushUfwAnalyzeMenu(); }
+    void routeShowSecurityOpsMenu() override { pushSecurityOpsMenu(); }
+    void routeShowFail2banPanel() override { pushFail2banPanel(); }
+    void routeReliabilitySelfCheck() override { actionReliabilitySelfCheck(); }
+    void routeUfwAnalyze24h() override { actionUfwAnalyzeHours(24); }
+    void routeUfwAnalyze7d() override { actionUfwAnalyzeDays(7); }
+    void routeUfwAnalyze28d() override { actionUfwAnalyzeDays(28); }
+    void routeUfwAnalyzeCustom() override { actionUfwAnalyzeCustom(); }
+    void routeUfwTraceIp() override { actionUfwTraceIp(); }
+    void routeShowUfwCacheMenu() override { pushUfwCacheMenu(); }
+    void routeUfwCacheStatus() override { actionUfwCacheStatus(); }
+    void routeUfwCacheClear() override { actionClearUfwCache(); }
+    void routeFocusedPortInspect() override { actionFocusedPortInspect(); }
+    void routeConntrackSnapshot() override { actionConntrackSnapshot(); }
+    void routeLogSummary() override { actionLogSummary(); }
+    void routeExportReport() override { actionExportReport(); }
+    void routeServiceControl() override { actionServiceControl(); }
+    void routeInstallGeoDatabase() override { actionInstallGeoDatabase(); }
+    void routeRawNftTable() override { actionRawNftTable(); }
+
     void pushTrafficMenu() {
-        pushMenu("流量统计", "端口级 vnStat：按日/月/年看端口，并下钻 IP",
-                 {
-                     {"1", "开启/追加端口", "默认追加，不清空已有统计", true, [this] { actionInstallTraffic(); }},
-                     {"2", "日流量", "端口级 vnStat -d，带 IP 明细入口", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Day); }},
-                     {"3", "月流量", "端口级 vnStat -m，带 IP 明细入口", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Month); }},
-                     {"4", "年流量", "端口级 vnStat -y，带 IP 明细入口", false, [this] { actionTrafficPeriodQuery(TrafficPeriodMode::Year); }},
-                     {"5", "实时明细", "较慢，读取底层实时计数和 IP 明细", false, [this] { actionShowTrafficRanking(); }},
-                     {"6", "删除统计端口", "停止统计指定端口，保留历史", true, [this] { actionRemoveTrafficPorts(); }},
-                     {"7", "高级：删除全部统计规则", "高风险，删除底层统计规则", true, [this] { actionRemoveTrafficAccounting(); }},
-                 });
+        pushRouteMenu(tuiTrafficMenuDefinition());
     }
 
     void pushSecurityMenu() {
-        pushMenu("安全中心", "先看总览，再分析来源；需要改系统时走处置或策略",
-                 {
-                     {"1", "安全总览", "一屏看服务、策略、封禁和下一步", false, [this] { actionSecurityStatus(); }},
-                     {"2", "分析追查", "来源 Top、端口扫描、IP 下钻、缓存", false, [this] { pushUfwAnalyzeMenu(); }},
-                     {"3", "处置修复", "封禁/解封、端口规则、核验、同步", true, [this] { pushSecurityOpsMenu(); }},
-                     {"4", "策略管理", "SSH 防护、扫描升级、白名单", true, [this] { pushFail2banPanel(); }},
-                     {"5", "可靠性自检", "验证依赖、更新、防护、统计、诊断是否真落地", true, [this] { actionReliabilitySelfCheck(); }},
-                 });
+        pushRouteMenu(tuiSecurityMenuDefinition());
     }
 
     void pushFail2banPanel() {
@@ -7398,37 +7429,15 @@ private:
     }
 
     void pushAdvancedMenu() {
-        pushMenu("高级/诊断", "日常路径之外的底层排障、日志、依赖和导出",
-                 {
-                     {"1", "依赖检查/修复", "发现缺失后可直接补齐", false, [this] { actionDependencyDoctor(); }},
-                     {"2", "端口下钻", "监听、防火墙、计数、conntrack", false, [this] { actionFocusedPortInspect(); }},
-                     {"3", "conntrack 快照", "当前活跃连接视图", false, [this] { actionConntrackSnapshot(); }},
-                     {"4", "日志摘要", "fail2ban 与 UFW 日志", false, [this] { actionLogSummary(); }},
-                     {"5", "导出报告", "写入 /tmp 报告", false, [this] { actionExportReport(); }},
-                     {"6", "服务控制", "fail2ban 与 UFW 服务动作", true, [this] { actionServiceControl(); }},
-                     {"7", "安装/更新 IP 国家库", "DB-IP Lite 免费 MMDB，用于来源国家展示", true, [this] { actionInstallGeoDatabase(); }},
-                     {"8", "底层计数规则", "查看 nftables 原始输出", false, [this] { actionRawNftTable(); }},
-                 });
+        pushRouteMenu(tuiAdvancedMenuDefinition());
     }
 
     void pushUfwAnalyzeMenu() {
-        pushMenu("威胁分析", "攻击来源、端口扫描和本机监听进程",
-                 {
-                     {"1", "最近24小时", "分析最近 24 小时 UFW 日志", false, [this] { actionUfwAnalyzeHours(24); }},
-                     {"2", "最近7天", "分析最近 7 天 UFW 日志", false, [this] { actionUfwAnalyzeDays(7); }},
-                     {"3", "最近28天", "分析最近 28 天 UFW 日志", false, [this] { actionUfwAnalyzeDays(28); }},
-                     {"4", "自定义时间段", "输入开始/结束日期", false, [this] { actionUfwAnalyzeCustom(); }},
-                     {"5", "指定IP追查", "先选时间段再输入 IP", false, [this] { actionUfwTraceIp(); }},
-                     {"6", "分析缓存", "查看缓存状态或手动清理", false, [this] { pushUfwCacheMenu(); }},
-                 });
+        pushRouteMenu(tuiUfwAnalyzeMenuDefinition());
     }
 
     void pushUfwCacheMenu() {
-        pushMenu("分析缓存", "缓存只用于加速威胁分析，不参与防火墙决策",
-                 {
-                     {"1", "缓存状态", "查看路径、活跃时间、记录数和清理策略", false, [this] { actionUfwCacheStatus(); }},
-                     {"2", "清理缓存", "清空 SQLite 或 fallback 文本缓存", true, [this] { actionClearUfwCache(); }},
-                 });
+        pushRouteMenu(tuiUfwCacheMenuDefinition());
     }
 
     void pushResult(const std::string &title, const ScreenBuffer &buffer) {
@@ -7514,7 +7523,7 @@ private:
         buffer.add("");
         addTrafficOnboarding(buffer, snapshot->tableEnabled, snapshot->trafficHistoryAvailable);
         buffer.add("");
-        buffer.add(ansi::gray + std::string("提示: 实时状态在安全中心，底层慢查询在高级/诊断中执行。") + ansi::plain);
+        buffer.add(ansi::gray + std::string("提示: 实时状态在安全中心，底层慢查询在安全中心 -> 高级/诊断中执行。") + ansi::plain);
         return buffer;
     }
 
@@ -7994,7 +8003,7 @@ private:
             return true;
         }
         buffer.add(ansi::yellow + std::string("IP 国家库仍不可用，已停止当前分析。") + ansi::plain);
-        buffer.add("可以稍后从“高级/诊断 -> 安装/更新 IP 国家库”重试，或跳过国家/地区继续使用核心分析。");
+        buffer.add("可以稍后从“安全中心 -> 高级/诊断 -> 安装/更新 IP 国家库”重试，或跳过国家/地区继续使用核心分析。");
         pushResult("安装/更新 IP 国家库", buffer);
         return false;
     }
@@ -8117,7 +8126,7 @@ private:
             buffer.add("流量统计历史已存在，但本次自动修复未完全通过；可进入“可靠性自检”查看具体层级。");
         }
         if (!dbIpLiteDatabaseReady()) {
-            buffer.add("IP 国家库是可选能力。需要国家/地区展示时，进入“高级/诊断 -> 安装/更新 IP 国家库”。");
+            buffer.add("IP 国家库是可选能力。需要国家/地区展示时，进入“安全中心 -> 高级/诊断 -> 安装/更新 IP 国家库”。");
         }
         cachedDashboardValid() = false;
         if (f2bOk) {
@@ -10179,7 +10188,7 @@ inline ScreenBuffer dashboardBufferForCli() {
     } else if (totalRows.empty()) {
         buffer.add("等待下一轮 5 分钟采样，或用 sudo ltg --traffic-snapshot 手动记录一次。");
     } else {
-        buffer.add("趋势看流量统计，实时排障看 --ip-traffic 或 TUI 高级/诊断。");
+        buffer.add("趋势看流量统计，实时排障看 --ip-traffic 或 TUI 安全中心 -> 高级/诊断。");
     }
     return buffer;
 }
@@ -10887,6 +10896,20 @@ inline int selfTest() {
     check("菜单选中行高亮不中断", selectedMenuLine.rfind(ansi::plain) == selectedMenuLine.size() - ansi::plain.size() &&
                                           selectedMenuLine.find(ansi::plain) == selectedMenuLine.rfind(ansi::plain) &&
                                           selectedMenuLine.find(ansi::inverse) == 0);
+    const auto routeHasAction = [](const TuiMenuDefinition &definition, TuiRouteAction action) {
+        return std::any_of(definition.items.begin(), definition.items.end(), [action](const TuiRouteItem &item) {
+            return item.action == action;
+        });
+    };
+    const TuiMenuDefinition mainRoutes = tuiMainMenuDefinition("test");
+    const TuiMenuDefinition securityRoutes = tuiSecurityMenuDefinition();
+    check("TUI 主路径收敛到目标入口", mainRoutes.items.size() == 4 &&
+                                          routeHasAction(mainRoutes, TuiRouteAction::Dashboard) &&
+                                          routeHasAction(mainRoutes, TuiRouteAction::OneClickRepair) &&
+                                          routeHasAction(mainRoutes, TuiRouteAction::TrafficMenu) &&
+                                          routeHasAction(mainRoutes, TuiRouteAction::SecurityMenu) &&
+                                          !routeHasAction(mainRoutes, TuiRouteAction::AdvancedMenu) &&
+                                          routeHasAction(securityRoutes, TuiRouteAction::AdvancedMenu));
     Viewport cursorViewport;
     ScreenBuffer cursorBuffer;
     cursorBuffer.add("菜单行");

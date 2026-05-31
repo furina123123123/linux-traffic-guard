@@ -265,7 +265,7 @@ LTG 可以在 UFW 来源表和流量 IP 明细表中显示国家/地区。这个
 
 ```text
 sudo ltg
-高级/诊断 -> 安装/更新 IP 国家库
+安全中心 -> 高级/诊断 -> 安装/更新 IP 国家库
 ```
 
 数据库保存到：
@@ -382,6 +382,8 @@ linux_traffic_guard.hpp
                    旧版兼容聚合头
 makefile           构建、安装、检查、发布打包
 ```
+
+TUI 导航模型放在 `include/ltg/tui_routes.hpp` 和 `src/tui_routes.cpp`，用户路径可以独立于命令执行和系统修复逻辑继续演进。
 
 ## License
 

@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include "ltg/tui_routes.hpp"
 #include "ltg/version.hpp"
 
 namespace linux_traffic_guard {

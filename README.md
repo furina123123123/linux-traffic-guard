@@ -267,7 +267,7 @@ Install or update the local database from the TUI:
 
 ```text
 sudo ltg
-Advanced/Diagnostics -> Install/update IP country database
+Security Center -> Advanced/Diagnostics -> Install/update IP country database
 ```
 
 The database is stored at:
@@ -384,6 +384,10 @@ linux_traffic_guard.hpp
                    Legacy umbrella header
 makefile           Build, install, check, release packaging
 ```
+
+The TUI navigation model lives in `include/ltg/tui_routes.hpp` and
+`src/tui_routes.cpp`, so user-facing paths can evolve separately from command
+execution and system-repair logic.
 
 ## License
 

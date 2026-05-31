@@ -50,7 +50,7 @@ build-nosqlite/%.o: src/%.cpp
 
 deps:
 ifeq ($(OS),Windows_NT)
-	@echo "deps 目标只支持 Ubuntu/Debian。Windows 下请在目标 Linux 服务器或 WSL 中执行。"
+	@echo "deps is supported on Ubuntu/Debian targets. On Windows, run it on the target Linux host or in WSL."
 else
 	@missing=""; \
 	for pkg in $(DEPS); do \
@@ -75,9 +75,9 @@ else
 		fi; \
 	done; \
 	if [ -z "$$missing" ]; then \
-		echo "Ubuntu/Debian 依赖已就绪，跳过 apt 安装。"; \
+		echo "Ubuntu/Debian dependencies are already present; skipping apt install."; \
 	else \
-		echo "将安装缺失依赖:$$missing"; \
+		echo "Installing missing dependencies:$$missing"; \
 		$(SUDO) $(APT_RUN) $(APT_GET) update; \
 		$(SUDO) $(APT_RUN) $(APT_GET) install -y $$missing; \
 	fi
@@ -85,7 +85,7 @@ endif
 
 bootstrap: deps all
 ifeq ($(OS),Windows_NT)
-	@echo "bootstrap 目标只支持 Ubuntu/Debian。"
+	@echo "bootstrap is supported on Ubuntu/Debian targets."
 else
 	$(SUDO) install -Dm755 $(BINARY) $(DESTDIR)$(BINDIR)/$(TARGET)
 	@if [ -z "$(DESTDIR)" ]; then \
@@ -97,7 +97,7 @@ endif
 
 update:
 ifeq ($(OS),Windows_NT)
-	@echo "update 目标只支持 Ubuntu/Debian。"
+	@echo "update is supported on Ubuntu/Debian targets."
 else
 	git pull --ff-only
 	$(MAKE) deps
@@ -156,18 +156,18 @@ clean:
 	-$(RMDIR) build build-nosqlite $(NULL)
 
 help:
-	@echo "Linux 流量守卫 makefile"
-	@echo "  make          编译 ltg"
-	@echo "  make deps     检查并安装缺失的 Ubuntu/Debian 依赖"
-	@echo "  make bootstrap 补齐缺失依赖、编译、安装 ltg 并配置 fail2ban 防护栈"
-	@echo "  make update   git pull 后补齐缺失依赖、重新编译、安装并验收"
-	@echo "  make run      编译并进入交互界面"
-	@echo "  make status   编译并打印仪表盘"
-	@echo "  make doctor   编译并检查依赖"
-	@echo "  make check    编译并做基础自检"
-	@echo "  make release-check 运行发布前检查并生成源码包"
-	@echo "  make install  安装到 $(BINDIR)"
-	@echo "  make uninstall 删除 $(BINDIR)/$(TARGET)"
-	@echo "  make dist     生成源码发布包"
-	@echo "  Ubuntu依赖   sudo apt install -y $(DEPS)"
-	@echo "  make clean    删除编译产物"
+	@echo "Linux Traffic Guard makefile"
+	@echo "  make            build ltg"
+	@echo "  make deps       install only missing Ubuntu/Debian dependencies"
+	@echo "  make bootstrap  deps + build + install + fail2ban protection bootstrap"
+	@echo "  make update     git pull + deps + rebuild + install + bootstrap verification"
+	@echo "  make run        build and open the interactive TUI"
+	@echo "  make status     build and print the dashboard"
+	@echo "  make doctor     build and check dependencies"
+	@echo "  make check      build and run self-tests"
+	@echo "  make release-check run release gates and source package"
+	@echo "  make install    install to $(BINDIR)"
+	@echo "  make uninstall  remove $(BINDIR)/$(TARGET)"
+	@echo "  make dist       build a source release package"
+	@echo "  apt packages    sudo apt install -y $(DEPS)"
+	@echo "  make clean      remove build artifacts"
