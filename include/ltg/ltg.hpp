@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "ltg/protection_bootstrap.hpp"
+#include "ltg/traffic_accounting.hpp"
 #include "ltg/tui_routes.hpp"
 #include "ltg/runtime_repair.hpp"
 #include "ltg/version.hpp"

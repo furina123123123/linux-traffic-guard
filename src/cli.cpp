@@ -42,6 +42,7 @@
 
 #include "ltg/protection_bootstrap.hpp"
 #include "ltg/runtime_repair.hpp"
+#include "ltg/traffic_accounting.hpp"
 #include "ltg/tui_routes.hpp"
 #include "ltg/version.hpp"
 
@@ -94,10 +95,6 @@ inline const std::string plain = "\033[0m";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kLatestSha256Url = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/SHA256SUMS";
-inline const std::string kIpTrafficTable = "usp_ip_traffic";
-inline const std::string kTrafficHistoryDir = "/var/tmp/linux_traffic_guard_traffic_history_v1";
-inline const std::string kTrafficSnapshotService = "linux-traffic-guard-traffic-snapshot.service";
-inline const std::string kTrafficSnapshotTimer = "linux-traffic-guard-traffic-snapshot.timer";
 inline const std::string kUnknownUfwPort = "UNKNOWN";
 inline const std::string kDbIpLiteDownloadPage = "https://db-ip.com/db/download/ip-to-city-lite";
 inline const std::string kDbIpLiteDir = "/var/lib/linux-traffic-guard";
@@ -800,10 +797,6 @@ inline std::string joinPorts(const std::set<int> &ports, const std::string &sep 
         out << port;
     }
     return out.str();
-}
-
-inline std::string nftPortElements(const std::set<int> &ports) {
-    return "{ " + joinPorts(ports, ", ") + " }";
 }
 
 inline std::string humanPortList(const std::set<int> &ports, std::size_t limit = 12) {
@@ -4292,67 +4285,6 @@ inline void addUfwAnalysisToBuffer(ScreenBuffer &buffer, const UfwAnalysisReport
     }
 }
 
-inline std::string nftCommand(const std::string &body) {
-    return "nft " + shellQuote(body);
-}
-
-inline std::string nftCommandIgnoreError(const std::string &body) {
-    return nftCommand(body) + " 2>/dev/null || true";
-}
-
-inline std::vector<std::string> trafficAccountingRuleCommands(const std::set<int> &ports, bool resetTable) {
-    const std::string table = "inet " + kIpTrafficTable;
-    const std::string portElements = nftPortElements(ports);
-    std::vector<std::string> commands;
-    if (resetTable) {
-        commands.push_back("nft delete table " + table + " 2>/dev/null || true");
-    }
-    commands.push_back(nftCommandIgnoreError("add table " + table));
-    commands.push_back(nftCommandIgnoreError("add set " + table + " tracked_ports { type inet_service; flags interval; }"));
-    commands.push_back(nftCommandIgnoreError("add set " + table + " ipv4_download { type ipv4_addr . inet_service; flags dynamic; counter; }"));
-    commands.push_back(nftCommandIgnoreError("add set " + table + " ipv4_upload { type ipv4_addr . inet_service; flags dynamic; counter; }"));
-    commands.push_back(nftCommandIgnoreError("add set " + table + " ipv6_download { type ipv6_addr . inet_service; flags dynamic; counter; }"));
-    commands.push_back(nftCommandIgnoreError("add set " + table + " ipv6_upload { type ipv6_addr . inet_service; flags dynamic; counter; }"));
-    commands.push_back(nftCommandIgnoreError("flush set " + table + " tracked_ports"));
-    commands.push_back(nftCommand("add element " + table + " tracked_ports " + portElements));
-    for (const char *chain : {"input_account", "output_account", "forward_account"}) {
-        commands.push_back(nftCommandIgnoreError("flush chain " + table + " " + std::string(chain)));
-        commands.push_back(nftCommandIgnoreError("delete chain " + table + " " + std::string(chain)));
-    }
-    commands.push_back(nftCommand("add chain " + table + " input_account { type filter hook input priority -150; policy accept; }"));
-    commands.push_back(nftCommand("add chain " + table + " output_account { type filter hook output priority -150; policy accept; }"));
-    commands.push_back(nftCommand("add chain " + table + " forward_account { type filter hook forward priority -150; policy accept; }"));
-    commands.push_back(nftCommand("add rule " + table + " input_account tcp dport @tracked_ports update @ipv4_download { ip saddr . tcp dport }"));
-    commands.push_back(nftCommand("add rule " + table + " input_account udp dport @tracked_ports update @ipv4_download { ip saddr . udp dport }"));
-    commands.push_back(nftCommand("add rule " + table + " input_account meta nfproto ipv6 tcp dport @tracked_ports update @ipv6_download { ip6 saddr . tcp dport }"));
-    commands.push_back(nftCommand("add rule " + table + " input_account meta nfproto ipv6 udp dport @tracked_ports update @ipv6_download { ip6 saddr . udp dport }"));
-    commands.push_back(nftCommand("add rule " + table + " output_account tcp sport @tracked_ports update @ipv4_upload { ip daddr . tcp sport }"));
-    commands.push_back(nftCommand("add rule " + table + " output_account udp sport @tracked_ports update @ipv4_upload { ip daddr . udp sport }"));
-    commands.push_back(nftCommand("add rule " + table + " output_account meta nfproto ipv6 tcp sport @tracked_ports update @ipv6_upload { ip6 daddr . tcp sport }"));
-    commands.push_back(nftCommand("add rule " + table + " output_account meta nfproto ipv6 udp sport @tracked_ports update @ipv6_upload { ip6 daddr . udp sport }"));
-    commands.push_back(nftCommand("add rule " + table + " forward_account tcp dport @tracked_ports update @ipv4_download { ip saddr . tcp dport }"));
-    commands.push_back(nftCommand("add rule " + table + " forward_account udp dport @tracked_ports update @ipv4_download { ip saddr . udp dport }"));
-    commands.push_back(nftCommand("add rule " + table + " forward_account tcp sport @tracked_ports update @ipv4_upload { ip daddr . tcp sport }"));
-    commands.push_back(nftCommand("add rule " + table + " forward_account udp sport @tracked_ports update @ipv4_upload { ip daddr . udp sport }"));
-    commands.push_back(nftCommand("add rule " + table + " forward_account meta nfproto ipv6 tcp dport @tracked_ports update @ipv6_download { ip6 saddr . tcp dport }"));
-    commands.push_back(nftCommand("add rule " + table + " forward_account meta nfproto ipv6 udp dport @tracked_ports update @ipv6_download { ip6 saddr . udp dport }"));
-    commands.push_back(nftCommand("add rule " + table + " forward_account meta nfproto ipv6 tcp sport @tracked_ports update @ipv6_upload { ip6 daddr . tcp sport }"));
-    commands.push_back(nftCommand("add rule " + table + " forward_account meta nfproto ipv6 udp sport @tracked_ports update @ipv6_upload { ip6 daddr . udp sport }"));
-    return commands;
-}
-
-inline std::vector<std::string> trafficPortSetUpdateCommands(const std::set<int> &ports) {
-    const std::string table = "inet " + kIpTrafficTable;
-    std::vector<std::string> commands = {
-        nftCommandIgnoreError("add set " + table + " tracked_ports { type inet_service; flags interval; }"),
-        nftCommandIgnoreError("flush set " + table + " tracked_ports"),
-    };
-    if (!ports.empty()) {
-        commands.push_back(nftCommand("add element " + table + " tracked_ports " + nftPortElements(ports)));
-    }
-    return commands;
-}
-
 inline bool writeTrafficSnapshotTimerUnits(const std::string &argv0, std::string &error) {
 #ifdef _WIN32
     (void)argv0;
@@ -4545,10 +4477,6 @@ inline std::vector<TrafficRow> collectTrafficRows() {
         return a.bytes > b.bytes;
     });
     return rows;
-}
-
-inline std::string trafficHistoryPath(const std::string &name) {
-    return kTrafficHistoryDir + "/" + name;
 }
 
 inline bool trafficHistoryConfiguredFast() {
@@ -10442,6 +10370,11 @@ inline int selfTest() {
                                       return cmd.find("tracked_ports") != std::string::npos;
                                   }) &&
                                   resetCommands.front().find("delete table") != std::string::npos);
+    check("流量统计规则模型", kIpTrafficTable == "usp_ip_traffic" &&
+                                  trafficHistoryPath("delta.tsv") == kTrafficHistoryDir + "/delta.tsv" &&
+                                  nftPortElements(std::set<int>{80, 443}) == "{ 80, 443 }" &&
+                                  nftCommand("list table inet " + kIpTrafficTable).find("nft 'list table inet usp_ip_traffic'") != std::string::npos &&
+                                  kTrafficSnapshotTimer.find("traffic-snapshot.timer") != std::string::npos);
     const auto keepExistingTrafficPorts = resolveTrafficPortInput("", std::set<int>{443, 8443}, std::set<int>{443, 8443});
     const auto useRecommendedTrafficPorts = resolveTrafficPortInput("", std::set<int>{}, std::set<int>{80, 443});
     check("统计端口空输入自动修复", keepExistingTrafficPorts.ok &&

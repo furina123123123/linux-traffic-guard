@@ -26,6 +26,7 @@
 - Split the TUI navigation model into `include/ltg/tui_routes.hpp` and `src/tui_routes.cpp`, so user-facing paths are no longer hard-coded directly inside the large CLI execution file.
 - Split runtime-repair decisions into `include/ltg/runtime_repair.hpp` and `src/runtime_repair.cpp`, separating dependency/package/bootstrap policy from TUI rendering.
 - Split fail2ban/UFW protection bootstrap constants, templates, and command builders into `include/ltg/protection_bootstrap.hpp` and `src/protection_bootstrap.cpp`.
+- Split traffic accounting constants, history paths, nft command builders, and tracked-port rule generation into `include/ltg/traffic_accounting.hpp` and `src/traffic_accounting.cpp`.
 - Added restrained color accents to TUI menus, section headers, table headers, status badges, and traffic metric values.
 - Kept the color layer compatible with `NO_COLOR` and redirected output through the existing ANSI-stripping path.
 
