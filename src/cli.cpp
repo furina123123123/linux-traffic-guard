@@ -40,6 +40,7 @@
 #include <thread>
 #include <vector>
 
+#include "ltg/protection_bootstrap.hpp"
 #include "ltg/runtime_repair.hpp"
 #include "ltg/tui_routes.hpp"
 #include "ltg/version.hpp"
@@ -103,12 +104,6 @@ inline const std::string kDbIpLiteDir = "/var/lib/linux-traffic-guard";
 inline const std::string kDbIpLiteMmdbPath = "/var/lib/linux-traffic-guard/dbip-city-lite.mmdb";
 inline const std::string kDbIpLiteMetaPath = "/var/lib/linux-traffic-guard/dbip-city-lite.url";
 inline const std::string kDbIpLiteAttribution = "IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0";
-inline const std::string kRule1Jail = "sshd";
-inline const std::string kRule2Jail = "ufw-slowscan-global";
-inline const std::string kFail2banEffectProbeIp = "203.0.113.254";
-inline const std::string kJailConf = "/etc/fail2ban/jail.local";
-inline const std::string kRule2FilterFile = "/etc/fail2ban/filter.d/ufw-slowscan-global.conf";
-inline const std::string kUfwDropActionFile = "/etc/fail2ban/action.d/ufw-drop.conf";
 inline const std::string kUfwCacheDir = "/var/tmp/linux_traffic_guard_ufw_cache_v2";
 inline const std::string kFail2banDb = "/var/lib/fail2ban/fail2ban.sqlite3";
 inline constexpr int kUfwCacheIdleDays = 14;
@@ -1763,22 +1758,6 @@ inline bool applyJailConfigValue(const std::string &jail,
     return true;
 }
 
-inline std::string renderRule2FilterFile() {
-    return "[Definition]\n"
-           "failregex = ^.*\\[UFW (BLOCK|AUDIT)\\].*SRC=<HOST>.*$\n"
-           "ignoreregex =\n";
-}
-
-inline std::string renderUfwDropActionFile() {
-    return "[Definition]\n"
-           "actionstart =\n"
-           "actionstop =\n"
-           "actioncheck = ufw status >/dev/null\n"
-           "actionban = ufw deny from <ip> to any comment 'f2b:<name> ip:<ip>'\n"
-           "actionunban = ufw --force delete deny from <ip> to any\n"
-           "\n[Init]\n";
-}
-
 inline bool writeManagedFileWithBackup(const std::string &path,
                                        const std::string &content,
                                        std::string &backupPath,
@@ -1798,30 +1777,6 @@ inline bool writeManagedFileWithBackup(const std::string &path,
     return true;
 }
 
-inline std::vector<std::string> ensureFail2banBaselineCommands() {
-    std::vector<std::string> commands;
-    commands.push_back("systemctl enable --now fail2ban || true");
-    commands.push_back("fail2ban-client reload || systemctl restart fail2ban");
-    commands.push_back("ufw reload || true");
-    return commands;
-}
-
-inline std::string fail2banSetIpCommand(const std::string &jail, const std::string &verb, const std::string &ip) {
-    return "fail2ban-client set " + shellQuote(jail) + " " + verb + " " + shellQuote(ip) + " || true";
-}
-
-inline std::string ufwDenyFromCommand(const std::string &source, const std::string &comment = "") {
-    std::string command = "ufw deny from " + shellQuote(source);
-    if (!comment.empty()) {
-        command += " to any comment " + shellQuote(comment);
-    }
-    return command;
-}
-
-inline std::string ufwAllowFromCommand(const std::string &source) {
-    return "ufw allow from " + shellQuote(source);
-}
-
 inline bool ufwStatusHasDenyForIp(const std::string &output, const std::string &ip, bool requireFail2banComment) {
     for (const auto &line : splitLines(output)) {
         const std::string lower = lowerCopy(line);
@@ -1836,18 +1791,6 @@ inline bool ufwStatusHasDenyForIp(const std::string &output, const std::string &
         }
     }
     return false;
-}
-
-inline std::string ufwDeleteDenyFromCommand(const std::string &source) {
-    return "ufw --force delete deny from " + shellQuote(source) + " 2>/dev/null || true";
-}
-
-inline std::string ufwPortRuleCommand(const std::string &verb, const std::string &target) {
-    return "ufw " + verb + " " + shellQuote(target);
-}
-
-inline std::string ufwDeletePortRuleCommand(const std::string &verb, const std::string &target) {
-    return "ufw --force delete " + verb + " " + shellQuote(target);
 }
 
 inline std::string f2bRuntimeStateLabel(F2bJailRuntimeState state) {
@@ -1945,10 +1888,6 @@ inline std::string recentBanLineForJail(const std::string &jail) {
         "(grep -h '\\[" + jail + "\\].* Ban ' /var/log/fail2ban.log* 2>/dev/null || "
         "journalctl -u fail2ban --no-pager 2>/dev/null | grep '\\[" + jail + "\\].* Ban ') | tail -1";
     return trim(Shell::capture(cmd).output);
-}
-
-inline std::string fail2banSetIpCommandStrict(const std::string &jail, const std::string &verb, const std::string &ip) {
-    return "fail2ban-client set " + shellQuote(jail) + " " + verb + " " + shellQuote(ip);
 }
 
 inline std::time_t parseFail2banDbTime(const std::string &text) {
@@ -10759,6 +10698,11 @@ inline int selfTest() {
     check("危险命令 helper", fail2banSetIpCommand("sshd", "banip", "1.2.3.4").find("fail2ban-client set 'sshd' banip '1.2.3.4'") != std::string::npos &&
                                ufwDenyFromCommand("1.2.3.4", "case").find("comment 'case'") != std::string::npos &&
                                ufwDeleteDenyFromCommand("1.2.3.4").find("--force delete deny") != std::string::npos);
+    check("防护引导模板", kRule1Jail == "sshd" &&
+                              kRule2Jail == "ufw-slowscan-global" &&
+                              renderRule2FilterFile().find("UFW (BLOCK|AUDIT)") != std::string::npos &&
+                              renderUfwDropActionFile().find("comment 'f2b:<name> ip:<ip>'") != std::string::npos &&
+                              ensureFail2banBaselineCommands().size() == 3);
     std::array<int, 3> parsedVersion{};
     std::array<int, 3> olderVersion{};
     check("update 版本解析", parseVersionTriplet("Linux 流量守卫 4.12.13", parsedVersion) &&

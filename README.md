@@ -389,7 +389,9 @@ The TUI navigation model lives in `include/ltg/tui_routes.hpp` and
 `src/tui_routes.cpp`, so user-facing paths can evolve separately from command
 execution. Runtime repair policy such as core tools, apt package mapping, and
 first-run bootstrap decisions lives in `include/ltg/runtime_repair.hpp` and
-`src/runtime_repair.cpp`.
+`src/runtime_repair.cpp`. fail2ban/UFW protection bootstrap templates and
+command builders live in `include/ltg/protection_bootstrap.hpp` and
+`src/protection_bootstrap.cpp`.
 
 ## License
 
