@@ -4,11 +4,11 @@ namespace linux_traffic_guard {
 
 TuiMenuDefinition tuiMainMenuDefinition(const std::string &title) {
     return {title,
-            "按日常目标组织：看状态、自动修复、看流量、查安全。低频维护放进高级。",
+            "按日常目标组织：先看状态，需要时一键修复，再进入流量或安全。",
             {{"1", "仪表盘", "最快入口：最近31天端口流量、安全摘要和下一步建议", false, TuiRouteAction::Dashboard},
-             {"2", "自动修复", "自动补齐依赖、防护策略、流量采样，并做验收", true, TuiRouteAction::OneClickRepair},
-             {"3", "流量统计", "端口级 vnStat：追加端口、看日/月/年、再下钻 IP", false, TuiRouteAction::TrafficMenu},
-             {"4", "安全中心", "威胁分析、处置、fail2ban/UFW 验收和高级维护", false, TuiRouteAction::SecurityMenu}}};
+             {"2", "一键修复", "自动补齐依赖、防护策略、流量采样，并做验收", true, TuiRouteAction::OneClickRepair},
+             {"3", "流量统计", "添加端口，查看端口级日/月/年流量，再下钻 IP", false, TuiRouteAction::TrafficMenu},
+             {"4", "安全中心", "威胁分析、处置、fail2ban/UFW 状态和维护", false, TuiRouteAction::SecurityMenu}}};
 }
 
 TuiMenuDefinition tuiSetupAssistantMenuDefinition(const std::string &title) {
@@ -22,13 +22,11 @@ TuiMenuDefinition tuiSetupAssistantMenuDefinition(const std::string &title) {
 
 TuiMenuDefinition tuiTrafficMenuDefinition() {
     return {"流量统计",
-            "默认走历史采样，快速查看端口流量；只有排障时才进入实时/高级。",
-            {{"1", "开启/追加端口", "默认追加，不清空已有统计", true, TuiRouteAction::InstallTraffic},
-             {"2", "查看流量", "选择日/月/年，支持滚动窗口和指定周期", false, TuiRouteAction::TrafficPeriodMenu},
-             {"3", "实时/IP 明细", "较慢，读取底层实时计数，用于排障", false, TuiRouteAction::TrafficRealtime},
-             {"4", "管理统计端口", "停止统计指定端口，保留历史数据", true, TuiRouteAction::RemoveTrafficPorts},
-             {"5", "高级：重置统计规则", "高风险，删除底层统计规则", true,
-              TuiRouteAction::RemoveTrafficAccounting}}};
+            "日常只需要三步：添加端口、看周期流量、必要时查实时 IP。",
+            {{"1", "添加统计端口", "默认追加，不清空已有统计", true, TuiRouteAction::InstallTraffic},
+             {"2", "查看日/月/年流量", "端口级 vnStat，支持滚动窗口和指定周期", false, TuiRouteAction::TrafficPeriodMenu},
+             {"3", "实时 IP 明细", "较慢，读取底层实时计数，用于排障", false, TuiRouteAction::TrafficRealtime},
+             {"4", "统计维护", "停止端口、重置规则、查看底层计数", true, TuiRouteAction::TrafficMaintenanceMenu}}};
 }
 
 TuiMenuDefinition tuiTrafficPeriodMenuDefinition() {
@@ -39,14 +37,21 @@ TuiMenuDefinition tuiTrafficPeriodMenuDefinition() {
              {"3", "年流量", "端口级 vnStat -y，并保留 IP 明细下钻能力", false, TuiRouteAction::TrafficYear}}};
 }
 
+TuiMenuDefinition tuiTrafficMaintenanceMenuDefinition() {
+    return {"统计维护",
+            "低频维护动作集中在这里；普通添加端口不会清空历史数据。",
+            {{"1", "停止统计端口", "从统计端口集合移除，保留历史数据", true, TuiRouteAction::RemoveTrafficPorts},
+             {"2", "重置底层规则", "高风险，删除底层统计规则并清空实时计数", true, TuiRouteAction::RemoveTrafficAccounting},
+             {"3", "查看底层计数规则", "nftables 原始输出，只用于排障", false, TuiRouteAction::RawNftTable}}};
+}
+
 TuiMenuDefinition tuiSecurityMenuDefinition() {
     return {"安全中心",
-            "先看结论；要改变系统就走修复/处置；参数和底层工具放进高级维护。",
+            "先看结论；要改变系统就处置；参数、可靠性和底层工具放进维护。",
             {{"1", "安全总览", "一屏看服务、策略、封禁和下一步", false, TuiRouteAction::SecurityStatus},
              {"2", "威胁分析", "UFW 来源、端口扫描、IP 追查和缓存", false, TuiRouteAction::UfwAnalyzeMenu},
-             {"3", "修复并验收", "补齐依赖和两条 fail2ban 策略，验证 UFW 落地", true, TuiRouteAction::OneClickRepair},
-             {"4", "处置 IP/端口", "封禁/解封、端口规则、同步和一致性核验", true, TuiRouteAction::SecurityOpsMenu},
-             {"5", "高级维护", "策略参数、可靠性、日志、导出、服务和底层规则", false, TuiRouteAction::AdvancedMenu}}};
+             {"3", "处置 IP/端口", "封禁/解封、端口规则、同步和一致性核验", true, TuiRouteAction::SecurityOpsMenu},
+             {"4", "安全维护", "策略参数、可靠性、日志、导出、服务和底层规则", false, TuiRouteAction::AdvancedMenu}}};
 }
 
 TuiMenuDefinition tuiAdvancedMenuDefinition() {
@@ -97,6 +102,9 @@ void dispatchTuiRoute(TuiRouteAction action, TuiRouteCallbacks &callbacks) {
         break;
     case TuiRouteAction::TrafficPeriodMenu:
         callbacks.routeShowTrafficPeriodMenu();
+        break;
+    case TuiRouteAction::TrafficMaintenanceMenu:
+        callbacks.routeShowTrafficMaintenanceMenu();
         break;
     case TuiRouteAction::SecurityMenu:
         callbacks.routeShowSecurityMenu();

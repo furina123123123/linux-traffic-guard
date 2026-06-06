@@ -122,89 +122,6 @@ struct MenuItem {
     std::function<void()> run;
 };
 
-struct TrafficRow {
-    std::string ip;
-    std::string port;
-    std::string direction;
-    std::string family;
-    std::uint64_t bytes = 0;
-    std::uint64_t packets = 0;
-};
-
-struct TrafficSummaryRow {
-    std::string ip;
-    std::string port;
-    std::string geo;
-    std::uint64_t downloadBytes = 0;
-    std::uint64_t uploadBytes = 0;
-    std::uint64_t downloadPackets = 0;
-    std::uint64_t uploadPackets = 0;
-
-    std::uint64_t totalBytes() const {
-        return downloadBytes + uploadBytes;
-    }
-
-    std::uint64_t totalPackets() const {
-        return downloadPackets + uploadPackets;
-    }
-};
-
-struct TrafficDelta {
-    TrafficRow row;
-    std::time_t sampledAt = 0;
-    std::string day;
-    std::string month;
-    std::string year;
-};
-
-struct TrafficSnapshotResult {
-    bool ok = false;
-    std::time_t sampledAt = 0;
-    std::size_t liveRows = 0;
-    std::size_t deltaRows = 0;
-    std::size_t resetRows = 0;
-    std::string message;
-};
-
-struct TrafficPeriodTotal {
-    std::string period;
-    std::uint64_t downloadBytes = 0;
-    std::uint64_t uploadBytes = 0;
-    std::uint64_t downloadPackets = 0;
-    std::uint64_t uploadPackets = 0;
-
-    std::uint64_t totalBytes() const {
-        return downloadBytes + uploadBytes;
-    }
-
-    std::uint64_t totalPackets() const {
-        return downloadPackets + uploadPackets;
-    }
-};
-
-struct TrafficPeriodPortRow {
-    std::string period;
-    std::string port;
-    std::uint64_t downloadBytes = 0;
-    std::uint64_t uploadBytes = 0;
-    std::uint64_t downloadPackets = 0;
-    std::uint64_t uploadPackets = 0;
-
-    std::uint64_t totalBytes() const {
-        return downloadBytes + uploadBytes;
-    }
-
-    std::uint64_t totalPackets() const {
-        return downloadPackets + uploadPackets;
-    }
-};
-
-enum class TrafficPeriodMode {
-    Day,
-    Month,
-    Year
-};
-
 struct UfwHit {
     std::string value;
     std::string geo;
@@ -307,12 +224,6 @@ struct DashboardSnapshot {
     std::string fail2banState = "未知";
     std::string ufwState = "未知";
     std::chrono::steady_clock::time_point loadedAt{};
-};
-
-enum class TrafficGroupMode {
-    Ip,
-    Port,
-    IpPort
 };
 
 struct UfwDeleteCandidate {
@@ -4354,41 +4265,17 @@ inline bool trafficHistoryConfiguredFast() {
 #endif
 }
 
-inline std::string trafficKey(const TrafficRow &row) {
-    return row.family + "\t" + row.direction + "\t" + row.ip + "\t" + row.port;
-}
-
-inline bool sameOrHigherCounters(const TrafficRow &current, const TrafficRow &previous) {
-    return current.bytes >= previous.bytes && current.packets >= previous.packets;
-}
-
 inline std::vector<TrafficDelta> computeTrafficDeltas(const std::vector<TrafficRow> &current,
                                                       const std::map<std::string, TrafficRow> &previous,
                                                       std::time_t sampledAt,
                                                       std::size_t &resetRows) {
-    std::vector<TrafficDelta> deltas;
-    resetRows = 0;
-    for (const auto &row : current) {
-        const auto found = previous.find(trafficKey(row));
-        if (found == previous.end()) {
-            if (row.bytes > 0 || row.packets > 0) {
-                deltas.push_back({row, sampledAt, localDayStamp(sampledAt), localMonthStamp(sampledAt), localYearStamp(sampledAt)});
-            }
-            continue;
-        }
-        if (!sameOrHigherCounters(row, found->second)) {
-            ++resetRows;
-            continue;
-        }
-        TrafficRow delta = row;
-        delta.bytes -= found->second.bytes;
-        delta.packets -= found->second.packets;
-        if (delta.bytes == 0 && delta.packets == 0) {
-            continue;
-        }
-        deltas.push_back({delta, sampledAt, localDayStamp(sampledAt), localMonthStamp(sampledAt), localYearStamp(sampledAt)});
-    }
-    return deltas;
+    return computeTrafficDeltasForBuckets(current,
+                                          previous,
+                                          sampledAt,
+                                          localDayStamp(sampledAt),
+                                          localMonthStamp(sampledAt),
+                                          localYearStamp(sampledAt),
+                                          resetRows);
 }
 
 #if LTG_HAS_SQLITE
@@ -5187,71 +5074,6 @@ inline std::time_t latestTrafficSnapshotTime() {
 #endif
 }
 
-inline std::vector<TrafficSummaryRow> sortTrafficSummaryRows(std::vector<TrafficSummaryRow> rows) {
-    std::sort(rows.begin(), rows.end(), [](const TrafficSummaryRow &a, const TrafficSummaryRow &b) {
-        if (a.totalBytes() != b.totalBytes()) {
-            return a.totalBytes() > b.totalBytes();
-        }
-        if (a.ip != b.ip) {
-            return a.ip < b.ip;
-        }
-        return a.port < b.port;
-    });
-    return rows;
-}
-
-inline std::vector<TrafficSummaryRow> aggregateTraffic(const std::vector<TrafficRow> &rows, TrafficGroupMode mode) {
-    std::map<std::string, TrafficSummaryRow> grouped;
-    for (const auto &row : rows) {
-        std::string key = row.ip;
-        if (mode == TrafficGroupMode::Port) {
-            key = row.port;
-        } else if (mode == TrafficGroupMode::IpPort) {
-            key = row.ip + "\n" + row.port;
-        }
-        auto &slot = grouped[key];
-        slot.ip = mode == TrafficGroupMode::Port ? "*" : row.ip;
-        slot.port = mode == TrafficGroupMode::Ip ? "*" : row.port;
-        if (row.direction == "上传") {
-            slot.uploadBytes += row.bytes;
-            slot.uploadPackets += row.packets;
-        } else {
-            slot.downloadBytes += row.bytes;
-            slot.downloadPackets += row.packets;
-        }
-    }
-    std::vector<TrafficSummaryRow> out;
-    for (auto entry : grouped) {
-        if (mode != TrafficGroupMode::Port && !entry.second.ip.empty()) {
-            entry.second.geo = ipGeoLabel(entry.second.ip);
-        }
-        out.push_back(entry.second);
-    }
-    return sortTrafficSummaryRows(std::move(out));
-}
-
-inline std::vector<TrafficSummaryRow> aggregateTrafficByIp(const std::vector<TrafficRow> &rows) {
-    return aggregateTraffic(rows, TrafficGroupMode::Ip);
-}
-
-inline std::vector<TrafficSummaryRow> aggregateTrafficByPort(const std::vector<TrafficRow> &rows) {
-    return aggregateTraffic(rows, TrafficGroupMode::Port);
-}
-
-inline std::vector<TrafficSummaryRow> aggregateTrafficByIpPort(const std::vector<TrafficRow> &rows) {
-    return aggregateTraffic(rows, TrafficGroupMode::IpPort);
-}
-
-inline std::vector<TrafficRow> filterTrafficRowsByPort(const std::vector<TrafficRow> &rows, const std::string &port) {
-    std::vector<TrafficRow> out;
-    for (const auto &row : rows) {
-        if (row.port == port) {
-            out.push_back(row);
-        }
-    }
-    return out;
-}
-
 inline std::vector<TrafficSummaryRow> aggregateTrafficHistoryByPort(TrafficPeriodMode mode, const std::string &period) {
     return loadTrafficPortSummaryForPeriod(mode, period);
 }
@@ -5263,19 +5085,6 @@ inline std::vector<TrafficSummaryRow> aggregateTrafficHistoryByPortForRecentDays
         combined.insert(combined.end(), entry.second.begin(), entry.second.end());
     }
     return aggregateTrafficByPort(combined);
-}
-
-inline TrafficSummaryRow sumTrafficSummaryRows(const std::vector<TrafficSummaryRow> &rows) {
-    TrafficSummaryRow total;
-    total.ip = "*";
-    total.port = "*";
-    for (const auto &row : rows) {
-        total.downloadBytes += row.downloadBytes;
-        total.uploadBytes += row.uploadBytes;
-        total.downloadPackets += row.downloadPackets;
-        total.uploadPackets += row.uploadPackets;
-    }
-    return total;
 }
 
 inline std::string compactTrafficSummary(const std::vector<TrafficSummaryRow> &rows,
@@ -6959,6 +6768,7 @@ private:
     void routeOneClickRepair() override { actionAutoRepair(); }
     void routeShowTrafficMenu() override { pushTrafficMenu(); }
     void routeShowTrafficPeriodMenu() override { pushTrafficPeriodMenu(); }
+    void routeShowTrafficMaintenanceMenu() override { pushTrafficMaintenanceMenu(); }
     void routeShowSecurityMenu() override { pushSecurityMenu(); }
     void routeShowAdvancedMenu() override { pushAdvancedMenu(); }
     void routeRunSetupAssistant() override { actionRunSetupAssistant(); }
@@ -6997,6 +6807,10 @@ private:
 
     void pushTrafficPeriodMenu() {
         pushRouteMenu(tuiTrafficPeriodMenuDefinition());
+    }
+
+    void pushTrafficMaintenanceMenu() {
+        pushRouteMenu(tuiTrafficMaintenanceMenuDefinition());
     }
 
     void pushSecurityMenu() {
@@ -10597,6 +10411,7 @@ inline int selfTest() {
     const TuiMenuDefinition mainRoutes = tuiMainMenuDefinition("test");
     const TuiMenuDefinition trafficRoutes = tuiTrafficMenuDefinition();
     const TuiMenuDefinition trafficPeriodRoutes = tuiTrafficPeriodMenuDefinition();
+    const TuiMenuDefinition trafficMaintenanceRoutes = tuiTrafficMaintenanceMenuDefinition();
     const TuiMenuDefinition securityRoutes = tuiSecurityMenuDefinition();
     const TuiMenuDefinition advancedRoutes = tuiAdvancedMenuDefinition();
     check("TUI 主路径收敛到目标入口", mainRoutes.items.size() == 4 &&
@@ -10605,16 +10420,22 @@ inline int selfTest() {
                                           routeHasAction(mainRoutes, TuiRouteAction::TrafficMenu) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::SecurityMenu) &&
                                           !routeHasAction(mainRoutes, TuiRouteAction::AdvancedMenu) &&
-                                          securityRoutes.items.size() <= 5 &&
+                                          securityRoutes.items.size() <= 4 &&
                                           routeHasAction(securityRoutes, TuiRouteAction::AdvancedMenu) &&
+                                          !routeHasAction(securityRoutes, TuiRouteAction::OneClickRepair) &&
                                           !routeHasAction(securityRoutes, TuiRouteAction::Fail2banPanel) &&
                                           !routeHasAction(securityRoutes, TuiRouteAction::ReliabilitySelfCheck));
-    check("TUI 流量查询聚合", trafficRoutes.items.size() == 5 &&
+    check("TUI 流量查询聚合", trafficRoutes.items.size() == 4 &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficPeriodMenu) &&
+                                  routeHasAction(trafficRoutes, TuiRouteAction::TrafficMaintenanceMenu) &&
                                   !routeHasAction(trafficRoutes, TuiRouteAction::TrafficDay) &&
+                                  !routeHasAction(trafficRoutes, TuiRouteAction::RemoveTrafficAccounting) &&
                                   routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficDay) &&
                                   routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficMonth) &&
                                   routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficYear));
+    check("TUI 低频流量维护后移", routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RemoveTrafficPorts) &&
+                                      routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RemoveTrafficAccounting) &&
+                                      routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RawNftTable));
     check("TUI 高级动作后移", routeHasAction(advancedRoutes, TuiRouteAction::Fail2banPanel) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::ServiceControl) &&
