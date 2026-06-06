@@ -174,4 +174,13 @@ bool defaultFail2banRuntimeReady(const F2bJailRuntimeInfo &ssh,
     return ssh.loaded() && (!requireScanRule || scan.loaded());
 }
 
+bool f2bEffectProbeFullyPassed(const F2bEffectProbe &probe) {
+    return probe.serviceOk &&
+           probe.jailLoaded &&
+           probe.banListed &&
+           probe.ufwLanded &&
+           probe.unbanOk &&
+           probe.ufwCleanupOk;
+}
+
 } // namespace linux_traffic_guard

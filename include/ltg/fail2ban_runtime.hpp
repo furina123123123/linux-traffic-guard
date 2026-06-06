@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ltg/core.hpp"
+
 #include <set>
 #include <string>
 
@@ -32,5 +34,23 @@ F2bJailRuntimeInfo parseFail2banJailStatus(const std::string &jail,
 bool defaultFail2banRuntimeReady(const F2bJailRuntimeInfo &ssh,
                                  const F2bJailRuntimeInfo &scan,
                                  bool requireScanRule);
+
+struct F2bEffectProbe {
+    bool serviceOk = false;
+    bool jailLoaded = false;
+    bool banListed = false;
+    bool ufwLanded = false;
+    bool unbanOk = false;
+    bool ufwCleanupOk = false;
+    CommandResult ping;
+    CommandResult ban;
+    CommandResult statusAfterBan;
+    CommandResult ufwStatus;
+    CommandResult unban;
+    CommandResult ufwCleanup;
+    F2bJailRuntimeInfo jailStatus;
+};
+
+bool f2bEffectProbeFullyPassed(const F2bEffectProbe &probe);
 
 } // namespace linux_traffic_guard

@@ -1,5 +1,7 @@
-﻿#include "ltg/core.hpp"
+#include "ltg/core.hpp"
 
-namespace linux_traffic_guard::translation_units {
-void core_anchor() {}
-} // namespace linux_traffic_guard::translation_units
+namespace linux_traffic_guard {
+namespace {
+static_assert(sizeof(CommandResult) > 0, "CommandResult must remain a complete core type");
+} // namespace
+} // namespace linux_traffic_guard

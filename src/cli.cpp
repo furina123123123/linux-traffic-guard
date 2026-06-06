@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "ltg/protection_bootstrap.hpp"
+#include "ltg/core.hpp"
 #include "ltg/fail2ban_runtime.hpp"
 #include "ltg/reliability.hpp"
 #include "ltg/runtime_repair.hpp"
@@ -112,15 +113,6 @@ inline constexpr std::size_t kDashboardTrafficPortLimit = 10;
 
 inline std::string nowStamp();
 inline bool parseTimeToSeconds(const std::string &text, long long &seconds);
-
-struct CommandResult {
-    int exitCode = 1;
-    std::string output;
-
-    bool ok() const {
-        return exitCode == 0;
-    }
-};
 
 struct MenuItem {
     std::string key;
@@ -300,22 +292,6 @@ struct DualAuditReport {
     F2bJailRuntimeInfo rule1;
     F2bJailRuntimeInfo rule2;
     std::vector<DualAuditRow> rows;
-};
-
-struct F2bEffectProbe {
-    bool serviceOk = false;
-    bool jailLoaded = false;
-    bool banListed = false;
-    bool ufwLanded = false;
-    bool unbanOk = false;
-    bool ufwCleanupOk = false;
-    CommandResult ping;
-    CommandResult ban;
-    CommandResult statusAfterBan;
-    CommandResult ufwStatus;
-    CommandResult unban;
-    CommandResult ufwCleanup;
-    F2bJailRuntimeInfo jailStatus;
 };
 
 struct DashboardSnapshot {
@@ -9337,8 +9313,8 @@ private:
             {"UFW 残留清理", probe.ufwCleanupOk ? "已尝试清理" : "失败"},
         });
         result.add("");
-        if (probe.serviceOk && probe.jailLoaded && probe.banListed && probe.ufwLanded) {
-            result.add(ansi::green + std::string("防护链路自检通过：fail2ban 规则2可以封禁并落地到 UFW。") + ansi::plain);
+        if (f2bEffectProbeFullyPassed(probe)) {
+            result.add(ansi::green + std::string("防护链路自检通过：fail2ban 规则2可以封禁、落地到 UFW，并完成清理。") + ansi::plain);
         } else {
             result.add(ansi::yellow + std::string("防护链路自检未通过。") + ansi::plain);
             if (!probe.jailLoaded) {
@@ -9347,6 +9323,8 @@ private:
                 result.add("- banip 未进入 fail2ban 列表：检查 fail2ban-client set 输出和 jail 状态。");
             } else if (!probe.ufwLanded) {
                 result.add("- fail2ban 已记录封禁，但 UFW 未出现带 fail2ban comment 的 deny：检查 ufw-drop action 和 UFW 状态。");
+            } else if (!probe.unbanOk || !probe.ufwCleanupOk) {
+                result.add("- 封禁链路已落地，但清理未完全通过：请检查测试 IP 是否仍残留在 fail2ban 或 UFW。");
             }
         }
         result.add("");
@@ -10502,7 +10480,12 @@ inline int selfTest() {
     probeTest.unbanOk = true;
     probeTest.ufwCleanupOk = true;
     check("fail2ban 实效自检聚合", probeTest.serviceOk && probeTest.jailLoaded && probeTest.banListed &&
-                                      !probeTest.ufwLanded && probeTest.unbanOk && probeTest.ufwCleanupOk);
+                                      !probeTest.ufwLanded && probeTest.unbanOk && probeTest.ufwCleanupOk &&
+                                      !f2bEffectProbeFullyPassed(probeTest));
+    probeTest.ufwLanded = true;
+    check("fail2ban 实效自检完整通过", f2bEffectProbeFullyPassed(probeTest));
+    probeTest.ufwCleanupOk = false;
+    check("fail2ban 实效自检要求清理", !f2bEffectProbeFullyPassed(probeTest));
     check("UFW 残留复查识别", ufwStatusHasDenyForIp("[ 2] Anywhere DENY IN 203.0.113.254 # f2b:ufw-slowscan-global ip:203.0.113.254",
                                                    "203.0.113.254", false) &&
                                   !ufwStatusHasDenyForIp("[ 2] Anywhere ALLOW IN 203.0.113.254", "203.0.113.254", false));

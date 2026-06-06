@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include "ltg/core.hpp"
 #include "ltg/protection_bootstrap.hpp"
 #include "ltg/fail2ban_runtime.hpp"
 #include "ltg/reliability.hpp"
