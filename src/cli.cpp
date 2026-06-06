@@ -238,208 +238,6 @@ inline bool backupFileIfExists(const std::string &path, std::string &backupPath)
     return static_cast<bool>(output);
 }
 
-inline bool isSafePortList(const std::string &value) {
-    if (value.empty()) {
-        return false;
-    }
-    std::size_t start = 0;
-    while (start < value.size()) {
-        const std::size_t comma = value.find(',', start);
-        const std::string item = value.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-        if (item.empty()) {
-            return false;
-        }
-        const std::size_t dash = item.find('-');
-        if (dash != std::string::npos && item.find('-', dash + 1) != std::string::npos) {
-            return false;
-        }
-        const std::string first = dash == std::string::npos ? item : item.substr(0, dash);
-        const std::string second = dash == std::string::npos ? "" : item.substr(dash + 1);
-        const auto parsePort = [](const std::string &text, int &port) {
-            if (text.empty()) {
-                return false;
-            }
-            int value = 0;
-            for (unsigned char ch : text) {
-                if (!std::isdigit(ch)) {
-                    return false;
-                }
-                value = value * 10 + (ch - '0');
-                if (value > 65535) {
-                    return false;
-                }
-            }
-            if (value < 1) {
-                return false;
-            }
-            port = value;
-            return true;
-        };
-        int firstPort = 0;
-        int secondPort = 0;
-        if (!parsePort(first, firstPort) ||
-            (dash != std::string::npos && !parsePort(second, secondPort))) {
-            return false;
-        }
-        if (second.empty()) {
-            secondPort = firstPort;
-        }
-        if (firstPort > secondPort) {
-            return false;
-        }
-        if (comma == std::string::npos) {
-            break;
-        }
-        start = comma + 1;
-    }
-    return true;
-}
-
-inline bool expandPortList(const std::string &value, std::set<int> &ports) {
-    ports.clear();
-    const std::string cleaned = removeSpaces(value);
-    if (!isSafePortList(cleaned)) {
-        return false;
-    }
-    std::size_t start = 0;
-    while (start < cleaned.size()) {
-        const std::size_t comma = cleaned.find(',', start);
-        const std::string item = cleaned.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-        const std::size_t dash = item.find('-');
-        const int first = std::stoi(dash == std::string::npos ? item : item.substr(0, dash));
-        const int last = dash == std::string::npos ? first : std::stoi(item.substr(dash + 1));
-        for (int port = first; port <= last; ++port) {
-            ports.insert(port);
-        }
-        if (comma == std::string::npos) {
-            break;
-        }
-        start = comma + 1;
-    }
-    return true;
-}
-
-inline std::string joinPorts(const std::set<int> &ports, const std::string &sep = ",") {
-    std::ostringstream out;
-    bool first = true;
-    for (int port : ports) {
-        if (!first) {
-            out << sep;
-        }
-        first = false;
-        out << port;
-    }
-    return out.str();
-}
-
-inline std::string humanPortList(const std::set<int> &ports, std::size_t limit = 12) {
-    if (ports.empty()) {
-        return "未记录";
-    }
-    std::ostringstream out;
-    std::size_t shown = 0;
-    for (int port : ports) {
-        if (shown > 0) {
-            out << ", ";
-        }
-        out << port;
-        ++shown;
-        if (shown >= limit && ports.size() > limit) {
-            out << " ... +" << (ports.size() - limit);
-            break;
-        }
-    }
-    return out.str();
-}
-
-struct TrafficPortInputResolution {
-    bool ok = false;
-    bool repairExisting = false;
-    std::set<int> ports;
-    std::string error;
-};
-
-inline TrafficPortInputResolution resolveTrafficPortInput(const std::string &input,
-                                                          const std::set<int> &knownPorts,
-                                                          const std::set<int> &recommendedPorts) {
-    TrafficPortInputResolution result;
-    const std::string value = removeSpaces(input);
-    if (value.empty()) {
-        if (!knownPorts.empty()) {
-            result.ok = true;
-            result.repairExisting = true;
-            result.ports = knownPorts;
-            return result;
-        }
-        if (!recommendedPorts.empty()) {
-            result.ok = true;
-            result.ports = recommendedPorts;
-            return result;
-        }
-        result.error = "未发现可自动启用的监听端口，也没有输入端口。";
-        return result;
-    }
-    if (!isSafePortList(value) || !expandPortList(value, result.ports)) {
-        result.error = "端口列表不合法。";
-        return result;
-    }
-    result.ok = true;
-    return result;
-}
-
-inline std::set<int> setDifference(const std::set<int> &left, const std::set<int> &right) {
-    std::set<int> out;
-    std::set_difference(left.begin(), left.end(), right.begin(), right.end(), std::inserter(out, out.begin()));
-    return out;
-}
-
-inline std::set<int> setIntersection(const std::set<int> &left, const std::set<int> &right) {
-    std::set<int> out;
-    std::set_intersection(left.begin(), left.end(), right.begin(), right.end(), std::inserter(out, out.begin()));
-    return out;
-}
-
-inline std::set<int> setUnion(const std::set<int> &left, const std::set<int> &right) {
-    std::set<int> out;
-    std::set_union(left.begin(), left.end(), right.begin(), right.end(), std::inserter(out, out.begin()));
-    return out;
-}
-
-inline void parseNftPortListInto(const std::string &text, std::set<int> &ports) {
-    const std::regex rangePattern(R"(([0-9]{1,5})(?:\s*-\s*([0-9]{1,5}))?)");
-    for (std::sregex_iterator it(text.begin(), text.end(), rangePattern), end; it != end; ++it) {
-        const int first = std::stoi((*it)[1].str());
-        const int last = (*it)[2].matched ? std::stoi((*it)[2].str()) : first;
-        if (first < 1 || last > 65535 || first > last) {
-            continue;
-        }
-        for (int port = first; port <= last; ++port) {
-            ports.insert(port);
-        }
-    }
-}
-
-inline bool isSafeSinglePort(const std::string &value) {
-    if (value.empty()) {
-        return false;
-    }
-    int port = 0;
-    for (unsigned char ch : value) {
-        if (!std::isdigit(ch)) {
-            return false;
-        }
-        port = port * 10 + (ch - '0');
-        if (port > 65535) {
-            return false;
-        }
-    }
-    return port >= 1;
-}
-
-inline bool isSafePortOrEmpty(const std::string &value) {
-    return value.empty() || isSafePortList(value);
-}
-
 inline bool isValidPositiveInt(const std::string &value) {
     if (value.empty()) {
         return false;
@@ -9389,11 +9187,15 @@ inline int selfTest() {
     std::set<int> expandedPorts;
     expandPortList("443,80,10000-10002", expandedPorts);
     const std::set<int> diffPorts = setDifference(expandedPorts, std::set<int>{80, 443});
+    std::set<int> nftParsedPorts;
+    parseNftPortListInto("{ 22, 80, 1000-1002, 70000 }", nftParsedPorts);
     const auto appendCommands = trafficAccountingRuleCommands(expandedPorts, false);
     const auto resetCommands = trafficAccountingRuleCommands(expandedPorts, true);
     const auto setOnlyCommands = trafficPortSetUpdateCommands(expandedPorts);
     check("统计端口追加命令", expandedPorts.size() == 5 && expandedPorts.count(80) == 1 &&
                                   diffPorts.size() == 3 && diffPorts.count(10001) == 1 &&
+                                  nftParsedPorts == std::set<int>({22, 80, 1000, 1001, 1002}) &&
+                                  joinPorts(std::set<int>{22, 443}) == "22,443" &&
                                   appendCommands.front().find("delete table") == std::string::npos &&
                                   std::none_of(setOnlyCommands.begin(), setOnlyCommands.end(), [](const std::string &cmd) {
                                       return cmd.find("add chain") != std::string::npos || cmd.find("delete chain") != std::string::npos;

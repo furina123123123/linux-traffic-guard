@@ -103,6 +103,26 @@ enum class TrafficGroupMode {
     IpPort
 };
 
+struct TrafficPortInputResolution {
+    bool ok = false;
+    bool repairExisting = false;
+    std::set<int> ports;
+    std::string error;
+};
+
+bool isSafePortList(const std::string &value);
+bool expandPortList(const std::string &value, std::set<int> &ports);
+std::string joinPorts(const std::set<int> &ports, const std::string &sep = ",");
+std::string humanPortList(const std::set<int> &ports, std::size_t limit = 12);
+TrafficPortInputResolution resolveTrafficPortInput(const std::string &input,
+                                                   const std::set<int> &knownPorts,
+                                                   const std::set<int> &recommendedPorts);
+std::set<int> setDifference(const std::set<int> &left, const std::set<int> &right);
+std::set<int> setIntersection(const std::set<int> &left, const std::set<int> &right);
+std::set<int> setUnion(const std::set<int> &left, const std::set<int> &right);
+void parseNftPortListInto(const std::string &text, std::set<int> &ports);
+bool isSafeSinglePort(const std::string &value);
+bool isSafePortOrEmpty(const std::string &value);
 std::string trafficHistoryPath(const std::string &name);
 std::string nftPortElements(const std::set<int> &ports);
 std::string nftCommand(const std::string &body);
