@@ -19,6 +19,16 @@ struct CommandResult {
     }
 };
 
+int normalizedExitCode(int raw);
+
+class Shell {
+public:
+    static CommandResult capture(const std::string &command);
+    static CommandResult run(const std::string &command);
+    static bool exists(const std::string &name);
+    static void clearExistsCache();
+};
+
 inline std::string trim(std::string value) {
     const char *spaces = " \t\r\n";
     const auto first = value.find_first_not_of(spaces);

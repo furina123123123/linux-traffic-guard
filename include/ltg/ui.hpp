@@ -1,8 +1,19 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdlib>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
+#endif
 
 namespace linux_traffic_guard {
 
@@ -38,6 +49,25 @@ inline std::string stripAnsi(const std::string &value) {
         }
     }
     return out;
+}
+
+inline bool fdIsTty(int fd) {
+#ifdef _WIN32
+    return _isatty(fd) != 0;
+#else
+    return isatty(fd) != 0;
+#endif
+}
+
+inline bool shouldUseColor(int fd = STDOUT_FILENO) {
+    if (std::getenv("NO_COLOR") != nullptr) {
+        return false;
+    }
+    return fdIsTty(fd);
+}
+
+inline std::string colorIf(const std::string &text, const std::string &color, int fd = STDOUT_FILENO) {
+    return shouldUseColor(fd) ? color + text + ansi::plain : text;
 }
 
 inline std::string uiSection(const std::string &title) {

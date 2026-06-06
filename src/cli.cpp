@@ -114,35 +114,6 @@ inline bool &alternateScreenActive() {
     return active;
 }
 
-inline std::map<std::string, bool> &toolExistsCache() {
-    static std::map<std::string, bool> cache;
-    return cache;
-}
-
-inline std::mutex &toolExistsCacheMutex() {
-    static std::mutex mutex;
-    return mutex;
-}
-
-inline bool fdIsTty(int fd) {
-#ifdef _WIN32
-    return _isatty(fd) != 0;
-#else
-    return isatty(fd) != 0;
-#endif
-}
-
-inline bool shouldUseColor(int fd = STDOUT_FILENO) {
-    if (std::getenv("NO_COLOR") != nullptr) {
-        return false;
-    }
-    return fdIsTty(fd);
-}
-
-inline std::string colorIf(const std::string &text, const std::string &color, int fd = STDOUT_FILENO) {
-    return shouldUseColor(fd) ? color + text + ansi::plain : text;
-}
-
 #ifndef _WIN32
 inline termios &savedTerminalMode() {
     static termios mode{};
@@ -417,80 +388,6 @@ inline int compareVersionTriplet(const std::array<int, 3> &a, const std::array<i
     }
     return 0;
 }
-
-inline int normalizedExitCode(int raw) {
-#ifdef _WIN32
-    return raw;
-#else
-    if (raw == -1) {
-        return 1;
-    }
-    if (WIFEXITED(raw)) {
-        return WEXITSTATUS(raw);
-    }
-    return raw;
-#endif
-}
-
-class Shell {
-public:
-    static CommandResult capture(const std::string &command) {
-        std::array<char, 4096> buffer{};
-        CommandResult result;
-#ifdef _WIN32
-        const std::string wrapped = "(" + command + ") <NUL 2>&1";
-        FILE *pipe = _popen(wrapped.c_str(), "r");
-#else
-        const std::string wrapped = "{ " + command + "; } </dev/null 2>&1";
-        FILE *pipe = popen(wrapped.c_str(), "r");
-#endif
-        if (!pipe) {
-            result.output = "无法执行命令: " + command + "\n";
-            return result;
-        }
-        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
-            result.output += buffer.data();
-        }
-#ifdef _WIN32
-        result.exitCode = normalizedExitCode(_pclose(pipe));
-#else
-        result.exitCode = normalizedExitCode(pclose(pipe));
-#endif
-        return result;
-    }
-
-    static CommandResult run(const std::string &command) {
-        std::cout << colorIf("$ " + command, ansi::gray) << "\n";
-        const int raw = std::system(command.c_str());
-        return {normalizedExitCode(raw), ""};
-    }
-
-    static bool exists(const std::string &name) {
-        {
-            std::lock_guard<std::mutex> lock(toolExistsCacheMutex());
-            auto &cache = toolExistsCache();
-            const auto found = cache.find(name);
-            if (found != cache.end()) {
-                return found->second;
-            }
-        }
-#ifdef _WIN32
-        const bool ok = std::system(("where " + name + " >NUL 2>NUL").c_str()) == 0;
-#else
-        const bool ok = std::system(("command -v " + shellQuote(name) + " >/dev/null 2>&1").c_str()) == 0;
-#endif
-        {
-            std::lock_guard<std::mutex> lock(toolExistsCacheMutex());
-            toolExistsCache()[name] = ok;
-        }
-        return ok;
-    }
-
-    static void clearExistsCache() {
-        std::lock_guard<std::mutex> lock(toolExistsCacheMutex());
-        toolExistsCache().clear();
-    }
-};
 
 class IniConfig {
 public:
@@ -9294,6 +9191,10 @@ inline int selfTest() {
                                    joinWords(splitWords("a b"), ",") == "a,b" &&
                                    shellQuote("a'b") == "'a'\\''b'" &&
                                    coreFileOk);
+    const CommandResult shellEcho = Shell::capture("echo ltg-core-shell");
+    check("core模块Shell helper", shellEcho.ok() &&
+                                      trim(shellEcho.output) == "ltg-core-shell" &&
+                                      normalizedExitCode(0) == 0);
     check("输入光标移动序列", cursorMoveSequence(4, 12) == "\033[4;12H\033[?25h");
     const std::string drawLine = terminalDrawLineSequence(2, "abc", 10);
     check("渲染行尾清理", drawLine == "\033[2;1Habc\033[K" &&
