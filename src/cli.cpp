@@ -45,6 +45,7 @@
 #include "ltg/fail2ban_runtime.hpp"
 #include "ltg/reliability.hpp"
 #include "ltg/runtime_repair.hpp"
+#include "ltg/security.hpp"
 #include "ltg/traffic_accounting.hpp"
 #include "ltg/tui_routes.hpp"
 #include "ltg/types.hpp"
@@ -102,7 +103,6 @@ inline constexpr std::size_t kDashboardTrafficDays = 31;
 inline constexpr std::size_t kDashboardTrafficPortLimit = 10;
 
 inline std::string nowStamp();
-inline bool parseTimeToSeconds(const std::string &text, long long &seconds);
 
 inline bool &pauseEnabled() {
     static bool enabled = true;
@@ -238,271 +238,6 @@ inline bool backupFileIfExists(const std::string &path, std::string &backupPath)
     return static_cast<bool>(output);
 }
 
-inline bool isValidPositiveInt(const std::string &value) {
-    if (value.empty()) {
-        return false;
-    }
-    for (unsigned char ch : value) {
-        if (!std::isdigit(ch)) {
-            return false;
-        }
-    }
-    return value != "0";
-}
-
-inline bool isStrictPositiveNumber(const std::string &value) {
-    if (!std::regex_match(value, std::regex(R"(^[0-9]+(\.[0-9]+)?$)"))) {
-        return false;
-    }
-    for (unsigned char ch : value) {
-        if (std::isdigit(ch) && ch != '0') {
-            return true;
-        }
-    }
-    return false;
-}
-
-inline bool isValidPositiveNumber(const std::string &value) {
-    return isStrictPositiveNumber(value);
-}
-
-inline bool isValidTimeToken(const std::string &value) {
-    long long seconds = 0;
-    return parseTimeToSeconds(value, seconds);
-}
-
-inline bool parsePrefixLength(const std::string &prefix, int maxBits, int &bits) {
-    if (prefix.empty() || prefix.size() > 3) {
-        return false;
-    }
-    int value = 0;
-    for (unsigned char ch : prefix) {
-        if (!std::isdigit(ch)) {
-            return false;
-        }
-        value = value * 10 + (ch - '0');
-    }
-    if (value < 0 || value > maxBits) {
-        return false;
-    }
-    bits = value;
-    return true;
-}
-
-inline bool isValidIpv4Address(const std::string &address) {
-    static const std::regex ipv4(R"(^(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(\.(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}$)");
-    return std::regex_match(address, ipv4);
-}
-
-inline bool isValidIpv4OrCidr(const std::string &value) {
-    const std::string token = trim(value);
-    const std::size_t slash = token.find('/');
-    const std::string address = slash == std::string::npos ? token : token.substr(0, slash);
-    if (!isValidIpv4Address(address)) {
-        return false;
-    }
-    if (slash == std::string::npos) {
-        return true;
-    }
-    int bits = 0;
-    return token.find('/', slash + 1) == std::string::npos &&
-           parsePrefixLength(token.substr(slash + 1), 32, bits);
-}
-
-inline bool isHexHextet(const std::string &part) {
-    if (part.empty() || part.size() > 4) {
-        return false;
-    }
-    for (unsigned char ch : part) {
-        if (!std::isxdigit(ch)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-inline bool isValidIpv6Address(std::string address) {
-    if (address.empty() || address.find(':') == std::string::npos ||
-        address.find(":::") != std::string::npos) {
-        return false;
-    }
-
-    if (address.find('.') != std::string::npos) {
-        const std::size_t lastColon = address.find_last_of(':');
-        if (lastColon == std::string::npos || lastColon + 1 >= address.size()) {
-            return false;
-        }
-        const std::string ipv4Tail = address.substr(lastColon + 1);
-        if (!isValidIpv4Address(ipv4Tail)) {
-            return false;
-        }
-        address = address.substr(0, lastColon) + ":0:0";
-    }
-
-    const std::size_t compression = address.find("::");
-    const bool compressed = compression != std::string::npos;
-    if (compressed && address.find("::", compression + 2) != std::string::npos) {
-        return false;
-    }
-
-    std::vector<std::string> parts;
-    std::size_t start = 0;
-    while (start <= address.size()) {
-        const std::size_t colon = address.find(':', start);
-        parts.push_back(address.substr(start, colon == std::string::npos ? std::string::npos : colon - start));
-        if (colon == std::string::npos) {
-            break;
-        }
-        start = colon + 1;
-    }
-
-    int groups = 0;
-    for (const auto &part : parts) {
-        if (part.empty()) {
-            continue;
-        }
-        if (!isHexHextet(part)) {
-            return false;
-        }
-        ++groups;
-    }
-    if (compressed) {
-        return groups < 8;
-    }
-    return groups == 8 && std::none_of(parts.begin(), parts.end(), [](const std::string &part) { return part.empty(); });
-}
-
-inline bool isValidIpv6OrCidr(const std::string &value) {
-    const std::string token = trim(value);
-    const std::size_t slash = token.find('/');
-    const std::string address = slash == std::string::npos ? token : token.substr(0, slash);
-    if (!isValidIpv6Address(address)) {
-        return false;
-    }
-    if (slash == std::string::npos) {
-        return true;
-    }
-    int bits = 0;
-    return token.find('/', slash + 1) == std::string::npos &&
-           parsePrefixLength(token.substr(slash + 1), 128, bits);
-}
-
-inline bool isValidIpOrCidr(const std::string &value) {
-    const std::string token = trim(value);
-    return isValidIpv4OrCidr(token) || isValidIpv6OrCidr(token);
-}
-
-#ifndef _WIN32
-inline bool ipv4InCidr(std::uint32_t ip, std::uint32_t base, int bits) {
-    const std::uint32_t mask = bits == 0 ? 0 : (0xffffffffu << (32 - bits));
-    return (ip & mask) == (base & mask);
-}
-
-inline std::uint32_t ipv4Addr(unsigned a, unsigned b, unsigned c, unsigned d) {
-    return (a << 24) | (b << 16) | (c << 8) | d;
-}
-
-inline bool isGlobalIpv4(std::uint32_t ip) {
-    return !ipv4InCidr(ip, ipv4Addr(0, 0, 0, 0), 8) &&
-           !ipv4InCidr(ip, ipv4Addr(10, 0, 0, 0), 8) &&
-           !ipv4InCidr(ip, ipv4Addr(100, 64, 0, 0), 10) &&
-           !ipv4InCidr(ip, ipv4Addr(127, 0, 0, 0), 8) &&
-           !ipv4InCidr(ip, ipv4Addr(169, 254, 0, 0), 16) &&
-           !ipv4InCidr(ip, ipv4Addr(172, 16, 0, 0), 12) &&
-           !ipv4InCidr(ip, ipv4Addr(192, 0, 0, 0), 24) &&
-           !ipv4InCidr(ip, ipv4Addr(192, 0, 2, 0), 24) &&
-           !ipv4InCidr(ip, ipv4Addr(192, 168, 0, 0), 16) &&
-           !ipv4InCidr(ip, ipv4Addr(198, 18, 0, 0), 15) &&
-           !ipv4InCidr(ip, ipv4Addr(198, 51, 100, 0), 24) &&
-           !ipv4InCidr(ip, ipv4Addr(203, 0, 113, 0), 24) &&
-           !ipv4InCidr(ip, ipv4Addr(224, 0, 0, 0), 4) &&
-           !ipv4InCidr(ip, ipv4Addr(240, 0, 0, 0), 4);
-}
-
-inline bool isIpv6MappedIpv4(const unsigned char *bytes) {
-    for (int i = 0; i < 10; ++i) {
-        if (bytes[i] != 0) {
-            return false;
-        }
-    }
-    return bytes[10] == 0xff && bytes[11] == 0xff;
-}
-
-inline bool isGlobalIpv6(const unsigned char *bytes) {
-    bool allZero = true;
-    for (int i = 0; i < 16; ++i) {
-        allZero = allZero && bytes[i] == 0;
-    }
-    if (allZero || (bytes[15] == 1 && std::all_of(bytes, bytes + 15, [](unsigned char b) { return b == 0; }))) {
-        return false;
-    }
-    if (isIpv6MappedIpv4(bytes)) {
-        const std::uint32_t mapped = (static_cast<std::uint32_t>(bytes[12]) << 24) |
-                                     (static_cast<std::uint32_t>(bytes[13]) << 16) |
-                                     (static_cast<std::uint32_t>(bytes[14]) << 8) |
-                                     static_cast<std::uint32_t>(bytes[15]);
-        return isGlobalIpv4(mapped);
-    }
-    if ((bytes[0] & 0xfe) == 0xfc) return false;                 // fc00::/7
-    if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) return false; // fe80::/10
-    if (bytes[0] == 0xff) return false;                           // ff00::/8
-    if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false;
-    return true;
-}
-#endif
-
-inline bool normalizePublicIpAddress(const std::string &raw, std::string &normalized) {
-    const std::string token = trim(raw);
-#ifndef _WIN32
-    char buffer[INET6_ADDRSTRLEN] = {};
-    in_addr addr4{};
-    if (inet_pton(AF_INET, token.c_str(), &addr4) == 1) {
-        const std::uint32_t host = ntohl(addr4.s_addr);
-        if (!isGlobalIpv4(host) || !inet_ntop(AF_INET, &addr4, buffer, sizeof(buffer))) {
-            return false;
-        }
-        normalized = buffer;
-        return true;
-    }
-    in6_addr addr6{};
-    if (inet_pton(AF_INET6, token.c_str(), &addr6) == 1) {
-        if (!isGlobalIpv6(addr6.s6_addr) || !inet_ntop(AF_INET6, &addr6, buffer, sizeof(buffer))) {
-            return false;
-        }
-        normalized = buffer;
-        return true;
-    }
-#else
-    (void)normalized;
-#endif
-    return false;
-}
-
-inline bool isSafeIdentifier(const std::string &value) {
-    if (value.empty() || value.size() > 64) {
-        return false;
-    }
-    for (unsigned char ch : value) {
-        if (!std::isalnum(ch) && ch != '_' && ch != '-') {
-            return false;
-        }
-    }
-    return true;
-}
-
-inline bool isSafeLogPath(const std::string &value) {
-    if (value.empty() || value.size() > 240 || value[0] != '/') {
-        return false;
-    }
-    for (unsigned char ch : value) {
-        if (std::isalnum(ch) || ch == '/' || ch == '.' || ch == '_' || ch == '-' || ch == '*' || ch == '?') {
-            continue;
-        }
-        return false;
-    }
-    return true;
-}
-
 inline std::string nowStamp() {
     const auto now = std::chrono::system_clock::now();
     const auto sec = std::chrono::system_clock::to_time_t(now);
@@ -608,32 +343,6 @@ inline bool parseYmdDate(const std::string &text, bool endOfDay, std::time_t &ou
     return roundTrip.tm_year == year - 1900 &&
            roundTrip.tm_mon == month - 1 &&
            roundTrip.tm_mday == day;
-}
-
-inline bool parseTimeToSeconds(const std::string &text, long long &seconds) {
-    const std::string value = trim(text);
-    if (value.empty()) {
-        return false;
-    }
-    std::smatch match;
-    if (!std::regex_match(value, match, std::regex(R"(^([0-9]+)([smhdwSMHDW]?)$)"))) {
-        return false;
-    }
-    long long n = 0;
-    for (unsigned char ch : match[1].str()) {
-        n = n * 10 + (ch - '0');
-        if (n > 1000000000LL) {
-            return false;
-        }
-    }
-    const std::string suffix = lowerCopy(match[2].str());
-    long long mul = 1;
-    if (suffix == "m") mul = 60;
-    else if (suffix == "h") mul = 3600;
-    else if (suffix == "d") mul = 86400;
-    else if (suffix == "w") mul = 604800;
-    seconds = n * mul;
-    return seconds > 0;
 }
 
 inline std::vector<std::string> splitLines(const std::string &text) {
@@ -3338,15 +3047,15 @@ inline std::string serviceSuggestion(const std::string &name, const std::string 
         return name == "fail2ban" ? "一致性核验" : "查看规则";
     }
     if (state == "未启用") {
-        return name == "fail2ban" ? "一键修复" : "安全中心->高级/诊断->服务控制";
+        return name == "fail2ban" ? "一键修复" : "诊断维护->服务控制";
     }
     if (state == "异常") {
-        return "安全中心->高级/诊断->日志摘要";
+        return "诊断维护->日志摘要";
     }
     if (state == "缺失") {
         return "一键修复";
     }
-    return "安全中心->高级/诊断";
+    return "诊断维护";
 }
 
 inline bool trafficTableEnabled() {
@@ -4534,7 +4243,7 @@ inline void verifyGeoDatabaseChain(ReliabilityReport &report) {
         addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", ReliabilityStatus::Skipped,
                              "未安装本地国家库，表格国家/地区显示为 -",
                              kDbIpLiteMmdbPath,
-                             "安全中心 -> 高级/诊断 -> 安装/更新 IP 国家库");
+                             "诊断维护 -> 安装/更新 IP 国家库");
         return;
     }
     addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", reader ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
@@ -4669,7 +4378,7 @@ inline void verifyUfwAnalysisChain(ReliabilityReport &report) {
                          cacheOk ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
                          cacheOk ? "缓存覆盖最近24小时窗口" : "缓存尚未完整覆盖最近24小时",
                          cachedReport.sourceNote + " / " + cachedReport.evidence.cacheRanges,
-                         cacheOk ? "" : "进入“安全中心 -> 分析追查”刷新一次窗口");
+                         cacheOk ? "" : "进入“威胁分析”刷新一次窗口");
     addReliabilityResult(report, "UFW分析链路", "live/cache 聚合一致",
                          !cacheOk ? ReliabilityStatus::Skipped : same ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
                          !cacheOk ? "缓存未覆盖，跳过一致性对比" : same ? "live 解析与缓存聚合一致" : "live 解析与缓存聚合不一致",
@@ -5440,12 +5149,12 @@ inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &no
             if (rangeCovered(start, roundedEnd, ranges) &&
                 collectUfwSourceTopSqlite(start, roundedEnd, hits)) {
                 note = "来自 UFW 分析缓存(" + dateTimeStamp(start) + " - " + dateTimeStamp(roundedEnd) +
-                       ")；进入“安全中心 -> 分析追查”可刷新。";
+                       ")；进入“威胁分析”可刷新。";
                 return true;
             }
             if (latestOverlappingRange(start, roundedEnd, ranges, cachedStart, cachedEnd)) {
                 note = "安全分析缓存只覆盖 " + dateTimeStamp(cachedStart) + " - " + dateTimeStamp(cachedEnd) +
-                       "，不足最近24小时。进入“安全中心 -> 分析追查”刷新后再显示摘要。";
+                       "，不足最近24小时。进入“威胁分析”刷新后再显示摘要。";
                 return false;
             }
         }
@@ -5487,16 +5196,16 @@ inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &no
             hits.resize(10);
         }
         note = "来自 UFW 分析缓存(" + dateTimeStamp(start) + " - " + dateTimeStamp(roundedEnd) +
-               ")；进入“安全中心 -> 分析追查”可刷新。";
+               ")；进入“威胁分析”可刷新。";
         return true;
     }
     if (latestOverlappingRange(start, roundedEnd, ranges, cachedStart, cachedEnd)) {
         note = "安全分析缓存只覆盖 " + dateTimeStamp(cachedStart) + " - " + dateTimeStamp(cachedEnd) +
-               "，不足最近24小时。进入“安全中心 -> 分析追查”刷新后再显示摘要。";
+               "，不足最近24小时。进入“威胁分析”刷新后再显示摘要。";
         return false;
     }
 #endif
-    note = "暂无可用安全分析缓存。进入“安全中心 -> 分析追查”跑一次最近24小时/7天后，仪表盘会显示缓存摘要。";
+    note = "暂无可用安全分析缓存。进入“威胁分析”跑一次最近24小时/7天后，仪表盘会显示缓存摘要。";
     return false;
 }
 
@@ -5550,7 +5259,7 @@ inline std::string dashboardFastHeaderLine() {
     std::ostringstream deps;
     deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow));
     deps << "  首屏: 最近31天历史";
-    deps << "  实时检查: 安全中心/高级";
+    deps << "  实时检查: 诊断维护";
     return deps.str();
 }
 
@@ -5569,8 +5278,8 @@ inline void addTrafficOnboarding(ScreenBuffer &buffer, bool configured, bool has
         return;
     }
     buffer.add("1. 看趋势用“流量统计 -> 日流量 / 月流量 / 年流量”。");
-    buffer.add("2. 查具体 IP 用“流量统计 -> 实时明细”，底层排障进“安全中心 -> 高级/诊断”。");
-    buffer.add("3. 查服务、防火墙、fail2ban 运行态用“安全中心”，深度日志进“安全中心 -> 高级/诊断”。");
+    buffer.add("2. 查具体 IP 用“流量统计 -> 实时 IP 明细”，底层排障进“诊断维护”。");
+    buffer.add("3. 查威胁来源用“威胁分析”，查服务、防火墙、fail2ban 运行态用“诊断维护”。");
 }
 
 inline std::vector<std::string> tableLines(const Table &table, const std::string &emptyMessage = "暂无数据") {
@@ -5614,7 +5323,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     if (!snapshot->ufwHitsNote.empty()) {
         buffer.add(snapshot->ufwHitsNote);
     }
-    buffer.addAll(tableLines(ufwHitsTable(snapshot->ufwHits), "暂无缓存命中。进入“安全中心 -> 分析追查”生成/刷新安全分析。"));
+    buffer.addAll(tableLines(ufwHitsTable(snapshot->ufwHits), "暂无缓存命中。进入“威胁分析”生成/刷新安全分析。"));
     buffer.add("");
     addTrafficOnboarding(buffer, snapshot->tableEnabled, snapshot->trafficHistoryAvailable);
     return buffer;
@@ -6151,11 +5860,11 @@ private:
         if (!snapshot->ufwHitsNote.empty()) {
             buffer.add(snapshot->ufwHitsNote);
         }
-        addUfwTable(buffer, snapshot->ufwHits, "暂无缓存命中。进入“安全中心 -> 分析追查”生成/刷新安全分析。");
+        addUfwTable(buffer, snapshot->ufwHits, "暂无缓存命中。进入“威胁分析”生成/刷新安全分析。");
         buffer.add("");
         addTrafficOnboarding(buffer, snapshot->tableEnabled, snapshot->trafficHistoryAvailable);
         buffer.add("");
-        buffer.add(ansi::gray + std::string("提示: 实时状态在安全中心，底层慢查询在安全中心 -> 高级/诊断中执行。") + ansi::plain);
+        buffer.add(ansi::gray + std::string("提示: 威胁来源看“威胁分析”，底层慢查询在“诊断维护”中执行。") + ansi::plain);
         return buffer;
     }
 
@@ -6635,7 +6344,7 @@ private:
             return true;
         }
         buffer.add(ansi::yellow + std::string("IP 国家库仍不可用，已停止当前分析。") + ansi::plain);
-        buffer.add("可以稍后从“安全中心 -> 高级/诊断 -> 安装/更新 IP 国家库”重试，或跳过国家/地区继续使用核心分析。");
+        buffer.add("可以稍后从“诊断维护 -> 安装/更新 IP 国家库”重试，或跳过国家/地区继续使用核心分析。");
         pushResult("安装/更新 IP 国家库", buffer);
         return false;
     }
@@ -6758,7 +6467,7 @@ private:
             buffer.add("流量统计历史已存在，但本次自动修复未完全通过；可进入“可靠性自检”查看具体层级。");
         }
         if (!dbIpLiteDatabaseReady()) {
-            buffer.add("IP 国家库是可选能力。需要国家/地区展示时，进入“安全中心 -> 高级/诊断 -> 安装/更新 IP 国家库”。");
+            buffer.add("IP 国家库是可选能力。需要国家/地区展示时，进入“诊断维护 -> 安装/更新 IP 国家库”。");
         }
         cachedDashboardValid() = false;
         if (f2bOk) {
@@ -8814,7 +8523,7 @@ inline ScreenBuffer dashboardBufferForCli() {
     if (!hitNote.empty()) {
         buffer.add(hitNote);
     }
-    addTableLines(buffer, ufwHitsTable(cachedHits), "暂无缓存命中。执行 sudo ltg --ufw-analyze 24h 或进入安全中心生成/刷新。");
+    addTableLines(buffer, ufwHitsTable(cachedHits), "暂无缓存命中。执行 sudo ltg --ufw-analyze 24h 或进入“威胁分析”生成/刷新。");
 
     addSection(buffer, "下一步");
     if (!tableEnabled) {
@@ -8822,7 +8531,7 @@ inline ScreenBuffer dashboardBufferForCli() {
     } else if (totalRows.empty()) {
         buffer.add("等待下一轮 5 分钟采样，或用 sudo ltg --traffic-snapshot 手动记录一次。");
     } else {
-        buffer.add("趋势看流量统计，实时排障看 --ip-traffic 或 TUI 安全中心 -> 高级/诊断。");
+        buffer.add("趋势看“流量统计”，实时排障看 --ip-traffic 或 TUI “诊断维护”。");
     }
     return buffer;
 }
@@ -9251,6 +8960,14 @@ inline int selfTest() {
     check("时间 token 解析", parseTimeToSeconds("10m", seconds) && seconds == 600 &&
                                   parseTimeToSeconds("2h", seconds) && seconds == 7200 &&
                                   !parseTimeToSeconds("abc", seconds));
+    std::string normalizedIp;
+    check("security 模块校验 helper", normalizePublicIpAddress("8.8.8.8", normalizedIp) &&
+                                           normalizedIp == "8.8.8.8" &&
+                                           !normalizePublicIpAddress("192.168.1.1", normalizedIp) &&
+                                           isSafeIdentifier("ufw-slowscan-global") &&
+                                           !isSafeIdentifier("../bad") &&
+                                           isSafeLogPath("/var/log/auth.log") &&
+                                           !isSafeLogPath("relative.log"));
     check("UTF-8 宽度裁剪", visibleWidth("中文AB") == 6 && visibleWidth(fitLine("中文AB", 5)) <= 5);
 
     UfwLogEvent event;
@@ -9598,12 +9315,14 @@ inline int selfTest() {
     const TuiMenuDefinition trafficMaintenanceRoutes = tuiTrafficMaintenanceMenuDefinition();
     const TuiMenuDefinition securityRoutes = tuiSecurityMenuDefinition();
     const TuiMenuDefinition advancedRoutes = tuiAdvancedMenuDefinition();
-    check("TUI 主路径收敛到目标入口", mainRoutes.items.size() == 4 &&
+    check("TUI 主路径收敛到目标入口", mainRoutes.items.size() == 6 &&
                                           routeHasAction(mainRoutes, TuiRouteAction::Dashboard) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::OneClickRepair) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::TrafficMenu) &&
-                                          routeHasAction(mainRoutes, TuiRouteAction::SecurityMenu) &&
-                                          !routeHasAction(mainRoutes, TuiRouteAction::AdvancedMenu) &&
+                                          routeHasAction(mainRoutes, TuiRouteAction::UfwAnalyzeMenu) &&
+                                          routeHasAction(mainRoutes, TuiRouteAction::Fail2banPanel) &&
+                                          routeHasAction(mainRoutes, TuiRouteAction::AdvancedMenu) &&
+                                          !routeHasAction(mainRoutes, TuiRouteAction::SecurityMenu) &&
                                           securityRoutes.items.size() <= 6 &&
                                           routeHasAction(securityRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
                                           routeHasAction(securityRoutes, TuiRouteAction::Fail2banPanel) &&
@@ -9623,7 +9342,7 @@ inline int selfTest() {
                                       routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RemoveTrafficAccounting) &&
                                       routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RawNftTable));
     check("TUI 高级动作保留低频维护", !routeHasAction(advancedRoutes, TuiRouteAction::Fail2banPanel) &&
-                                  !routeHasAction(advancedRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
+                                  routeHasAction(advancedRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::DependencyDoctor) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::ServiceControl) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::RawNftTable));
