@@ -102,8 +102,6 @@ inline constexpr int kUfwLiveGapFastFallbackSeconds = 10 * 60;
 inline constexpr std::size_t kDashboardTrafficDays = 31;
 inline constexpr std::size_t kDashboardTrafficPortLimit = 10;
 
-inline std::string nowStamp();
-
 inline bool &pauseEnabled() {
     static bool enabled = true;
     return enabled;
@@ -192,113 +190,6 @@ inline std::string currentExecutablePath(const char *argv0) {
     }
     return argv0 ? argv0 : "/usr/local/bin/ltg";
 #endif
-}
-
-inline std::string nowStamp() {
-    const auto now = std::chrono::system_clock::now();
-    const auto sec = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &sec);
-#else
-    localtime_r(&sec, &tm);
-#endif
-    char buf[32]{};
-    std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tm);
-    return buf;
-}
-
-inline std::string dateStamp(std::time_t value) {
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &value);
-#else
-    localtime_r(&value, &tm);
-#endif
-    char buf[32]{};
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
-    return buf;
-}
-
-inline std::string dateTimeStamp(std::time_t value) {
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &value);
-#else
-    localtime_r(&value, &tm);
-#endif
-    char buf[32]{};
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
-    return buf;
-}
-
-inline std::time_t makeLocalTime(std::tm tm) {
-    tm.tm_isdst = -1;
-    return std::mktime(&tm);
-}
-
-inline bool isLeapYear(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-}
-
-inline bool isValidCalendarDateParts(int year, int month, int day) {
-    if (year < 1970 || year > 9999 || month < 1 || month > 12 || day < 1) {
-        return false;
-    }
-    static const int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    int limit = daysInMonth[month - 1];
-    if (month == 2 && isLeapYear(year)) {
-        limit = 29;
-    }
-    return day <= limit;
-}
-
-inline bool parseYmdDate(const std::string &text, bool endOfDay, std::time_t &out) {
-    std::smatch match;
-    const std::string value = trim(text);
-    std::tm tm{};
-    const std::time_t now = std::time(nullptr);
-#ifdef _WIN32
-    localtime_s(&tm, &now);
-#else
-    localtime_r(&now, &tm);
-#endif
-    int year = tm.tm_year + 1900;
-    int month = tm.tm_mon + 1;
-    int day = tm.tm_mday;
-    if (std::regex_match(value, match, std::regex(R"((\d{4})[-/ ](\d{1,2})[-/ ](\d{1,2}))"))) {
-        year = std::stoi(match[1].str());
-        month = std::stoi(match[2].str());
-        day = std::stoi(match[3].str());
-    } else if (std::regex_match(value, match, std::regex(R"((\d{1,2})[-/ ](\d{1,2}))"))) {
-        month = std::stoi(match[1].str());
-        day = std::stoi(match[2].str());
-    } else {
-        return false;
-    }
-    if (!isValidCalendarDateParts(year, month, day)) {
-        return false;
-    }
-    tm.tm_year = year - 1900;
-    tm.tm_mon = month - 1;
-    tm.tm_mday = day;
-    tm.tm_hour = endOfDay ? 23 : 0;
-    tm.tm_min = endOfDay ? 59 : 0;
-    tm.tm_sec = endOfDay ? 59 : 0;
-    tm.tm_isdst = -1;
-    out = makeLocalTime(tm);
-    if (out == static_cast<std::time_t>(-1)) {
-        return false;
-    }
-    std::tm roundTrip{};
-#ifdef _WIN32
-    localtime_s(&roundTrip, &out);
-#else
-    localtime_r(&out, &roundTrip);
-#endif
-    return roundTrip.tm_year == year - 1900 &&
-           roundTrip.tm_mon == month - 1 &&
-           roundTrip.tm_mday == day;
 }
 
 inline std::string truncateText(const std::string &value, std::size_t width) {
@@ -8721,7 +8612,11 @@ inline int selfTest() {
                                 !isStrictPositiveNumber("00") && !isStrictPositiveNumber("abc"));
     std::time_t parsedDate = 0;
     check("日历日期校验", parseYmdDate("2026-02-28", false, parsedDate) &&
+                              dateStamp(parsedDate) == "2026-02-28" &&
+                              dateTimeStamp(parsedDate).find("00:00:00") != std::string::npos &&
                               parseYmdDate("2024-02-29", true, parsedDate) &&
+                              dateTimeStamp(parsedDate).find("23:59:59") != std::string::npos &&
+                              isLeapYear(2024) && !isLeapYear(2025) &&
                               !parseYmdDate("2026-13-01", false, parsedDate) &&
                               !parseYmdDate("2026-02-31", false, parsedDate) &&
                               !parseYmdDate("2025-02-29", false, parsedDate));

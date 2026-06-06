@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -28,6 +29,14 @@ public:
     static bool exists(const std::string &name);
     static void clearExistsCache();
 };
+
+std::string nowStamp();
+std::string dateStamp(std::time_t value);
+std::string dateTimeStamp(std::time_t value);
+std::time_t makeLocalTime(std::tm tm);
+bool isLeapYear(int year);
+bool isValidCalendarDateParts(int year, int month, int day);
+bool parseYmdDate(const std::string &text, bool endOfDay, std::time_t &out);
 
 inline std::string trim(std::string value) {
     const char *spaces = " \t\r\n";
