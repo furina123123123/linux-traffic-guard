@@ -1,6 +1,8 @@
 #include "ltg/traffic_accounting.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <regex>
 
 namespace linux_traffic_guard {
 
@@ -17,6 +19,82 @@ std::string quoteShellArg(const std::string &value) {
     }
     out += "'";
     return out;
+}
+
+std::string trimAscii(const std::string &text) {
+    std::size_t first = 0;
+    while (first < text.size() && std::isspace(static_cast<unsigned char>(text[first]))) {
+        ++first;
+    }
+    std::size_t last = text.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(text[last - 1]))) {
+        --last;
+    }
+    return text.substr(first, last - first);
+}
+
+std::string localTimeFormat(std::time_t value, const char *format) {
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &value);
+#else
+    localtime_r(&value, &tm);
+#endif
+    char buf[32]{};
+    std::strftime(buf, sizeof(buf), format, &tm);
+    return buf;
+}
+
+std::time_t makeLocalTrafficTime(std::tm tm) {
+    tm.tm_isdst = -1;
+    return std::mktime(&tm);
+}
+
+bool isTrafficLeapYear(int year) {
+    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+bool isValidTrafficCalendarDate(int year, int month, int day) {
+    if (year < 1970 || year > 9999 || month < 1 || month > 12 || day < 1) {
+        return false;
+    }
+    static const int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int limit = daysInMonth[month - 1];
+    if (month == 2 && isTrafficLeapYear(year)) {
+        limit = 29;
+    }
+    return day <= limit;
+}
+
+bool parseTrafficDayLabel(const std::string &value) {
+    std::smatch match;
+    if (!std::regex_match(value, match, std::regex(R"(([0-9]{4})-([0-9]{2})-([0-9]{2}))"))) {
+        return false;
+    }
+    const int year = std::stoi(match[1].str());
+    const int month = std::stoi(match[2].str());
+    const int day = std::stoi(match[3].str());
+    if (!isValidTrafficCalendarDate(year, month, day)) {
+        return false;
+    }
+    std::tm tm{};
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = 12;
+    const std::time_t valueTime = makeLocalTrafficTime(tm);
+    if (valueTime == static_cast<std::time_t>(-1)) {
+        return false;
+    }
+    std::tm roundTrip{};
+#ifdef _WIN32
+    localtime_s(&roundTrip, &valueTime);
+#else
+    localtime_r(&valueTime, &roundTrip);
+#endif
+    return roundTrip.tm_year == year - 1900 &&
+           roundTrip.tm_mon == month - 1 &&
+           roundTrip.tm_mday == day;
 }
 
 } // namespace
@@ -98,6 +176,149 @@ std::vector<std::string> trafficPortSetUpdateCommands(const std::set<int> &ports
         commands.push_back(nftCommand("add element " + table + " tracked_ports " + nftPortElements(ports)));
     }
     return commands;
+}
+
+std::string localDayStamp(std::time_t value) {
+    return localTimeFormat(value, "%Y-%m-%d");
+}
+
+std::string localMonthStamp(std::time_t value) {
+    return localTimeFormat(value, "%Y-%m");
+}
+
+std::string localYearStamp(std::time_t value) {
+    return localTimeFormat(value, "%Y");
+}
+
+std::string currentTrafficPeriodLabel(TrafficPeriodMode mode) {
+    const std::time_t now = std::time(nullptr);
+    if (mode == TrafficPeriodMode::Day) {
+        return localDayStamp(now);
+    }
+    if (mode == TrafficPeriodMode::Year) {
+        return localYearStamp(now);
+    }
+    return localMonthStamp(now);
+}
+
+std::string recentTrafficDaysLabel(const std::vector<std::string> &periods, std::size_t days) {
+    if (periods.empty()) {
+        return "最近" + std::to_string(days) + "天";
+    }
+    const auto range = std::minmax_element(periods.begin(), periods.end());
+    return "最近" + std::to_string(days) + "天（" + *range.first + " ~ " + *range.second + "）";
+}
+
+std::string trafficPeriodModeTitle(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "日流量";
+    if (mode == TrafficPeriodMode::Year) return "年流量";
+    return "月流量";
+}
+
+std::string trafficPeriodModeDetailTitle(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "按日流量";
+    if (mode == TrafficPeriodMode::Year) return "按年流量";
+    return "按月流量";
+}
+
+std::string trafficPeriodModeUnit(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "天";
+    if (mode == TrafficPeriodMode::Year) return "年";
+    return "月";
+}
+
+std::string trafficPeriodModeColumn(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "日期";
+    if (mode == TrafficPeriodMode::Year) return "年份";
+    return "月份";
+}
+
+std::string trafficPeriodVnstatCommand(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "vnstat -d";
+    if (mode == TrafficPeriodMode::Year) return "vnstat -y";
+    return "vnstat -m";
+}
+
+std::string trafficPeriodSample(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return "2026-05-04";
+    if (mode == TrafficPeriodMode::Year) return "2026";
+    return "2026-05";
+}
+
+std::size_t defaultTrafficRollingLimit(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return 31;
+    if (mode == TrafficPeriodMode::Year) return 10;
+    return 24;
+}
+
+std::size_t maxTrafficRollingLimit(TrafficPeriodMode mode) {
+    if (mode == TrafficPeriodMode::Day) return 366;
+    if (mode == TrafficPeriodMode::Year) return 50;
+    return 120;
+}
+
+bool parseTrafficRollingLimit(const std::string &text, TrafficPeriodMode mode, std::size_t &limit) {
+    const std::string value = trimAscii(text);
+    if (value.empty()) {
+        limit = defaultTrafficRollingLimit(mode);
+        return true;
+    }
+    if (!std::regex_match(value, std::regex(R"([0-9]+)"))) {
+        return false;
+    }
+    const std::size_t maxLimit = maxTrafficRollingLimit(mode);
+    std::size_t parsed = 0;
+    for (unsigned char ch : value) {
+        const std::size_t digit = static_cast<std::size_t>(ch - '0');
+        if (parsed > (maxLimit - digit) / 10) {
+            return false;
+        }
+        parsed = parsed * 10 + digit;
+    }
+    if (parsed == 0 || parsed > maxLimit) {
+        return false;
+    }
+    limit = parsed;
+    return true;
+}
+
+std::vector<std::string> recentTrafficDayPeriods(std::size_t days) {
+    std::vector<std::string> periods;
+    if (days == 0) {
+        return periods;
+    }
+    const std::time_t now = std::time(nullptr);
+    std::tm base{};
+#ifdef _WIN32
+    localtime_s(&base, &now);
+#else
+    localtime_r(&now, &base);
+#endif
+    base.tm_hour = 12;
+    base.tm_min = 0;
+    base.tm_sec = 0;
+    for (std::size_t offset = 0; offset < days; ++offset) {
+        std::tm candidate = base;
+        candidate.tm_mday -= static_cast<int>(offset);
+        periods.push_back(localDayStamp(makeLocalTrafficTime(candidate)));
+    }
+    return periods;
+}
+
+bool isValidTrafficPeriodLabel(TrafficPeriodMode mode, const std::string &value) {
+    if (mode == TrafficPeriodMode::Day) {
+        return parseTrafficDayLabel(value);
+    }
+    if (mode == TrafficPeriodMode::Month) {
+        std::smatch match;
+        if (!std::regex_match(value, match, std::regex(R"(([0-9]{4})-([0-9]{2}))"))) {
+            return false;
+        }
+        const int year = std::stoi(match[1].str());
+        const int month = std::stoi(match[2].str());
+        return year >= 1970 && year <= 9999 && month >= 1 && month <= 12;
+    }
+    return std::regex_match(value, std::regex(R"([0-9]{4})"));
 }
 
 std::string trafficKey(const TrafficRow &row) {
