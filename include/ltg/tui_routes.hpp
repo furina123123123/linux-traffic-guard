@@ -9,6 +9,7 @@ enum class TuiRouteAction {
     Dashboard,
     OneClickRepair,
     TrafficMenu,
+    TrafficPeriodMenu,
     SecurityMenu,
     AdvancedMenu,
     RunSetupAssistant,
@@ -63,6 +64,7 @@ public:
     virtual void routeShowDashboard() = 0;
     virtual void routeOneClickRepair() = 0;
     virtual void routeShowTrafficMenu() = 0;
+    virtual void routeShowTrafficPeriodMenu() = 0;
     virtual void routeShowSecurityMenu() = 0;
     virtual void routeShowAdvancedMenu() = 0;
     virtual void routeRunSetupAssistant() = 0;
@@ -101,6 +103,7 @@ void dispatchTuiRoute(TuiRouteAction action, TuiRouteCallbacks &callbacks);
 TuiMenuDefinition tuiMainMenuDefinition(const std::string &title);
 TuiMenuDefinition tuiSetupAssistantMenuDefinition(const std::string &title);
 TuiMenuDefinition tuiTrafficMenuDefinition();
+TuiMenuDefinition tuiTrafficPeriodMenuDefinition();
 TuiMenuDefinition tuiSecurityMenuDefinition();
 TuiMenuDefinition tuiAdvancedMenuDefinition();
 TuiMenuDefinition tuiUfwAnalyzeMenuDefinition();

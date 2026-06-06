@@ -7103,6 +7103,7 @@ private:
     void routeShowDashboard() override { pushDashboard(); }
     void routeOneClickRepair() override { actionInstallDependencies(); }
     void routeShowTrafficMenu() override { pushTrafficMenu(); }
+    void routeShowTrafficPeriodMenu() override { pushTrafficPeriodMenu(); }
     void routeShowSecurityMenu() override { pushSecurityMenu(); }
     void routeShowAdvancedMenu() override { pushAdvancedMenu(); }
     void routeRunSetupAssistant() override { actionRunSetupAssistant(); }
@@ -7137,6 +7138,10 @@ private:
 
     void pushTrafficMenu() {
         pushRouteMenu(tuiTrafficMenuDefinition());
+    }
+
+    void pushTrafficPeriodMenu() {
+        pushRouteMenu(tuiTrafficPeriodMenuDefinition());
     }
 
     void pushSecurityMenu() {
@@ -10716,14 +10721,30 @@ inline int selfTest() {
         });
     };
     const TuiMenuDefinition mainRoutes = tuiMainMenuDefinition("test");
+    const TuiMenuDefinition trafficRoutes = tuiTrafficMenuDefinition();
+    const TuiMenuDefinition trafficPeriodRoutes = tuiTrafficPeriodMenuDefinition();
     const TuiMenuDefinition securityRoutes = tuiSecurityMenuDefinition();
+    const TuiMenuDefinition advancedRoutes = tuiAdvancedMenuDefinition();
     check("TUI 主路径收敛到目标入口", mainRoutes.items.size() == 4 &&
                                           routeHasAction(mainRoutes, TuiRouteAction::Dashboard) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::OneClickRepair) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::TrafficMenu) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::SecurityMenu) &&
                                           !routeHasAction(mainRoutes, TuiRouteAction::AdvancedMenu) &&
-                                          routeHasAction(securityRoutes, TuiRouteAction::AdvancedMenu));
+                                          securityRoutes.items.size() <= 5 &&
+                                          routeHasAction(securityRoutes, TuiRouteAction::AdvancedMenu) &&
+                                          !routeHasAction(securityRoutes, TuiRouteAction::Fail2banPanel) &&
+                                          !routeHasAction(securityRoutes, TuiRouteAction::ReliabilitySelfCheck));
+    check("TUI 流量查询聚合", trafficRoutes.items.size() == 5 &&
+                                  routeHasAction(trafficRoutes, TuiRouteAction::TrafficPeriodMenu) &&
+                                  !routeHasAction(trafficRoutes, TuiRouteAction::TrafficDay) &&
+                                  routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficDay) &&
+                                  routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficMonth) &&
+                                  routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficYear));
+    check("TUI 高级动作后移", routeHasAction(advancedRoutes, TuiRouteAction::Fail2banPanel) &&
+                                  routeHasAction(advancedRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
+                                  routeHasAction(advancedRoutes, TuiRouteAction::ServiceControl) &&
+                                  routeHasAction(advancedRoutes, TuiRouteAction::RawNftTable));
     Viewport cursorViewport;
     ScreenBuffer cursorBuffer;
     cursorBuffer.add("菜单行");
