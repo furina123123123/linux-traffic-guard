@@ -80,6 +80,16 @@ inline std::vector<std::string> splitByChar(const std::string &text, char sep) {
     return out;
 }
 
+inline std::vector<std::string> splitLines(const std::string &text) {
+    std::vector<std::string> lines;
+    std::istringstream input(text);
+    std::string line;
+    while (std::getline(input, line)) {
+        lines.push_back(line);
+    }
+    return lines;
+}
+
 inline std::string joinWords(const std::vector<std::string> &words, const std::string &sep = " ") {
     std::ostringstream out;
     for (std::size_t i = 0; i < words.size(); ++i) {
@@ -141,6 +151,8 @@ inline bool fileExists(const std::string &path) {
     return static_cast<bool>(input);
 }
 
+bool backupFileIfExists(const std::string &path, std::string &backupPath);
+
 inline bool writeTextFile(const std::string &path, const std::string &content) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) {
@@ -157,5 +169,20 @@ inline bool ensureDirectory(const std::string &path) {
     return std::system(("mkdir -p " + shellQuote(path) + " >/dev/null 2>&1").c_str()) == 0;
 #endif
 }
+
+class IniConfig {
+public:
+    bool load(const std::string &path);
+    void loadString(const std::string &content, const std::string &virtualPath = "");
+    std::string toString() const;
+    std::string get(const std::string &section, const std::string &key) const;
+    std::vector<std::string> sections() const;
+    void set(const std::string &section, const std::string &key, const std::string &value);
+    bool save(std::string &backupPath) const;
+
+private:
+    std::string path_;
+    std::vector<std::string> lines_;
+};
 
 } // namespace linux_traffic_guard
