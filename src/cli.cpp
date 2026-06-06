@@ -47,6 +47,7 @@
 #include "ltg/runtime_repair.hpp"
 #include "ltg/traffic_accounting.hpp"
 #include "ltg/tui_routes.hpp"
+#include "ltg/ufw_analysis.hpp"
 #include "ltg/version.hpp"
 
 #ifdef _WIN32
@@ -98,7 +99,6 @@ inline const std::string plain = "\033[0m";
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kLatestSha256Url = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/SHA256SUMS";
-inline const std::string kUnknownUfwPort = "UNKNOWN";
 inline const std::string kDbIpLiteDownloadPage = "https://db-ip.com/db/download/ip-to-city-lite";
 inline const std::string kDbIpLiteDir = "/var/lib/linux-traffic-guard";
 inline const std::string kDbIpLiteMmdbPath = "/var/lib/linux-traffic-guard/dbip-city-lite.mmdb";
@@ -120,17 +120,6 @@ struct MenuItem {
     std::string detail;
     bool needsRoot = false;
     std::function<void()> run;
-};
-
-struct UfwHit {
-    std::string value;
-    std::string geo;
-    std::uint64_t count = 0;
-    std::uint64_t peak = 0;
-    std::string topPort;
-    std::uint64_t topPortCount = 0;
-    std::string risk;
-    std::string suggestion;
 };
 
 struct F2bJailConfig {
@@ -160,40 +149,6 @@ struct F2bPolicyInfo {
     std::string recentBan;
     std::string runtimeDetail;
     bool managedDefault = false;
-};
-
-struct UfwLogEvent {
-    std::time_t ts = 0;
-    std::string day;
-    std::string action;
-    std::string src;
-    std::string dpt;
-};
-
-struct UfwLogEvidence {
-    std::size_t rawMatches = 0;
-    std::size_t validPublic = 0;
-    std::size_t filteredSource = 0;
-    std::size_t noDpt = 0;
-    std::size_t block = 0;
-    std::size_t audit = 0;
-    std::size_t allow = 0;
-    bool cacheCovered = false;
-    std::string cacheRanges;
-    std::string liveSource;
-};
-
-struct UfwAnalysisReport {
-    std::string title;
-    std::time_t start = 0;
-    std::time_t end = 0;
-    std::size_t validLines = 0;
-    std::string sourceNote;
-    UfwLogEvidence evidence;
-    std::map<std::string, std::map<std::string, int>> ipDaily;
-    std::map<std::string, std::map<std::string, int>> portDaily;
-    std::map<std::string, std::map<std::string, std::map<std::string, int>>> ipPortDaily;
-    std::vector<std::pair<std::string, std::time_t>> allowRecent;
 };
 
 struct DualAuditRow {
@@ -1841,27 +1796,6 @@ inline std::time_t ufwLogLineTimeOrNow(const std::string &line) {
     return ts > 0 ? ts : std::time(nullptr);
 }
 
-inline void observeUfwRawLogLine(const std::string &line, UfwLogEvidence &evidence) {
-    std::smatch match;
-    static const std::regex actionPattern(R"(\[UFW (BLOCK|AUDIT|ALLOW)\])");
-    static const std::regex dptPattern(R"(\bDPT=([0-9]+)\b)");
-    if (!std::regex_search(line, match, actionPattern)) {
-        return;
-    }
-    ++evidence.rawMatches;
-    const std::string action = match[1].str();
-    if (action == "BLOCK") {
-        ++evidence.block;
-    } else if (action == "AUDIT") {
-        ++evidence.audit;
-    } else if (action == "ALLOW") {
-        ++evidence.allow;
-    }
-    if (!std::regex_search(line, dptPattern)) {
-        ++evidence.noDpt;
-    }
-}
-
 inline bool parseUfwLogEvent(const std::string &line, UfwLogEvent &event) {
     std::smatch match;
     static const std::regex actionPattern(R"(\[UFW (BLOCK|AUDIT|ALLOW)\])");
@@ -1891,10 +1825,6 @@ inline bool parseUfwLogEvent(const std::string &line, UfwLogEvent &event) {
         event.dpt = kUnknownUfwPort;
     }
     return !event.src.empty();
-}
-
-inline std::string ufwEventKey(const UfwLogEvent &event) {
-    return std::to_string(static_cast<long long>(event.ts)) + "|" + event.action + "|" + event.src + "|" + event.dpt;
 }
 
 inline std::vector<std::pair<std::time_t, std::time_t>> readUfwCacheRanges() {
@@ -2273,38 +2203,6 @@ inline std::string ufwRangesSummary(const std::vector<std::pair<std::time_t, std
         out << " | ...";
     }
     return out.str();
-}
-
-inline UfwAnalysisReport buildUfwReportFromEvents(const std::string &title,
-                                                  std::time_t start,
-                                                  std::time_t end,
-                                                  const std::string &sourceNote,
-                                                  const std::vector<UfwLogEvent> &events,
-                                                  const UfwLogEvidence &evidence = {}) {
-    UfwAnalysisReport report;
-    report.title = title;
-    report.start = start;
-    report.end = end;
-    report.sourceNote = sourceNote;
-    report.validLines = events.size();
-    report.evidence = evidence;
-    if (report.evidence.validPublic == 0 && !events.empty()) {
-        report.evidence.validPublic = events.size();
-    }
-    for (const auto &event : events) {
-        if (event.action == "ALLOW") {
-            if (event.ts >= std::time(nullptr) - 3 * 86400) {
-                report.allowRecent.push_back({event.src, event.ts});
-            }
-            continue;
-        }
-        report.ipDaily[event.src][event.day] += 1;
-        if (!event.dpt.empty()) {
-            report.portDaily[event.dpt][event.day] += 1;
-            report.ipPortDaily[event.src][event.dpt][event.day] += 1;
-        }
-    }
-    return report;
 }
 
 #if LTG_HAS_SQLITE
@@ -3689,51 +3587,10 @@ inline std::string bufferTableRow(const std::vector<std::string> &values, const 
     return out.str();
 }
 
-inline int dailyTotal(const std::map<std::string, int> &daily) {
-    int total = 0;
-    for (const auto &item : daily) {
-        total += item.second;
-    }
-    return total;
-}
-
-inline int dailyPeak(const std::map<std::string, int> &daily) {
-    int peak = 0;
-    for (const auto &item : daily) {
-        peak = std::max(peak, item.second);
-    }
-    return peak;
-}
-
 inline std::string ufwAnalysisAccuracyNote() {
     return "口径: 精确时间窗口内的公网 SRC UFW BLOCK/AUDIT；按本机本地日期计算单日峰值。"
            "与旧 Python 脚本不同，LTG 不会把同一天但窗口外的已缓存日志并入当前结果。"
            "国家/地区只用于展示，不参与排序、计数或 fail2ban 决策。";
-}
-
-inline std::string topPortsText(const UfwAnalysisReport &report, const std::string &ip, std::size_t topN = 5) {
-    std::vector<std::pair<std::string, int>> ports;
-    const auto ipFound = report.ipPortDaily.find(ip);
-    if (ipFound == report.ipPortDaily.end()) {
-        return "-";
-    }
-    for (const auto &port : ipFound->second) {
-        ports.push_back({port.first, dailyTotal(port.second)});
-    }
-    std::sort(ports.begin(), ports.end(), [](const auto &a, const auto &b) {
-        if (a.second != b.second) {
-            return a.second > b.second;
-        }
-        return a.first < b.first;
-    });
-    std::ostringstream out;
-    for (std::size_t i = 0; i < ports.size() && i < topN; ++i) {
-        if (i != 0) {
-            out << " ";
-        }
-        out << "(" << ports[i].first << "," << ports[i].second << ")";
-    }
-    return out.str().empty() ? "-" : out.str();
 }
 
 inline void addUfwAnalysisToBuffer(ScreenBuffer &buffer, const UfwAnalysisReport &report, const std::string &traceIp = "") {
@@ -5313,33 +5170,6 @@ inline bool loadCachedUfwAnalysisReportReadonly(const std::string &title,
                                       events, evidence);
     return true;
 #endif
-}
-
-inline std::string ufwTopSignature(const UfwAnalysisReport &report) {
-    std::ostringstream out;
-    out << "valid=" << report.validLines << ";src=";
-    std::vector<std::pair<std::string, int>> sources;
-    for (const auto &entry : report.ipDaily) {
-        sources.push_back({entry.first, dailyTotal(entry.second)});
-    }
-    std::sort(sources.begin(), sources.end(), [](const auto &a, const auto &b) {
-        if (a.second != b.second) return a.second > b.second;
-        return a.first < b.first;
-    });
-    for (std::size_t i = 0; i < sources.size() && i < 5; ++i) {
-        out << sources[i].first << ":" << sources[i].second << ",";
-    }
-    out << ";ports=";
-    for (const auto &port : sortedCounter([&] {
-             std::map<std::string, int> totals;
-             for (const auto &entry : report.portDaily) {
-                 totals[entry.first] = dailyTotal(entry.second);
-             }
-             return totals;
-         }())) {
-        out << port.first << ":" << port.second << ",";
-    }
-    return out.str();
 }
 
 inline void verifyUfwAnalysisChain(ReliabilityReport &report) {
@@ -10004,6 +9834,9 @@ inline int selfTest() {
                               sourceTop[0].peak == 6 && sourceTop[0].count == 6 &&
                               sourceTop[1].value == "1.2.3.4" && sourceTop[1].peak == 5 &&
                               sourceTop[1].count == 7 && sourceTop[1].topPort == "22");
+    check("UFW分析模块聚合签名", topPortsText(sourceTopReport, "1.2.3.4") == "(22,7)" &&
+                                      ufwTopSignature(sourceTopReport).find("1.2.3.4:7") != std::string::npos &&
+                                      dailyPeak(sourceTopReport.ipDaily["8.8.8.8"]) == 6);
 
     const auto traffic = parseTrafficSetOutput("elements = { 1.2.3.4 . 443 counter packets 7 bytes 2048 }", "下载", "IPv4");
     check("nft 统计解析", traffic.size() == 1 && traffic[0].ip == "1.2.3.4" &&
