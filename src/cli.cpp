@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "ltg/protection_bootstrap.hpp"
+#include "ltg/fail2ban_runtime.hpp"
 #include "ltg/runtime_repair.hpp"
 #include "ltg/traffic_accounting.hpp"
 #include "ltg/tui_routes.hpp"
@@ -249,26 +250,6 @@ struct F2bPolicyInfo {
     std::string recentBan;
     std::string runtimeDetail;
     bool managedDefault = false;
-};
-
-enum class F2bJailRuntimeState {
-    Loaded,
-    NotLoaded,
-    PermissionDenied,
-    Fail2banUnavailable,
-    Unknown
-};
-
-struct F2bJailRuntimeInfo {
-    std::string jail;
-    F2bJailRuntimeState state = F2bJailRuntimeState::Unknown;
-    std::string label;
-    std::string raw;
-    std::set<std::string> bannedIps;
-
-    bool loaded() const {
-        return state == F2bJailRuntimeState::Loaded;
-    }
 };
 
 struct UfwLogEvent {
@@ -1786,66 +1767,6 @@ inline bool ufwStatusHasDenyForIp(const std::string &output, const std::string &
     return false;
 }
 
-inline std::string f2bRuntimeStateLabel(F2bJailRuntimeState state) {
-    switch (state) {
-    case F2bJailRuntimeState::Loaded:
-        return "已加载";
-    case F2bJailRuntimeState::NotLoaded:
-        return "未加载";
-    case F2bJailRuntimeState::PermissionDenied:
-        return "权限不足";
-    case F2bJailRuntimeState::Fail2banUnavailable:
-        return "fail2ban 不可用";
-    case F2bJailRuntimeState::Unknown:
-    default:
-        return "未知";
-    }
-}
-
-inline F2bJailRuntimeInfo parseFail2banJailStatus(const std::string &jail, const std::string &rawOutput, bool clientExists = true) {
-    F2bJailRuntimeInfo info;
-    info.jail = jail;
-    info.raw = trim(rawOutput);
-    const std::string lower = lowerCopy(info.raw);
-    if (!clientExists) {
-        info.state = F2bJailRuntimeState::Fail2banUnavailable;
-    } else if (lower.find("permission denied") != std::string::npos ||
-               lower.find("you must be root") != std::string::npos ||
-               lower.find("access denied") != std::string::npos) {
-        info.state = F2bJailRuntimeState::PermissionDenied;
-    } else if (info.raw.empty() || lower.find("unable to contact server") != std::string::npos ||
-               lower.find("connection refused") != std::string::npos ||
-               lower.find("failed to access socket") != std::string::npos) {
-        info.state = F2bJailRuntimeState::Fail2banUnavailable;
-    } else if (info.raw.find("UnknownJailException") != std::string::npos ||
-               lower.find("unknown jail") != std::string::npos ||
-               lower.find("does not exist") != std::string::npos) {
-        info.state = F2bJailRuntimeState::NotLoaded;
-    } else if (lower.find("status for the jail") != std::string::npos ||
-               lower.find("banned ip list") != std::string::npos ||
-               lower.find("currently banned") != std::string::npos) {
-        info.state = F2bJailRuntimeState::Loaded;
-    } else {
-        info.state = F2bJailRuntimeState::Unknown;
-    }
-    info.label = f2bRuntimeStateLabel(info.state);
-
-    for (const auto &line : splitLines(info.raw)) {
-        const std::size_t pos = line.find("Banned IP list:");
-        if (pos == std::string::npos) {
-            continue;
-        }
-        std::string list = line.substr(pos + std::string("Banned IP list:").size());
-        std::replace(list.begin(), list.end(), ',', ' ');
-        for (const auto &ip : splitWords(list)) {
-            if (isValidIpOrCidr(ip) && ip.find('/') == std::string::npos) {
-                info.bannedIps.insert(ip);
-            }
-        }
-    }
-    return info;
-}
-
 inline F2bJailRuntimeInfo fail2banJailRuntimeStatus(const std::string &jail) {
     if (!Shell::exists("fail2ban-client")) {
         return parseFail2banJailStatus(jail, "", false);
@@ -1868,12 +1789,6 @@ inline std::string fail2banJailStatusLine(const std::string &jail) {
         firstLine = firstLine.substr(0, 157) + "...";
     }
     return info.label + ": " + firstLine;
-}
-
-inline bool defaultFail2banRuntimeReady(const F2bJailRuntimeInfo &ssh,
-                                        const F2bJailRuntimeInfo &scan,
-                                        bool requireScanRule) {
-    return ssh.loaded() && (!requireScanRule || scan.loaded());
 }
 
 inline std::string recentBanLineForJail(const std::string &jail) {
@@ -10597,6 +10512,16 @@ inline int selfTest() {
         "ERROR Permission denied to socket: /var/run/fail2ban/fail2ban.sock, (you must be root)",
         true);
     check("fail2ban 权限不足解析", parsedDenied.state == F2bJailRuntimeState::PermissionDenied);
+    const F2bJailRuntimeInfo parsedMixedIps = parseFail2banJailStatus(
+        "sshd",
+        "Status for the jail: sshd\n`- Actions\n   `- Banned IP list: 1.2.3.4, 2001:db8::1 10.0.0.0/24 not-an-ip\n",
+        true);
+    check("fail2ban runtime 模块过滤封禁IP", f2bRuntimeStateLabel(F2bJailRuntimeState::PermissionDenied) == "权限不足" &&
+                                             parsedMixedIps.loaded() &&
+                                             parsedMixedIps.bannedIps.count("1.2.3.4") == 1 &&
+                                             parsedMixedIps.bannedIps.count("2001:db8::1") == 1 &&
+                                             parsedMixedIps.bannedIps.count("10.0.0.0/24") == 0 &&
+                                             parsedMixedIps.bannedIps.count("not-an-ip") == 0);
     F2bDependencyReadiness missingFail2ban;
     missingFail2ban.missing = {"fail2ban-client"};
     F2bDependencyReadiness missingSystemd;
