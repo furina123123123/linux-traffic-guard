@@ -42,6 +42,7 @@
 
 #include "ltg/protection_bootstrap.hpp"
 #include "ltg/fail2ban_runtime.hpp"
+#include "ltg/reliability.hpp"
 #include "ltg/runtime_repair.hpp"
 #include "ltg/traffic_accounting.hpp"
 #include "ltg/tui_routes.hpp"
@@ -315,33 +316,6 @@ struct F2bEffectProbe {
     CommandResult unban;
     CommandResult ufwCleanup;
     F2bJailRuntimeInfo jailStatus;
-};
-
-enum class ReliabilityStatus {
-    Pass,
-    Fail,
-    Warning,
-    Skipped,
-    Permission
-};
-
-struct ReliabilityCheckResult {
-    std::string group;
-    std::string name;
-    ReliabilityStatus status = ReliabilityStatus::Skipped;
-    std::string summary;
-    std::string evidence;
-    std::string suggestion;
-};
-
-struct ReliabilityReport {
-    std::vector<ReliabilityCheckResult> results;
-
-    bool ok() const {
-        return std::none_of(results.begin(), results.end(), [](const ReliabilityCheckResult &result) {
-            return result.status == ReliabilityStatus::Fail || result.status == ReliabilityStatus::Permission;
-        });
-    }
 };
 
 struct DashboardSnapshot {
@@ -5476,7 +5450,7 @@ inline Table trafficPeriodPortTable(const std::vector<TrafficPeriodPortRow> &row
     return table;
 }
 
-inline std::string reliabilityStatusLabel(ReliabilityStatus status) {
+inline std::string reliabilityStatusBadge(ReliabilityStatus status) {
     switch (status) {
     case ReliabilityStatus::Pass:
         return ansi::green + std::string("通过") + ansi::plain;
@@ -5490,16 +5464,6 @@ inline std::string reliabilityStatusLabel(ReliabilityStatus status) {
     default:
         return ansi::gray + std::string("跳过") + ansi::plain;
     }
-}
-
-inline void addReliabilityResult(ReliabilityReport &report,
-                                 const std::string &group,
-                                 const std::string &name,
-                                 ReliabilityStatus status,
-                                 const std::string &summary,
-                                 const std::string &evidence = "",
-                                 const std::string &suggestion = "") {
-    report.results.push_back({group, name, status, summary, evidence, suggestion});
 }
 
 inline F2bDependencyReadiness fail2banStackDependencyReadiness() {
@@ -6368,7 +6332,7 @@ inline ScreenBuffer reliabilityReportBuffer(const ReliabilityReport &report, boo
             detail += (detail.empty() ? "" : " / ");
             detail += "建议: " + item.suggestion;
         }
-        buffer.add(bufferTableRow({item.name, reliabilityStatusLabel(item.status), item.summary, detail}, widths));
+        buffer.add(bufferTableRow({item.name, reliabilityStatusBadge(item.status), item.summary, detail}, widths));
     }
     return buffer;
 }
@@ -7016,7 +6980,7 @@ private:
     }
 
     void routeShowDashboard() override { pushDashboard(); }
-    void routeOneClickRepair() override { actionInstallDependencies(); }
+    void routeOneClickRepair() override { actionAutoRepair(); }
     void routeShowTrafficMenu() override { pushTrafficMenu(); }
     void routeShowTrafficPeriodMenu() override { pushTrafficPeriodMenu(); }
     void routeShowSecurityMenu() override { pushSecurityMenu(); }
@@ -7597,7 +7561,7 @@ private:
         buffer.add(uiSection("自动生效"));
         if (!Shell::exists("fail2ban-client")) {
             buffer.add(ansi::yellow + std::string("fail2ban-client 不可用，无法自动检查和 reload。") + ansi::plain);
-            buffer.add("请先执行“一键初始化/修复”或“修复运行环境”，LTG 会自动安装依赖并写入默认防护策略。");
+            buffer.add("请先执行“自动修复”或“一键初始化/修复”，LTG 会自动安装依赖、写入默认防护策略并验收。");
             return false;
         }
         CommandResult check = runDisplayedCommand(buffer, "fail2ban-client -t");
@@ -9675,7 +9639,7 @@ private:
         buffer.add(uiSection("可自动处理"));
         if (!missingCore.empty()) {
             buffer.add("缺失核心工具: " + joinWords(missingCore, ", "));
-            buffer.add("LTG 可以执行“修复运行环境”，自动安装依赖并继续验收防护栈。");
+            buffer.add("LTG 可以执行“自动修复”，自动安装依赖并继续验收防护栈。");
         }
         if (canAutoTraffic) {
             buffer.add("检测到外部监听端口，但流量统计尚未启用。LTG 可以顺手启用统计和后台采样。");
@@ -9684,7 +9648,7 @@ private:
             pushResult("依赖检查", buffer);
             return;
         }
-        actionInstallDependencies(false);
+        actionAutoRepair(false);
     }
 
     void actionReliabilitySelfCheck() {
@@ -9730,7 +9694,7 @@ private:
         pushResult("导出诊断报告", buffer);
     }
 
-    void actionInstallDependencies(bool askConfirm = true) {
+    void actionAutoRepair(bool askConfirm = true) {
         std::vector<std::string> body = {
             "将自动补齐 LTG 运行依赖，并在依赖可用后验收 fail2ban 防护栈和流量统计链路。",
             "",
@@ -9743,13 +9707,13 @@ private:
             "",
             "不会静默启用 UFW，避免远程 SSH 被锁在服务器外。",
         };
-        if (askConfirm && !confirmYesNoWithBody("修复运行环境", body, false)) {
+        if (askConfirm && !confirmYesNoWithBody("自动修复", body, false)) {
             ScreenBuffer buffer;
             buffer.add("操作已取消。");
-            pushResult("修复运行环境", buffer);
+            pushResult("自动修复", buffer);
             return;
         }
-        renderBusy("修复运行环境", "正在补齐依赖并验收防护链路...");
+        renderBusy("自动修复", "正在补齐依赖并验收防护链路...");
         ScreenBuffer buffer;
         buffer.add(uiSection("运行依赖"));
         cachedDashboardValid() = false;
@@ -9765,7 +9729,7 @@ private:
                     buffer.add("仍缺失: " + joinWords(missing, ", "));
                 }
                 buffer.add("请检查 apt 输出、软件源和系统是否为 Ubuntu/Debian。");
-                pushResult("修复运行环境", buffer);
+                pushResult("自动修复", buffer);
                 return;
             }
             buffer.add(ansi::green + std::string("运行依赖已自动补齐并复查通过。") + ansi::plain);
@@ -9786,7 +9750,7 @@ private:
         } else {
             buffer.add(ansi::yellow + std::string("依赖已补齐，但防护栈未完全通过验收，请查看上方失败层级。") + ansi::plain);
         }
-        pushResult("修复运行环境", buffer);
+        pushResult("自动修复", buffer);
     }
 
     void actionInstallGeoDatabase() {
@@ -10628,6 +10592,8 @@ inline int selfTest() {
     addReliabilityResult(reliabilityReport, "测试链路", "失败项", ReliabilityStatus::Fail, "bad");
     check("可靠性失败聚合", !reliabilityReport.ok() &&
                               reliabilityReportBuffer(reliabilityReport, false).lines().size() > 3);
+    check("可靠性模块标签", reliabilityStatusLabel(ReliabilityStatus::Warning) == "不能确认" &&
+                              reliabilityStatusBadge(ReliabilityStatus::Warning).find(ansi::yellow) != std::string::npos);
     check("诊断报告 section 检查", diagnosticReportHasRequiredSections("### fail2ban\n...\n### ufw\n...\n### accounting\n") &&
                                       !diagnosticReportHasRequiredSections("### fail2ban\n### ufw\n"));
     check("输入光标移动序列", cursorMoveSequence(4, 12) == "\033[4;12H\033[?25h");
