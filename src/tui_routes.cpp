@@ -22,11 +22,13 @@ TuiMenuDefinition tuiSetupAssistantMenuDefinition(const std::string &title) {
 
 TuiMenuDefinition tuiTrafficMenuDefinition() {
     return {"流量统计",
-            "日常只需要三步：添加端口、看周期流量、必要时查实时 IP。",
+            "端口级 vnStat：追加端口后直接看日/月/年，必要时再查实时 IP。",
             {{"1", "添加统计端口", "默认追加，不清空已有统计", true, TuiRouteAction::InstallTraffic},
-             {"2", "查看日/月/年流量", "端口级 vnStat，支持滚动窗口和指定周期", false, TuiRouteAction::TrafficPeriodMenu},
-             {"3", "实时 IP 明细", "较慢，读取底层实时计数，用于排障", false, TuiRouteAction::TrafficRealtime},
-             {"4", "统计维护", "停止端口、重置规则、查看底层计数", true, TuiRouteAction::TrafficMaintenanceMenu}}};
+             {"2", "日流量", "最近或指定日期的端口流量", false, TuiRouteAction::TrafficDay},
+             {"3", "月流量", "最近或指定月份的端口流量", false, TuiRouteAction::TrafficMonth},
+             {"4", "年流量", "最近或指定年份的端口流量", false, TuiRouteAction::TrafficYear},
+             {"5", "实时 IP 明细", "较慢，读取底层实时计数，用于排障", false, TuiRouteAction::TrafficRealtime},
+             {"6", "高级维护", "停止端口、重置规则、查看底层计数", true, TuiRouteAction::TrafficMaintenanceMenu}}};
 }
 
 TuiMenuDefinition tuiTrafficPeriodMenuDefinition() {
@@ -47,28 +49,28 @@ TuiMenuDefinition tuiTrafficMaintenanceMenuDefinition() {
 
 TuiMenuDefinition tuiSecurityMenuDefinition() {
     return {"安全中心",
-            "先看结论；要改变系统就处置；参数、可靠性和底层工具放进维护。",
+            "先看结论，再做验收或处置；低频底层动作放进高级维护。",
             {{"1", "安全总览", "一屏看服务、策略、封禁和下一步", false, TuiRouteAction::SecurityStatus},
              {"2", "威胁分析", "UFW 来源、端口扫描、IP 追查和缓存", false, TuiRouteAction::UfwAnalyzeMenu},
-             {"3", "处置 IP/端口", "封禁/解封、端口规则、同步和一致性核验", true, TuiRouteAction::SecurityOpsMenu},
-             {"4", "安全维护", "策略参数、可靠性、日志、导出、服务和底层规则", false, TuiRouteAction::AdvancedMenu}}};
+             {"3", "可靠性自检", "验证 fail2ban、UFW、统计和诊断是否真落地", true,
+              TuiRouteAction::ReliabilitySelfCheck},
+             {"4", "处置 IP/端口", "封禁/解封、端口规则、同步和一致性核验", true, TuiRouteAction::SecurityOpsMenu},
+             {"5", "策略参数", "SSH 防护、扫描升级、白名单和自定义 jail", true, TuiRouteAction::Fail2banPanel},
+             {"6", "高级维护", "日志、导出、服务、依赖、国家库和底层规则", false, TuiRouteAction::AdvancedMenu}}};
 }
 
 TuiMenuDefinition tuiAdvancedMenuDefinition() {
     return {"高级维护",
             "日常路径之外的参数、验收、日志、导出和底层排障。",
-            {{"1", "策略参数", "SSH 防护、扫描升级、白名单和自定义 jail", true, TuiRouteAction::Fail2banPanel},
-             {"2", "可靠性自检", "验证依赖、更新、防护、统计、诊断是否真落地", true,
-              TuiRouteAction::ReliabilitySelfCheck},
-             {"3", "依赖检查/修复", "发现缺失后可直接补齐", false, TuiRouteAction::DependencyDoctor},
-             {"4", "端口下钻", "监听、防火墙、计数、conntrack", false, TuiRouteAction::FocusedPortInspect},
-             {"5", "日志摘要", "fail2ban 与 UFW 日志", false, TuiRouteAction::LogSummary},
-             {"6", "导出报告", "写入 /tmp 报告", false, TuiRouteAction::ExportReport},
-             {"7", "服务控制", "fail2ban 与 UFW 服务动作", true, TuiRouteAction::ServiceControl},
-             {"8", "安装/更新 IP 国家库", "DB-IP Lite 免费 MMDB，用于来源国家展示", true,
+            {{"1", "依赖检查/修复", "发现缺失后可直接补齐", false, TuiRouteAction::DependencyDoctor},
+             {"2", "端口下钻", "监听、防火墙、计数、conntrack", false, TuiRouteAction::FocusedPortInspect},
+             {"3", "日志摘要", "fail2ban 与 UFW 日志", false, TuiRouteAction::LogSummary},
+             {"4", "导出报告", "写入 /tmp 报告", false, TuiRouteAction::ExportReport},
+             {"5", "服务控制", "fail2ban 与 UFW 服务动作", true, TuiRouteAction::ServiceControl},
+             {"6", "安装/更新 IP 国家库", "DB-IP Lite 免费 MMDB，用于来源国家展示", true,
               TuiRouteAction::InstallGeoDatabase},
-             {"9", "conntrack 快照", "当前活跃连接视图", false, TuiRouteAction::ConntrackSnapshot},
-             {"10", "底层计数规则", "查看 nftables 原始输出", false, TuiRouteAction::RawNftTable}}};
+             {"7", "conntrack 快照", "当前活跃连接视图", false, TuiRouteAction::ConntrackSnapshot},
+             {"8", "底层计数规则", "查看 nftables 原始输出", false, TuiRouteAction::RawNftTable}}};
 }
 
 TuiMenuDefinition tuiUfwAnalyzeMenuDefinition() {

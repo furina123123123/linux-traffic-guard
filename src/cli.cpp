@@ -10111,15 +10111,17 @@ inline int selfTest() {
                                           routeHasAction(mainRoutes, TuiRouteAction::TrafficMenu) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::SecurityMenu) &&
                                           !routeHasAction(mainRoutes, TuiRouteAction::AdvancedMenu) &&
-                                          securityRoutes.items.size() <= 4 &&
+                                          securityRoutes.items.size() <= 6 &&
+                                          routeHasAction(securityRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
+                                          routeHasAction(securityRoutes, TuiRouteAction::Fail2banPanel) &&
                                           routeHasAction(securityRoutes, TuiRouteAction::AdvancedMenu) &&
-                                          !routeHasAction(securityRoutes, TuiRouteAction::OneClickRepair) &&
-                                          !routeHasAction(securityRoutes, TuiRouteAction::Fail2banPanel) &&
-                                          !routeHasAction(securityRoutes, TuiRouteAction::ReliabilitySelfCheck));
-    check("TUI 流量查询聚合", trafficRoutes.items.size() == 4 &&
-                                  routeHasAction(trafficRoutes, TuiRouteAction::TrafficPeriodMenu) &&
+                                          !routeHasAction(securityRoutes, TuiRouteAction::OneClickRepair));
+    check("TUI 流量查询直达", trafficRoutes.items.size() == 6 &&
+                                  !routeHasAction(trafficRoutes, TuiRouteAction::TrafficPeriodMenu) &&
+                                  routeHasAction(trafficRoutes, TuiRouteAction::TrafficDay) &&
+                                  routeHasAction(trafficRoutes, TuiRouteAction::TrafficMonth) &&
+                                  routeHasAction(trafficRoutes, TuiRouteAction::TrafficYear) &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficMaintenanceMenu) &&
-                                  !routeHasAction(trafficRoutes, TuiRouteAction::TrafficDay) &&
                                   !routeHasAction(trafficRoutes, TuiRouteAction::RemoveTrafficAccounting) &&
                                   routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficDay) &&
                                   routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficMonth) &&
@@ -10127,8 +10129,9 @@ inline int selfTest() {
     check("TUI 低频流量维护后移", routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RemoveTrafficPorts) &&
                                       routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RemoveTrafficAccounting) &&
                                       routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RawNftTable));
-    check("TUI 高级动作后移", routeHasAction(advancedRoutes, TuiRouteAction::Fail2banPanel) &&
-                                  routeHasAction(advancedRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
+    check("TUI 高级动作保留低频维护", !routeHasAction(advancedRoutes, TuiRouteAction::Fail2banPanel) &&
+                                  !routeHasAction(advancedRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
+                                  routeHasAction(advancedRoutes, TuiRouteAction::DependencyDoctor) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::ServiceControl) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::RawNftTable));
     Viewport cursorViewport;
