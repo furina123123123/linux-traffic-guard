@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -37,6 +39,12 @@ std::time_t makeLocalTime(std::tm tm);
 bool isLeapYear(int year);
 bool isValidCalendarDateParts(int year, int month, int day);
 bool parseYmdDate(const std::string &text, bool endOfDay, std::time_t &out);
+std::string truncateText(const std::string &value, std::size_t width);
+std::string humanBytes(std::uint64_t bytes);
+std::string firstNonEmptyLine(const std::string &text);
+std::string summarizeCommandResult(const CommandResult &result, std::size_t maxLen = 180);
+bool parseVersionTriplet(const std::string &text, std::array<int, 3> &version);
+int compareVersionTriplet(const std::array<int, 3> &a, const std::array<int, 3> &b);
 
 inline std::string trim(std::string value) {
     const char *spaces = " \t\r\n";

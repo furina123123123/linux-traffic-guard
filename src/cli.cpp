@@ -192,69 +192,6 @@ inline std::string currentExecutablePath(const char *argv0) {
 #endif
 }
 
-inline std::string truncateText(const std::string &value, std::size_t width) {
-    if (value.size() <= width) {
-        return value;
-    }
-    if (width <= 3) {
-        return value.substr(0, width);
-    }
-    return value.substr(0, width - 3) + "...";
-}
-
-inline std::string humanBytes(std::uint64_t bytes) {
-    static const char *units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
-    double value = static_cast<double>(bytes);
-    int unit = 0;
-    while (value >= 1024.0 && unit < 4) {
-        value /= 1024.0;
-        ++unit;
-    }
-    std::ostringstream out;
-    if (unit == 0) {
-        out << static_cast<std::uint64_t>(value) << " " << units[unit];
-    } else {
-        out << std::fixed << std::setprecision(2) << value << " " << units[unit];
-    }
-    return out.str();
-}
-
-inline std::string firstNonEmptyLine(const std::string &text) {
-    for (const auto &line : splitLines(text)) {
-        const std::string value = trim(stripAnsi(line));
-        if (!value.empty()) {
-            return value;
-        }
-    }
-    return "";
-}
-
-inline std::string summarizeCommandResult(const CommandResult &result, std::size_t maxLen = 180) {
-    std::string summary = firstNonEmptyLine(result.output);
-    if (summary.empty()) {
-        summary = result.ok() ? "exit 0" : "exit " + std::to_string(result.exitCode);
-    }
-    return truncateText(summary, maxLen);
-}
-
-inline bool parseVersionTriplet(const std::string &text, std::array<int, 3> &version) {
-    const std::regex pattern(R"((\d+)\.(\d+)\.(\d+))");
-    std::smatch match;
-    if (!std::regex_search(text, match, pattern)) {
-        return false;
-    }
-    version = {std::stoi(match[1].str()), std::stoi(match[2].str()), std::stoi(match[3].str())};
-    return true;
-}
-
-inline int compareVersionTriplet(const std::array<int, 3> &a, const std::array<int, 3> &b) {
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        if (a[i] < b[i]) return -1;
-        if (a[i] > b[i]) return 1;
-    }
-    return 0;
-}
-
 inline F2bJailConfig readJailConfig(const std::string &jail) {
     IniConfig ini;
     ini.load(kJailConf);
@@ -8974,6 +8911,10 @@ inline int selfTest() {
                                    splitByChar("a,b", ',').size() == 2 &&
                                    joinWords(splitWords("a b"), ",") == "a,b" &&
                                    shellQuote("a'b") == "'a'\\''b'" &&
+                                   truncateText("abcdef", 5) == "ab..." &&
+                                   humanBytes(1536) == "1.50 KiB" &&
+                                   firstNonEmptyLine("\n" + ansi::red + std::string("ERR") + ansi::plain + "\n") == "ERR" &&
+                                   summarizeCommandResult({7, ""}) == "exit 7" &&
                                    coreFileOk);
     const CommandResult shellEcho = Shell::capture("echo ltg-core-shell");
     check("core模块Shell helper", shellEcho.ok() &&
