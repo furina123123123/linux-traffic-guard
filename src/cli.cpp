@@ -47,6 +47,8 @@
 #include "ltg/runtime_repair.hpp"
 #include "ltg/traffic_accounting.hpp"
 #include "ltg/tui_routes.hpp"
+#include "ltg/types.hpp"
+#include "ltg/ui.hpp"
 #include "ltg/ufw_analysis.hpp"
 #include "ltg/version.hpp"
 
@@ -84,18 +86,6 @@
 
 namespace linux_traffic_guard {
 
-namespace ansi {
-inline const std::string red = "\033[31m";
-inline const std::string green = "\033[32m";
-inline const std::string yellow = "\033[33m";
-inline const std::string blue = "\033[36m";
-inline const std::string cyan = "\033[36m";
-inline const std::string gray = "\033[90m";
-inline const std::string bold = "\033[1m";
-inline const std::string inverse = "\033[7m";
-inline const std::string plain = "\033[0m";
-} // namespace ansi
-
 inline const std::string kName = "Linux 流量守卫";
 inline const std::string kLatestBinaryUrl = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/ltg-linux-x86_64";
 inline const std::string kLatestSha256Url = "https://github.com/furina123123123/linux-traffic-guard/releases/latest/download/SHA256SUMS";
@@ -113,109 +103,6 @@ inline constexpr std::size_t kDashboardTrafficPortLimit = 10;
 
 inline std::string nowStamp();
 inline bool parseTimeToSeconds(const std::string &text, long long &seconds);
-
-struct MenuItem {
-    std::string key;
-    std::string title;
-    std::string detail;
-    bool needsRoot = false;
-    std::function<void()> run;
-};
-
-struct F2bJailConfig {
-    std::string enabled;
-    std::string maxretry;
-    std::string findtime;
-    std::string bantime;
-    std::string banaction;
-    std::string ignoreip;
-    std::string increment;
-    std::string factor;
-    std::string maxtime;
-};
-
-struct F2bPolicyInfo {
-    std::string name;
-    std::string role;
-    F2bJailConfig config;
-    std::string filter;
-    std::string backend;
-    std::string logpath;
-    std::string port;
-    std::string state;
-    std::size_t bannedCount = 0;
-    bool configured = false;
-    bool jailLoaded = false;
-    std::string recentBan;
-    std::string runtimeDetail;
-    bool managedDefault = false;
-};
-
-struct DualAuditRow {
-    std::string ip;
-    int ufwHits = 0;
-    bool rule1Banned = false;
-    bool rule2Banned = false;
-    bool banLogged = false;
-    std::string conclusion;
-};
-
-struct DualAuditReport {
-    F2bJailRuntimeInfo rule1;
-    F2bJailRuntimeInfo rule2;
-    std::vector<DualAuditRow> rows;
-};
-
-struct DashboardSnapshot {
-    bool tableEnabled = false;
-    std::vector<TrafficRow> trafficRows;
-    std::vector<TrafficSummaryRow> totalRows;
-    std::set<int> trackedPorts;
-    std::string trafficPeriodLabel;
-    bool trafficHistoryAvailable = false;
-    std::vector<UfwHit> ufwHits;
-    std::string ufwHitsNote;
-    std::vector<F2bPolicyInfo> defaultPolicies;
-    std::string fail2banState = "未知";
-    std::string ufwState = "未知";
-    std::chrono::steady_clock::time_point loadedAt{};
-};
-
-struct UfwDeleteCandidate {
-    int number = 0;
-    std::string ip;
-    std::string line;
-    std::string reason;
-};
-
-struct UfwSshExposure {
-    std::vector<std::string> sshPorts;
-    std::vector<std::string> allowRules;
-
-    bool hasAllowRule() const {
-        return !allowRules.empty();
-    }
-};
-
-enum class InputKind {
-    None,
-    Character,
-    Escape,
-    Up,
-    Down,
-    PageUp,
-    PageDown,
-    Home,
-    End,
-    MouseUp,
-    MouseDown,
-    CtrlC
-};
-
-struct InputEvent {
-    InputKind kind = InputKind::None;
-    char ch = 0;
-};
 
 inline bool &pauseEnabled() {
     static bool enabled = true;
@@ -250,28 +137,6 @@ inline bool shouldUseColor(int fd = STDOUT_FILENO) {
         return false;
     }
     return fdIsTty(fd);
-}
-
-inline std::string stripAnsi(const std::string &value) {
-    std::string out;
-    out.reserve(value.size());
-    for (std::size_t i = 0; i < value.size();) {
-        if (value[i] != '\033') {
-            out.push_back(value[i++]);
-            continue;
-        }
-        ++i;
-        if (i < value.size() && value[i] == '[') {
-            ++i;
-            while (i < value.size()) {
-                const unsigned char ch = static_cast<unsigned char>(value[i++]);
-                if (ch >= 0x40 && ch <= 0x7e) {
-                    break;
-                }
-            }
-        }
-    }
-    return out;
 }
 
 inline std::string colorIf(const std::string &text, const std::string &color, int fd = STDOUT_FILENO) {
@@ -2841,30 +2706,6 @@ inline std::vector<UfwDeleteCandidate> findUfwAnomalyDeleteCandidates() {
 inline std::string fitLine(const std::string &line, int width);
 inline std::string padRightCells(const std::string &value, int width);
 
-inline std::string uiSection(const std::string &title) {
-    return ansi::bold + ansi::cyan + "> " + title + ansi::plain;
-}
-
-inline std::string uiGood(const std::string &text) {
-    return ansi::green + text + ansi::plain;
-}
-
-inline std::string uiWarn(const std::string &text) {
-    return ansi::yellow + text + ansi::plain;
-}
-
-inline std::string uiInbound(const std::string &text) {
-    return ansi::green + text + ansi::plain;
-}
-
-inline std::string uiOutbound(const std::string &text) {
-    return ansi::cyan + text + ansi::plain;
-}
-
-inline std::string uiTotal(const std::string &text) {
-    return ansi::bold + ansi::yellow + text + ansi::plain;
-}
-
 class Table {
 public:
     Table(std::vector<std::string> headers, std::vector<std::size_t> widths)
@@ -2924,17 +2765,6 @@ private:
             }
         }
         std::cout << "\n";
-    }
-};
-
-class Ui {
-public:
-    static std::string badge(const std::string &label, const std::string &color) {
-        return color + "[" + label + "]" + ansi::plain;
-    }
-
-    static std::string statusBadge(bool ok, const std::string &okText = "可用", const std::string &badText = "缺失") {
-        return ok ? badge(okText, ansi::green) : badge(badText, ansi::yellow);
     }
 };
 
@@ -3146,30 +2976,6 @@ inline InputReader &inputReader() {
 inline InputEvent readInputEvent(int timeoutMs) {
     return inputReader().readEvent(timeoutMs);
 }
-
-class ScreenBuffer {
-public:
-    void add(const std::string &line = "") {
-        lines_.push_back(line);
-    }
-
-    void addAll(const std::vector<std::string> &lines) {
-        for (const auto &line : lines) {
-            add(line);
-        }
-    }
-
-    const std::vector<std::string> &lines() const {
-        return lines_;
-    }
-
-    std::size_t size() const {
-        return lines_.size();
-    }
-
-private:
-    std::vector<std::string> lines_;
-};
 
 inline std::string fitLine(const std::string &line, int width);
 
@@ -10084,6 +9890,7 @@ inline int selfTest() {
                               reliabilityStatusBadge(ReliabilityStatus::Warning).find(ansi::yellow) != std::string::npos);
     check("诊断报告 section 检查", diagnosticReportHasRequiredSections("### fail2ban\n...\n### ufw\n...\n### accounting\n") &&
                                       !diagnosticReportHasRequiredSections("### fail2ban\n### ufw\n"));
+    check("UI模块ANSI去色", stripAnsi(ansi::red + std::string("ERR") + ansi::plain + "\033[2;1H\033[K") == "ERR");
     check("输入光标移动序列", cursorMoveSequence(4, 12) == "\033[4;12H\033[?25h");
     const std::string drawLine = terminalDrawLineSequence(2, "abc", 10);
     check("渲染行尾清理", drawLine == "\033[2;1Habc\033[K" &&

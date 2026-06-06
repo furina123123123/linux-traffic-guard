@@ -6,6 +6,8 @@
 #include "ltg/reliability.hpp"
 #include "ltg/traffic_accounting.hpp"
 #include "ltg/tui_routes.hpp"
+#include "ltg/types.hpp"
+#include "ltg/ui.hpp"
 #include "ltg/runtime_repair.hpp"
 #include "ltg/version.hpp"
 
