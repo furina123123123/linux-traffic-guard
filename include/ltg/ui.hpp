@@ -70,6 +70,16 @@ inline std::string colorIf(const std::string &text, const std::string &color, in
     return shouldUseColor(fd) ? color + text + ansi::plain : text;
 }
 
+int visibleWidth(const std::string &value);
+std::string fitLine(const std::string &line, int width);
+std::string padRightCells(const std::string &value, int width);
+std::string menuLine(const std::string &key,
+                     const std::string &title,
+                     const std::string &detail,
+                     bool selected);
+std::string bufferTableRule(const std::vector<int> &widths);
+std::string bufferTableRow(const std::vector<std::string> &values, const std::vector<int> &widths, bool strong = false);
+
 inline std::string uiSection(const std::string &title) {
     return ansi::bold + ansi::cyan + "> " + title + ansi::plain;
 }

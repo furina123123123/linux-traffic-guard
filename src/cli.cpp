@@ -1320,9 +1320,6 @@ inline std::vector<UfwDeleteCandidate> findUfwAnomalyDeleteCandidates() {
     return out;
 }
 
-inline std::string fitLine(const std::string &line, int width);
-inline std::string padRightCells(const std::string &value, int width);
-
 class Table {
 public:
     Table(std::vector<std::string> headers, std::vector<std::size_t> widths)
@@ -1594,163 +1591,10 @@ inline InputEvent readInputEvent(int timeoutMs) {
     return inputReader().readEvent(timeoutMs);
 }
 
-inline std::string fitLine(const std::string &line, int width);
-
 inline std::string terminalDrawLineSequence(int row, const std::string &text, int cols) {
     std::ostringstream out;
     out << "\033[" << row << ";1H" << fitLine(text, cols) << "\033[K";
     return out.str();
-}
-
-inline bool readAnsiSequence(const std::string &value, std::size_t &index, std::string &sequence) {
-    if (index >= value.size() || value[index] != '\033') {
-        return false;
-    }
-    sequence.clear();
-    sequence.push_back(value[index++]);
-    if (index >= value.size()) {
-        return true;
-    }
-    sequence.push_back(value[index++]);
-    while (index < value.size()) {
-        const unsigned char ch = static_cast<unsigned char>(value[index]);
-        sequence.push_back(static_cast<char>(ch));
-        ++index;
-        if (ch >= 0x40 && ch <= 0x7e) {
-            break;
-        }
-    }
-    return true;
-}
-
-inline bool readUtf8Char(const std::string &value, std::size_t &index, std::string &bytes, std::uint32_t &codepoint) {
-    if (index >= value.size()) {
-        return false;
-    }
-    const unsigned char lead = static_cast<unsigned char>(value[index]);
-    std::size_t len = 1;
-    codepoint = lead;
-    if ((lead & 0x80) == 0) {
-        len = 1;
-        codepoint = lead;
-    } else if ((lead & 0xe0) == 0xc0) {
-        len = 2;
-        codepoint = lead & 0x1f;
-    } else if ((lead & 0xf0) == 0xe0) {
-        len = 3;
-        codepoint = lead & 0x0f;
-    } else if ((lead & 0xf8) == 0xf0) {
-        len = 4;
-        codepoint = lead & 0x07;
-    }
-    if (index + len > value.size()) {
-        len = 1;
-        codepoint = lead;
-    }
-    bytes = value.substr(index, len);
-    for (std::size_t i = 1; i < len; ++i) {
-        const unsigned char ch = static_cast<unsigned char>(value[index + i]);
-        if ((ch & 0xc0) != 0x80) {
-            bytes = value.substr(index, 1);
-            codepoint = lead;
-            len = 1;
-            break;
-        }
-        codepoint = (codepoint << 6) | (ch & 0x3f);
-    }
-    index += len;
-    return true;
-}
-
-inline int codepointWidth(std::uint32_t cp) {
-    if (cp == 0 || cp < 32 || (cp >= 0x7f && cp < 0xa0)) {
-        return 0;
-    }
-    if ((cp >= 0x0300 && cp <= 0x036f) ||
-        (cp >= 0x1ab0 && cp <= 0x1aff) ||
-        (cp >= 0x1dc0 && cp <= 0x1dff) ||
-        (cp >= 0x20d0 && cp <= 0x20ff) ||
-        (cp >= 0xfe20 && cp <= 0xfe2f)) {
-        return 0;
-    }
-    if ((cp >= 0x1100 && cp <= 0x115f) ||
-        (cp >= 0x2e80 && cp <= 0xa4cf) ||
-        (cp >= 0xac00 && cp <= 0xd7a3) ||
-        (cp >= 0xf900 && cp <= 0xfaff) ||
-        (cp >= 0xfe10 && cp <= 0xfe19) ||
-        (cp >= 0xfe30 && cp <= 0xfe6f) ||
-        (cp >= 0xff00 && cp <= 0xff60) ||
-        (cp >= 0xffe0 && cp <= 0xffe6) ||
-        (cp >= 0x20000 && cp <= 0x3fffd)) {
-        return 2;
-    }
-    return 1;
-}
-
-inline int visibleWidth(const std::string &value) {
-    int width = 0;
-    for (std::size_t i = 0; i < value.size();) {
-        if (value[i] == '\033') {
-            std::string sequence;
-            readAnsiSequence(value, i, sequence);
-            continue;
-        }
-        std::string bytes;
-        std::uint32_t cp = 0;
-        if (!readUtf8Char(value, i, bytes, cp)) {
-            break;
-        }
-        width += codepointWidth(cp);
-    }
-    return width;
-}
-
-inline std::string fitLine(const std::string &line, int width);
-
-inline std::string padRightCells(const std::string &value, int width) {
-    const int current = visibleWidth(value);
-    if (current >= width) {
-        return fitLine(value, width);
-    }
-    return value + std::string(static_cast<std::size_t>(width - current), ' ');
-}
-
-inline std::string fitLine(const std::string &line, int width) {
-    if (width <= 0) {
-        return "";
-    }
-    if (visibleWidth(line) <= width) {
-        return line;
-    }
-    std::string out;
-    bool inColor = false;
-    int visible = 0;
-    for (std::size_t i = 0; i < line.size();) {
-        if (line[i] == '\033') {
-            std::string sequence;
-            readAnsiSequence(line, i, sequence);
-            out += sequence;
-            if (!sequence.empty() && sequence.back() == 'm') {
-                inColor = sequence != ansi::plain && sequence != "\033[0m";
-            }
-            continue;
-        }
-        std::string bytes;
-        std::uint32_t cp = 0;
-        if (!readUtf8Char(line, i, bytes, cp)) {
-            break;
-        }
-        const int cellWidth = codepointWidth(cp);
-        if (visible + cellWidth > width) {
-            break;
-        }
-        out += bytes;
-        visible += cellWidth;
-    }
-    if (inColor) {
-        out += ansi::plain;
-    }
-    return out;
 }
 
 class Viewport {
@@ -1960,54 +1804,6 @@ inline void ensureLineVisible(int line, int &scrollOffset, std::size_t lineCount
         scrollOffset = line - bodyRows + 1;
     }
     scrollOffset = std::max(0, std::min(scrollOffset, maxOffset));
-}
-
-inline std::string menuLine(const std::string &key,
-                            const std::string &title,
-                            const std::string &detail,
-                            bool selected) {
-    std::ostringstream row;
-    if (selected) {
-        row << "> "
-            << padRightCells(key, 4)
-            << padRightCells(title, 24)
-            << detail;
-        return ansi::inverse + ansi::cyan + row.str() + ansi::plain;
-    }
-    row << "  "
-        << padRightCells(ansi::cyan + key + ansi::plain, 4)
-        << padRightCells(ansi::bold + title + ansi::plain, 24)
-        << ansi::gray + detail + ansi::plain;
-    return row.str();
-}
-
-inline std::string bufferCell(const std::string &value, int width) {
-    return padRightCells(fitLine(value, width), width);
-}
-
-inline std::string bufferTableRule(const std::vector<int> &widths) {
-    int total = 2;
-    for (int width : widths) {
-        total += width + 2;
-    }
-    return ansi::gray + std::string(static_cast<std::size_t>(std::max(8, total)), '-') + ansi::plain;
-}
-
-inline std::string bufferTableRow(const std::vector<std::string> &values, const std::vector<int> &widths, bool strong = false) {
-    std::ostringstream out;
-    out << "  ";
-    for (std::size_t i = 0; i < widths.size(); ++i) {
-        const std::string value = i < values.size() ? values[i] : "";
-        if (strong) {
-            out << ansi::bold;
-        }
-        out << bufferCell(value, widths[i]);
-        if (strong) {
-            out << ansi::plain;
-        }
-        out << "  ";
-    }
-    return out.str();
 }
 
 inline std::string ufwAnalysisAccuracyNote() {
@@ -2283,18 +2079,18 @@ inline std::string serviceMeaning(const std::string &name, const std::string &ra
 inline std::string serviceSuggestion(const std::string &name, const std::string &rawState) {
     const std::string state = normalizedServiceState(rawState);
     if (state == "运行") {
-        return name == "fail2ban" ? "一致性核验" : "查看规则";
+        return name == "fail2ban" ? "高级诊断->可靠性自检" : "查看规则";
     }
     if (state == "未启用") {
-        return name == "fail2ban" ? "一键修复" : "诊断维护->服务控制";
+        return name == "fail2ban" ? "一键修复" : "高级诊断->服务控制";
     }
     if (state == "异常") {
-        return "诊断维护->日志摘要";
+        return "高级诊断->日志摘要";
     }
     if (state == "缺失") {
         return "一键修复";
     }
-    return "诊断维护";
+    return "高级诊断";
 }
 
 inline bool trafficTableEnabled() {
@@ -3482,7 +3278,7 @@ inline void verifyGeoDatabaseChain(ReliabilityReport &report) {
         addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", ReliabilityStatus::Skipped,
                              "未安装本地国家库，表格国家/地区显示为 -",
                              kDbIpLiteMmdbPath,
-                             "诊断维护 -> 安装/更新 IP 国家库");
+                             "高级诊断 -> 安装/更新 IP 国家库");
         return;
     }
     addReliabilityResult(report, "IP国家链路", "DB-IP Lite MMDB", reader ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
@@ -3779,7 +3575,7 @@ inline bool applyTrafficAccountingPortsToBuffer(ScreenBuffer &buffer,
     if (!commandOk || !verification.ok) {
         buffer.add(ansi::yellow + std::string("统计规则未能确认生效，已停止写入本地端口记录和后台 timer。") + ansi::plain);
         buffer.add("目标端口: " + humanPortList(finalPorts));
-        buffer.add("下一步: 修复 nftables 权限/语法后，重新执行“开启/追加端口”或“一键初始化/修复”。");
+        buffer.add("下一步: 修复 nftables 权限/语法后，重新执行“添加统计端口”或“一键初始化/修复”。");
         if (!verification.ok) {
             buffer.add("");
             buffer.add("> 生效验证失败");
@@ -3858,7 +3654,7 @@ inline bool appendAutomaticTrafficSetupToBuffer(ScreenBuffer &buffer) {
     requestedPorts.insert(recommendedPorts.begin(), recommendedPorts.end());
     if (requestedPorts.empty()) {
         buffer.add(ansi::yellow + std::string("未发现对外监听服务端口，暂不启用流量统计。") + ansi::plain);
-        buffer.add("后续启动 Web/SSH/应用服务后，再执行“一键初始化/修复”或“流量统计 -> 开启/追加端口”。");
+        buffer.add("后续启动 Web/SSH/应用服务后，再执行“一键初始化/修复”或“流量统计 -> 添加统计端口”。");
         return false;
     }
     buffer.add("自动发现监听端口: " + humanPortList(recommendedPorts));
@@ -4004,7 +3800,7 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
     addReliabilityResult(report, "流量统计链路", "底层表", table.ok() ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
                          table.ok() ? "统计表存在" : "统计表不存在",
                          summarizeCommandResult(table),
-                         table.ok() ? "" : "进入“流量统计 -> 开启/追加端口”");
+                         table.ok() ? "" : "进入“流量统计 -> 添加统计端口”");
     if (!table.ok()) {
         return;
     }
@@ -4015,7 +3811,7 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
         addReliabilityResult(report, "流量统计链路", "set " + setName,
                              found ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
                              found ? "counter set 存在" : "counter set 缺失", "",
-                             found ? "" : "重新执行“开启/追加端口”，迁移到底层端口集合规则");
+                             found ? "" : "重新执行“添加统计端口”，迁移到底层端口集合规则");
     }
     const std::vector<std::string> chains = {"input_account", "output_account", "forward_account"};
     for (const auto &chain : chains) {
@@ -4023,7 +3819,7 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
         addReliabilityResult(report, "流量统计链路", "chain " + chain,
                              found ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
                              found ? "管理链存在" : "管理链缺失", "",
-                             found ? "" : "重新执行“开启/追加端口”");
+                             found ? "" : "重新执行“添加统计端口”");
     }
 
     const std::set<int> historyPorts = loadTrackedTrafficPorts();
@@ -4033,7 +3829,7 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
                          semantic.ok ? ReliabilityStatus::Pass : ReliabilityStatus::Fail,
                          semantic.ok ? "规则引用端口集合并挂载三条 hook 链" : "统计规则语义不完整",
                          semantic.ok ? semantic.evidence : joinWords(semantic.failures, "；") + " / " + semantic.evidence,
-                         semantic.ok ? "" : "重新执行“开启/追加端口”重建管理链但保留 counter set");
+                         semantic.ok ? "" : "重新执行“添加统计端口”重建管理链但保留 counter set");
     const std::set<int> onlyHistory = setDifference(historyPorts, nftPorts);
     const std::set<int> onlyNft = setDifference(nftPorts, historyPorts);
     ReliabilityStatus portStatus = ReliabilityStatus::Pass;
@@ -4042,11 +3838,11 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
     if (!onlyHistory.empty() || !onlyNft.empty()) {
         portStatus = ReliabilityStatus::Fail;
         summary = "历史库和 nft 端口集合不一致";
-        suggestion = "重新执行“开启/追加端口”，只更新 tracked_ports 集合";
+        suggestion = "重新执行“添加统计端口”，只更新 tracked_ports 集合";
     } else if (historyPorts.empty() && nftPorts.empty()) {
         portStatus = ReliabilityStatus::Warning;
         summary = "尚未配置统计端口";
-        suggestion = "进入“流量统计 -> 开启/追加端口”";
+        suggestion = "进入“流量统计 -> 添加统计端口”";
     }
     addReliabilityResult(report, "流量统计链路", "统计端口一致性", portStatus, summary,
                          "历史端口: " + humanPortList(historyPorts) + " / nft端口: " + humanPortList(nftPorts) +
@@ -4063,7 +3859,7 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
                          serviceReadable && timerExists ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
                          serviceReadable && timerExists ? "service/timer 文件存在" : "后台采样 unit 不完整",
                          servicePath + " / " + timerPath,
-                         serviceReadable && timerExists ? "" : "重新执行“开启/追加端口”安装 timer");
+                         serviceReadable && timerExists ? "" : "重新执行“添加统计端口”安装 timer");
     if (serviceReadable) {
         const std::string exe = currentExecutablePath(nullptr);
         const bool pointsHere = serviceContent.find(exe + " --traffic-snapshot") != std::string::npos;
@@ -4071,7 +3867,7 @@ inline void verifyTrafficAccountingChain(ReliabilityReport &report, bool allowSn
                              pointsHere ? ReliabilityStatus::Pass : ReliabilityStatus::Warning,
                              pointsHere ? "ExecStart 指向当前 ltg" : "ExecStart 与当前 ltg 路径不同",
                              firstNonEmptyLine(serviceContent),
-                             pointsHere ? "" : "重新执行“开启/追加端口”刷新 systemd unit");
+                             pointsHere ? "" : "重新执行“添加统计端口”刷新 systemd unit");
     }
     if (Shell::exists("systemctl")) {
         const CommandResult enabled = Shell::capture("systemctl is-enabled " + kTrafficSnapshotTimer + " 2>&1");
@@ -4444,7 +4240,7 @@ inline bool collectCachedUfwSourceTop(std::vector<UfwHit> &hits, std::string &no
         return false;
     }
 #endif
-    note = "暂无可用安全分析缓存。进入“威胁分析”跑一次最近24小时/7天后，仪表盘会显示缓存摘要。";
+    note = "暂无可用安全分析缓存。进入“安全防护 -> 威胁分析”跑一次最近24小时/7天后，仪表盘会显示缓存摘要。";
     return false;
 }
 
@@ -4498,14 +4294,14 @@ inline std::string dashboardFastHeaderLine() {
     std::ostringstream deps;
     deps << "权限 " << (isRoot() ? Ui::badge("root", ansi::green) : Ui::badge("非 root", ansi::yellow));
     deps << "  首屏: 最近31天历史";
-    deps << "  实时检查: 诊断维护";
+    deps << "  实时检查: 高级诊断";
     return deps.str();
 }
 
 inline void addTrafficOnboarding(ScreenBuffer &buffer, bool configured, bool hasHistory) {
     buffer.add(uiSection("下一步"));
     if (!configured) {
-        buffer.add("1. 进入“流量统计 -> 开启/追加端口”，输入要统计的服务端口。");
+        buffer.add("1. 进入“流量统计 -> 添加统计端口”，输入要统计的服务端口。");
         buffer.add("2. 工具会保留已有计数，并启用 5 分钟一次的后台采样。");
         buffer.add("3. 第一轮采样建立基线，下一轮开始出现日/月/年增量。");
         return;
@@ -4517,8 +4313,8 @@ inline void addTrafficOnboarding(ScreenBuffer &buffer, bool configured, bool has
         return;
     }
     buffer.add("1. 看趋势用“流量统计 -> 日流量 / 月流量 / 年流量”。");
-    buffer.add("2. 查具体 IP 用“流量统计 -> 实时 IP 明细”，底层排障进“诊断维护”。");
-    buffer.add("3. 查威胁来源用“威胁分析”，查服务、防火墙、fail2ban 运行态用“诊断维护”。");
+    buffer.add("2. 查具体 IP 用“流量统计 -> IP 明细”，底层排障进“高级诊断”。");
+    buffer.add("3. 查威胁来源用“安全防护 -> 威胁分析”，查服务和日志用“高级诊断”。");
 }
 
 inline std::vector<std::string> tableLines(const Table &table, const std::string &emptyMessage = "暂无数据") {
@@ -4551,7 +4347,7 @@ inline ScreenBuffer buildDashboardBuffer(const DashboardSnapshot *snapshot,
     buffer.add(std::string("历史采样: ") + (snapshot->tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
     buffer.add("统计端口: " + std::to_string(snapshot->trackedPorts.size()) + " 个  " + humanPortList(snapshot->trackedPorts));
     if (!snapshot->tableEnabled) {
-        buffer.add("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。");
+        buffer.add("本地历史库尚未初始化。进入“流量统计 -> 添加统计端口”启用。");
     } else if (!snapshot->trafficHistoryAvailable) {
         buffer.add("最近31天还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。");
     }
@@ -4914,14 +4710,13 @@ private:
     }
 
     void pushFail2banPanel() {
-        pushMenu("防护策略", "先确保防护栈生效；常用管理放前面，参数细节放进高级。",
+        pushMenu("防护状态", "先确保两条默认防护真正运行；日常处置回到“处置 IP/端口”。",
                  {
                      {"1", "策略安装/修复", "自动补齐依赖、写入两条默认策略并验收 UFW 落地", true, [this] { actionEnsureFail2banStack(); }},
                      {"2", "策略总览", "默认两策略 + 自定义 jail 一屏看清", false, [this] { actionF2bPolicyOverview(); }},
                      {"3", "白名单", "规则级、双规则和全局 ignoreip", true, [this] { pushF2bIpMenu(); }},
-                     {"4", "处置与核验", "封禁/解封、补齐 UFW deny、一致性核验", true, [this] { pushSecurityOpsMenu(); }},
-                     {"5", "自定义策略", "新增、编辑、停用用户 jail", true, [this] { pushCustomF2bMenu(); }},
-                     {"6", "高级参数", "SSH/扫描升级阈值、时间窗口和全局同步", true, [this] { pushFail2banAdvancedMenu(); }},
+                     {"4", "自定义策略", "新增、编辑、停用用户 jail", true, [this] { pushCustomF2bMenu(); }},
+                     {"9", "高级参数", "SSH/扫描升级阈值、时间窗口和全局同步", true, [this] { pushFail2banAdvancedMenu(); }},
                  });
     }
 
@@ -4979,7 +4774,7 @@ private:
     }
 
     void pushF2bAuditMenu() {
-        pushMenu("一致性核验", "从日志、封禁状态、UFW 规则三个角度确认防护闭环",
+        pushMenu("防护链路证据", "排障用：从日志、封禁状态、UFW 规则三个角度确认防护闭环",
                  {
                      {"1", "双日志核验", "按扫描升级窗口检查 UFW 命中和封禁", false, [this] { actionDualAudit(false); }},
                      {"2", "当前封禁详情", "IP、封禁时间、预计剩余", false, [this] { actionCurrentBanDetails(); }},
@@ -5000,13 +4795,13 @@ private:
     }
 
     void pushSecurityOpsMenu() {
-        pushMenu("处置修复", "从发现问题到修复链路都在这里完成",
+        pushMenu("处置 IP/端口", "直接处理来源 IP 和端口规则；低频证据核验放到最后。",
                  {
                      {"1", "来源 IP 处置", "fail2ban 封禁/解封/忽略，UFW 放行/拒绝", true, [this] { actionIpDisposition(); }},
                      {"2", "端口防火墙", "UFW 端口放行/拒绝/删除规则", true, [this] { actionPortFirewall(); }},
-                     {"3", "一致性核验", "检查 UFW 命中、封禁列表和规则落地", false, [this] { pushF2bAuditMenu(); }},
-                     {"4", "补齐 UFW deny", "为当前封禁 IP 补齐防火墙规则", true, [this] { actionSyncF2bToUfw(); }},
-                     {"5", "清理异常规则", "清理重复/失效 deny 规则", true, [this] { actionRepairUfwAnomalies(); }},
+                     {"3", "补齐 UFW deny", "为当前封禁 IP 补齐防火墙规则", true, [this] { actionSyncF2bToUfw(); }},
+                     {"4", "清理异常规则", "清理重复/失效 deny 规则", true, [this] { actionRepairUfwAnomalies(); }},
+                     {"9", "防护链路证据", "双日志、封禁列表、UFW 落地和临时 ban 自检", false, [this] { pushF2bAuditMenu(); }},
                  });
     }
 
@@ -5091,7 +4886,7 @@ private:
                    (snapshot->tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
         buffer.add("统计端口: " + std::to_string(snapshot->trackedPorts.size()) + " 个  " + humanPortList(snapshot->trackedPorts));
         if (!snapshot->tableEnabled) {
-            buffer.add(ansi::yellow + std::string("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
+            buffer.add(ansi::yellow + std::string("本地历史库尚未初始化。进入“流量统计 -> 添加统计端口”启用。") + ansi::plain);
         } else if (!snapshot->trafficHistoryAvailable) {
             buffer.add(ansi::yellow + std::string("最近31天还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。") + ansi::plain);
         }
@@ -5105,7 +4900,7 @@ private:
         buffer.add("");
         addTrafficOnboarding(buffer, snapshot->tableEnabled, snapshot->trafficHistoryAvailable);
         buffer.add("");
-        buffer.add(ansi::gray + std::string("提示: 威胁来源看“威胁分析”，底层慢查询在“诊断维护”中执行。") + ansi::plain);
+        buffer.add(ansi::gray + std::string("提示: 威胁来源看“安全防护 -> 威胁分析”，底层慢查询在“高级诊断”中执行。") + ansi::plain);
         return buffer;
     }
 
@@ -5585,7 +5380,7 @@ private:
             return true;
         }
         buffer.add(ansi::yellow + std::string("IP 国家库仍不可用，已停止当前分析。") + ansi::plain);
-        buffer.add("可以稍后从“诊断维护 -> 安装/更新 IP 国家库”重试，或跳过国家/地区继续使用核心分析。");
+        buffer.add("可以稍后从“高级诊断 -> 安装/更新 IP 国家库”重试，或跳过国家/地区继续使用核心分析。");
         pushResult("安装/更新 IP 国家库", buffer);
         return false;
     }
@@ -5703,12 +5498,12 @@ private:
         if (trafficOk) {
             buffer.add("流量统计已自动启用/修复，仪表盘会读取最近31天端口历史。");
         } else if (!trafficHistoryConfiguredFast()) {
-            buffer.add("未自动启用流量统计。启动服务后再次执行一键初始化，或进入“流量统计 -> 开启/追加端口”。");
+            buffer.add("未自动启用流量统计。启动服务后再次执行一键初始化，或进入“流量统计 -> 添加统计端口”。");
         } else {
-            buffer.add("流量统计历史已存在，但本次自动修复未完全通过；可进入“可靠性自检”查看具体层级。");
+            buffer.add("流量统计历史已存在，但本次自动修复未完全通过；可进入“高级诊断 -> 可靠性自检”查看具体层级。");
         }
         if (!dbIpLiteDatabaseReady()) {
-            buffer.add("IP 国家库是可选能力。需要国家/地区展示时，进入“诊断维护 -> 安装/更新 IP 国家库”。");
+            buffer.add("IP 国家库是可选能力。需要国家/地区展示时，进入“高级诊断 -> 安装/更新 IP 国家库”。");
         }
         cachedDashboardValid() = false;
         if (f2bOk) {
@@ -5886,7 +5681,7 @@ private:
         renderBusy("实时累计明细", "正在读取底层实时计数...");
         ScreenBuffer buffer;
         if (!trafficTableEnabled()) {
-            buffer.add(ansi::yellow + std::string("底层统计规则未启用。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
+            buffer.add(ansi::yellow + std::string("底层统计规则未启用。进入“流量统计 -> 添加统计端口”启用。") + ansi::plain);
             pushResult("实时累计明细", buffer);
             return;
         }
@@ -5995,7 +5790,7 @@ private:
         if (existingPorts.empty()) {
             ScreenBuffer buffer;
             buffer.add(ansi::yellow + std::string("当前没有记录到正在统计的端口。") + ansi::plain);
-            buffer.add("如需开始统计，进入“流量统计 -> 开启/追加端口”。");
+            buffer.add("如需开始统计，进入“流量统计 -> 添加统计端口”。");
             pushResult("删除统计端口", buffer);
             return;
         }
@@ -6125,9 +5920,9 @@ private:
         buffer.add("  自定义策略会作为普通 fail2ban jail 写入 jail.local，并可复用已有 filter 或生成新的 filter。");
         buffer.add("");
         buffer.add("> 操作入口");
-        buffer.add("  新增/编辑: 防护策略 -> 自定义策略");
-        buffer.add("  默认调参: 防护策略 -> 高级参数");
-        buffer.add("  封禁核验: 安全防护 -> 处置与核验");
+        buffer.add("  新增/编辑: 安全防护 -> 防护状态 -> 自定义策略");
+        buffer.add("  默认调参: 安全防护 -> 防护状态 -> 高级参数");
+        buffer.add("  封禁证据: 安全防护 -> 处置 IP/端口 -> 防护链路证据");
         pushResult("策略总览", buffer);
     }
 
@@ -7050,7 +6845,7 @@ private:
             for (const auto &ip : fixIps) {
                 buffer.add("  - " + ip);
             }
-            buffer.add("如需执行，请返回“一致性核验 -> 补封禁候选 IP”。");
+            buffer.add("如需执行，请返回“防护链路证据 -> 补封禁候选 IP”。");
         }
         pushResult("双日志核验", buffer);
     }
@@ -7680,7 +7475,7 @@ inline ScreenBuffer dashboardBufferForCli() {
                (tableEnabled ? Ui::badge("已初始化", ansi::green) : Ui::badge("未初始化", ansi::yellow)));
     buffer.add("统计端口: " + std::to_string(trackedPorts.size()) + " 个  " + humanPortList(trackedPorts));
     if (!tableEnabled) {
-        buffer.add(ansi::yellow + std::string("本地历史库尚未初始化。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
+            buffer.add(ansi::yellow + std::string("本地历史库尚未初始化。进入“流量统计 -> 添加统计端口”启用。") + ansi::plain);
     } else if (totalRows.empty()) {
         buffer.add(ansi::yellow + std::string("最近31天还没有采样增量。第一轮采样建立基线，下一轮开始显示变化。") + ansi::plain);
     }
@@ -7697,11 +7492,11 @@ inline ScreenBuffer dashboardBufferForCli() {
 
     addSection(buffer, "下一步");
     if (!tableEnabled) {
-        buffer.add("sudo ltg 进入“流量统计 -> 开启/追加端口”后开始采样。");
+        buffer.add("sudo ltg 进入“流量统计 -> 添加统计端口”后开始采样。");
     } else if (totalRows.empty()) {
         buffer.add("等待下一轮 5 分钟采样，或用 sudo ltg --traffic-snapshot 手动记录一次。");
     } else {
-        buffer.add("趋势看“流量统计”，实时排障看 --ip-traffic 或 TUI “诊断维护”。");
+        buffer.add("趋势看“流量统计”，实时排障看 --ip-traffic 或 TUI “高级诊断”。");
     }
     return buffer;
 }
@@ -7714,7 +7509,7 @@ inline void showTrafficRanking() {
     ScreenBuffer buffer;
     addSection(buffer, "实时累计明细");
     if (!trafficTableEnabled()) {
-        buffer.add(ansi::yellow + std::string("底层统计规则未启用。进入“流量统计 -> 开启/追加端口”启用。") + ansi::plain);
+        buffer.add(ansi::yellow + std::string("底层统计规则未启用。进入“流量统计 -> 添加统计端口”启用。") + ansi::plain);
         printScreenBuffer(buffer);
         return;
     }
@@ -8503,7 +8298,7 @@ inline int selfTest() {
                               drawLine.find("\033[2K") == std::string::npos);
     check("输入软件光标闪烁渲染", promptInputLine("端口> ", "443", true).find(ansi::inverse) != std::string::npos &&
                                       promptInputLine("端口> ", "443", false).find(ansi::inverse) == std::string::npos);
-    const std::string selectedMenuLine = menuLine("2", "流量统计", "开启/追加端口", true);
+    const std::string selectedMenuLine = menuLine("2", "流量统计", "添加统计端口", true);
     check("菜单选中行高亮不中断", selectedMenuLine.rfind(ansi::plain) == selectedMenuLine.size() - ansi::plain.size() &&
                                           selectedMenuLine.find(ansi::plain) == selectedMenuLine.rfind(ansi::plain) &&
                                           selectedMenuLine.find(ansi::inverse) == 0);
@@ -8512,39 +8307,60 @@ inline int selfTest() {
             return item.action == action;
         });
     };
+    const auto routeHasKey = [](const TuiMenuDefinition &definition, const std::string &key) {
+        return std::any_of(definition.items.begin(), definition.items.end(), [&key](const TuiRouteItem &item) {
+            return item.key == key;
+        });
+    };
+    const auto routeKeysUnique = [](const TuiMenuDefinition &definition) {
+        std::set<std::string> keys;
+        for (const auto &item : definition.items) {
+            if (!keys.insert(item.key).second) {
+                return false;
+            }
+        }
+        return true;
+    };
     const TuiMenuDefinition mainRoutes = tuiMainMenuDefinition("test");
     const TuiMenuDefinition trafficRoutes = tuiTrafficMenuDefinition();
     const TuiMenuDefinition trafficMaintenanceRoutes = tuiTrafficMaintenanceMenuDefinition();
     const TuiMenuDefinition securityRoutes = tuiSecurityMenuDefinition();
     const TuiMenuDefinition advancedRoutes = tuiAdvancedMenuDefinition();
+    const TuiMenuDefinition ufwAnalyzeRoutes = tuiUfwAnalyzeMenuDefinition();
     check("TUI 主路径收敛到目标入口", mainRoutes.items.size() == 5 &&
                                           routeHasAction(mainRoutes, TuiRouteAction::Dashboard) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::OneClickRepair) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::TrafficMenu) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::SecurityMenu) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::AdvancedMenu) &&
+                                          routeHasKey(mainRoutes, "9") &&
+                                          routeKeysUnique(mainRoutes) &&
                                           !routeHasAction(mainRoutes, TuiRouteAction::UfwAnalyzeMenu) &&
                                           !routeHasAction(mainRoutes, TuiRouteAction::Fail2banPanel) &&
-                                          securityRoutes.items.size() == 5 &&
-                                          routeHasAction(securityRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
+                                          securityRoutes.items.size() == 3 &&
                                           routeHasAction(securityRoutes, TuiRouteAction::Fail2banPanel) &&
                                           routeHasAction(securityRoutes, TuiRouteAction::SecurityOpsMenu) &&
-                                          routeHasAction(securityRoutes, TuiRouteAction::OneClickRepair) &&
+                                          !routeHasAction(securityRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
+                                          !routeHasAction(securityRoutes, TuiRouteAction::OneClickRepair) &&
                                           !routeHasAction(securityRoutes, TuiRouteAction::AdvancedMenu));
     check("TUI 流量查询直达", trafficRoutes.items.size() == 6 &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficDay) &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficMonth) &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficYear) &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficMaintenanceMenu) &&
+                                  routeHasKey(trafficRoutes, "9") &&
                                   !routeHasAction(trafficRoutes, TuiRouteAction::RemoveTrafficAccounting));
     check("TUI 低频流量维护后移", routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RemoveTrafficPorts) &&
                                       routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RemoveTrafficAccounting) &&
                                       routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RawNftTable));
     check("TUI 高级动作保留低频维护", !routeHasAction(advancedRoutes, TuiRouteAction::Fail2banPanel) &&
+                                  routeKeysUnique(advancedRoutes) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::DependencyDoctor) &&
+                                  routeHasAction(advancedRoutes, TuiRouteAction::UfwCacheMenu) &&
                                   routeHasAction(advancedRoutes, TuiRouteAction::ServiceControl) &&
-                                  routeHasAction(advancedRoutes, TuiRouteAction::RawNftTable));
+                                  routeHasAction(advancedRoutes, TuiRouteAction::RawNftTable) &&
+                                  !routeHasAction(ufwAnalyzeRoutes, TuiRouteAction::UfwCacheMenu));
     Viewport cursorViewport;
     ScreenBuffer cursorBuffer;
     cursorBuffer.add("菜单行");
