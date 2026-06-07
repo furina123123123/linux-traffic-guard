@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "ltg/types.hpp"
+
 #ifdef _WIN32
 #include <io.h>
 #else
@@ -79,6 +81,37 @@ std::string menuLine(const std::string &key,
                      bool selected);
 std::string bufferTableRule(const std::vector<int> &widths);
 std::string bufferTableRow(const std::vector<std::string> &values, const std::vector<int> &widths, bool strong = false);
+int terminalRows();
+int terminalCols();
+InputEvent readInputEvent(int timeoutMs);
+std::string terminalDrawLineSequence(int row, const std::string &text, int cols);
+bool adjustScroll(InputKind kind, int &scrollOffset, std::size_t lineCount);
+bool adjustScrollForEvent(const InputEvent &event, int &scrollOffset, std::size_t lineCount);
+bool isScrollInput(const InputEvent &event);
+int confirmKeyDecision(const InputEvent &event, bool defaultYes);
+bool isResultReturnInput(const InputEvent &event);
+std::string cursorMoveSequence(int row, int col);
+std::string promptInputLine(const std::string &label, const std::string &value, bool cursorOn);
+bool adjustSelection(InputKind kind, int &selected, int count);
+void ensureLineVisible(int line, int &scrollOffset, std::size_t lineCount);
+
+class ScreenBuffer;
+
+class Viewport {
+public:
+    void render(const std::string &title,
+                const ScreenBuffer &buffer,
+                int scrollOffset,
+                const std::string &footer,
+                bool showHardwareCursor = false);
+    void invalidate();
+
+private:
+    bool painted_ = false;
+    int lastRows_ = 0;
+    int lastCols_ = 0;
+    std::vector<std::string> lastPhysical_;
+};
 
 inline std::string uiSection(const std::string &title) {
     return ansi::bold + ansi::cyan + "> " + title + ansi::plain;
