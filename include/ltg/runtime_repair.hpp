@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -33,5 +34,8 @@ bool shouldInstallRuntimeDependencies(const std::vector<std::string> &missingCor
 bool dependencyDoctorShouldOfferRepair(const std::vector<std::string> &missingCoreTools,
                                        bool trafficConfigured,
                                        const std::set<int> &recommendedPorts);
+std::map<std::string, std::string> listeningProcesses();
+std::set<int> recommendedTrafficPortsFromSsOutput(const std::string &output);
+std::set<int> detectRecommendedTrafficPorts();
 
 } // namespace linux_traffic_guard
