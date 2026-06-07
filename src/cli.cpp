@@ -4589,7 +4589,7 @@ inline void enrichUfwHit(UfwHit &hit) {
     const std::uint64_t riskBase = hit.peak > 0 ? hit.peak : hit.count;
     if (riskBase >= 100) {
         hit.risk = "高";
-        hit.suggestion = "分析追查/处置";
+        hit.suggestion = "安全防护中处置";
     } else if (riskBase >= 10) {
         hit.risk = "中";
         hit.suggestion = "观察或追查";
@@ -5272,15 +5272,23 @@ private:
     }
 
     void pushFail2banPanel() {
-        pushMenu("防护策略", "把 fail2ban 规则和 UFW 落地动作作为一套策略维护",
+        pushMenu("防护策略", "先确保防护栈生效；常用管理放前面，参数细节放进高级。",
                  {
-                     {"1", "策略总览", "默认两策略 + 自定义 jail 一屏看清", false, [this] { actionF2bPolicyOverview(); }},
-                     {"2", "SSH 防护规则", "登录失败阈值、封禁时间、指数惩罚", true, [this] { pushRule1Menu(); }},
-                     {"3", "扫描升级规则", "UFW 慢扫阈值、窗口、全端口封禁", true, [this] { pushRule2Menu(); }},
-                     {"4", "自定义策略", "新增、编辑、停用用户 jail", true, [this] { pushCustomF2bMenu(); }},
-                     {"5", "白名单策略", "规则白名单与 DEFAULT 全局白名单", true, [this] { pushF2bIpMenu(); }},
-                     {"6", "全局同步", "双规则同步 bantime/findtime/maxretry", true, [this] { pushF2bGlobalMenu(); }},
-                     {"7", "策略安装/修复", "创建 jail/filter/action 并重载服务", true, [this] { actionEnsureFail2banStack(); }},
+                     {"1", "策略安装/修复", "自动补齐依赖、写入两条默认策略并验收 UFW 落地", true, [this] { actionEnsureFail2banStack(); }},
+                     {"2", "策略总览", "默认两策略 + 自定义 jail 一屏看清", false, [this] { actionF2bPolicyOverview(); }},
+                     {"3", "白名单", "规则级、双规则和全局 ignoreip", true, [this] { pushF2bIpMenu(); }},
+                     {"4", "处置与核验", "封禁/解封、补齐 UFW deny、一致性核验", true, [this] { pushSecurityOpsMenu(); }},
+                     {"5", "自定义策略", "新增、编辑、停用用户 jail", true, [this] { pushCustomF2bMenu(); }},
+                     {"6", "高级参数", "SSH/扫描升级阈值、时间窗口和全局同步", true, [this] { pushFail2banAdvancedMenu(); }},
+                 });
+    }
+
+    void pushFail2banAdvancedMenu() {
+        pushMenu("防护高级参数", "低频调参入口。日常启用和验收请优先使用“策略安装/修复”。",
+                 {
+                     {"1", "SSH 防护参数", "登录失败阈值、封禁时间、指数惩罚", true, [this] { pushRule1Menu(); }},
+                     {"2", "扫描升级参数", "UFW 慢扫阈值、窗口、全端口封禁", true, [this] { pushRule2Menu(); }},
+                     {"3", "全局同步", "双规则同步 bantime/findtime/maxretry", true, [this] { pushF2bGlobalMenu(); }},
                  });
     }
 
@@ -6476,8 +6484,8 @@ private:
         buffer.add("");
         buffer.add("> 操作入口");
         buffer.add("  新增/编辑: 防护策略 -> 自定义策略");
-        buffer.add("  默认策略: 防护策略 -> SSH 防护规则 / 扫描升级规则");
-        buffer.add("  封禁核验: 处置修复 -> 一致性核验");
+        buffer.add("  默认调参: 防护策略 -> 高级参数");
+        buffer.add("  封禁核验: 安全防护 -> 处置与核验");
         pushResult("策略总览", buffer);
     }
 
