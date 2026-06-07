@@ -5227,7 +5227,6 @@ private:
     void routeShowDashboard() override { pushDashboard(); }
     void routeOneClickRepair() override { actionAutoRepair(); }
     void routeShowTrafficMenu() override { pushTrafficMenu(); }
-    void routeShowTrafficPeriodMenu() override { pushTrafficPeriodMenu(); }
     void routeShowTrafficMaintenanceMenu() override { pushTrafficMaintenanceMenu(); }
     void routeShowSecurityMenu() override { pushSecurityMenu(); }
     void routeShowAdvancedMenu() override { pushAdvancedMenu(); }
@@ -5240,7 +5239,6 @@ private:
     void routeTrafficRealtime() override { actionShowTrafficRanking(); }
     void routeRemoveTrafficPorts() override { actionRemoveTrafficPorts(); }
     void routeRemoveTrafficAccounting() override { actionRemoveTrafficAccounting(); }
-    void routeSecurityStatus() override { actionSecurityStatus(); }
     void routeShowUfwAnalyzeMenu() override { pushUfwAnalyzeMenu(); }
     void routeShowSecurityOpsMenu() override { pushSecurityOpsMenu(); }
     void routeShowFail2banPanel() override { pushFail2banPanel(); }
@@ -5263,10 +5261,6 @@ private:
 
     void pushTrafficMenu() {
         pushRouteMenu(tuiTrafficMenuDefinition());
-    }
-
-    void pushTrafficPeriodMenu() {
-        pushRouteMenu(tuiTrafficPeriodMenuDefinition());
     }
 
     void pushTrafficMaintenanceMenu() {
@@ -6424,77 +6418,6 @@ private:
             buffer.addAll(splitLines(output));
         }
         pushResult("底层计数规则", buffer);
-    }
-
-    void actionSecurityStatus() {
-        renderBusy("安全总览", "正在读取防护链路状态...");
-        auto fail2banStateFuture = std::async(std::launch::async, [] { return serviceState("fail2ban"); });
-        auto ufwStateFuture = std::async(std::launch::async, [] { return ufwState(); });
-        auto sshRuntimeFuture = std::async(std::launch::async, [] { return fail2banJailRuntimeStatus(kRule1Jail); });
-        auto scanRuntimeFuture = std::async(std::launch::async, [] { return fail2banJailRuntimeStatus(kRule2Jail); });
-        auto sshBannedFuture = std::async(std::launch::async, [] { return bannedSetForJail(kRule1Jail); });
-        auto scanBannedFuture = std::async(std::launch::async, [] { return bannedSetForJail(kRule2Jail); });
-        auto ufwTopFuture = std::async(std::launch::async, [] { return collectUfwSourceTop(); });
-        const F2bJailRuntimeInfo sshRuntime = sshRuntimeFuture.get();
-        const F2bJailRuntimeInfo scanRuntime = scanRuntimeFuture.get();
-        ScreenBuffer buffer;
-        buffer.add("> 防护链路");
-        addKeyValueTable(buffer, {
-            {"fail2ban 服务", fail2banStateFuture.get()},
-            {"sshd jail", sshRuntime.label},
-            {"规则2 jail", scanRuntime.label},
-            {"UFW 防火墙", ufwStateFuture.get()},
-            {"规则落地一致性", "从“处置修复 -> 一致性核验”检查"},
-            {"威胁分析缓存", kUfwCacheDir},
-        });
-        buffer.add("");
-
-        const F2bJailConfig ssh = readJailConfig(kRule1Jail);
-        const F2bJailConfig scan = readJailConfig(kRule2Jail);
-        buffer.add("> 防护策略");
-        const std::vector<int> policyWidths = {18, 10, 10, 10, 10, 18, 18};
-        buffer.add(bufferTableRow({"策略", "启用", "阈值", "窗口", "封禁", "动作", "白名单"}, policyWidths, true));
-        buffer.add(bufferTableRule(policyWidths));
-        buffer.add(bufferTableRow({
-            "SSH 登录",
-            configValueOr(ssh.enabled, "默认"),
-            configValueOr(ssh.maxretry, "5"),
-            configValueOr(ssh.findtime, "3600"),
-            configValueOr(ssh.bantime, "600"),
-            configValueOr(ssh.banaction, "默认"),
-            ssh.ignoreip.empty() ? "-" : ssh.ignoreip,
-        }, policyWidths));
-        buffer.add(bufferTableRow({
-            "扫描升级",
-            configValueOr(scan.enabled, "默认"),
-            configValueOr(scan.maxretry, "50"),
-            configValueOr(scan.findtime, "3600"),
-            configValueOr(scan.bantime, "1d"),
-            configValueOr(scan.banaction, "ufw-drop"),
-            scan.ignoreip.empty() ? "-" : scan.ignoreip,
-        }, policyWidths));
-        buffer.add("");
-
-        buffer.add("> 当前封禁");
-        const auto sshBanned = sshBannedFuture.get();
-        const auto scanBanned = scanBannedFuture.get();
-        addKeyValueTable(buffer, {
-            {"SSH 登录封禁", std::to_string(sshBanned.size()) + " 个 IP"},
-            {"扫描升级封禁", std::to_string(scanBanned.size()) + " 个 IP"},
-            {"详情入口", "安全中心 -> 处置修复 -> 一致性核验 -> 当前封禁详情"},
-        });
-        buffer.add("");
-
-        buffer.add("> UFW拦截风险来源Top");
-        buffer.add(ufwAnalysisAccuracyNote());
-        addUfwTable(buffer, ufwTopFuture.get(), "该窗口暂无公网 UFW BLOCK/AUDIT 记录。");
-        buffer.add("");
-
-        buffer.add("> 建议操作路径");
-        buffer.add("  看攻击来源: 分析追查 -> 最近24小时 / 指定IP追查");
-        buffer.add("  改防护规则: 策略配置 -> SSH防护 / 扫描升级 / 白名单");
-        buffer.add("  处理异常IP: 处置修复 -> 来源IP处置 / 一致性核验 / 补齐UFW deny");
-        pushResult("安全总览", buffer);
     }
 
     std::string promptPolicyName(const std::string &title, bool customOnly = false) {
@@ -8937,33 +8860,29 @@ inline int selfTest() {
     };
     const TuiMenuDefinition mainRoutes = tuiMainMenuDefinition("test");
     const TuiMenuDefinition trafficRoutes = tuiTrafficMenuDefinition();
-    const TuiMenuDefinition trafficPeriodRoutes = tuiTrafficPeriodMenuDefinition();
     const TuiMenuDefinition trafficMaintenanceRoutes = tuiTrafficMaintenanceMenuDefinition();
     const TuiMenuDefinition securityRoutes = tuiSecurityMenuDefinition();
     const TuiMenuDefinition advancedRoutes = tuiAdvancedMenuDefinition();
-    check("TUI 主路径收敛到目标入口", mainRoutes.items.size() == 6 &&
+    check("TUI 主路径收敛到目标入口", mainRoutes.items.size() == 5 &&
                                           routeHasAction(mainRoutes, TuiRouteAction::Dashboard) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::OneClickRepair) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::TrafficMenu) &&
-                                          routeHasAction(mainRoutes, TuiRouteAction::UfwAnalyzeMenu) &&
-                                          routeHasAction(mainRoutes, TuiRouteAction::Fail2banPanel) &&
+                                          routeHasAction(mainRoutes, TuiRouteAction::SecurityMenu) &&
                                           routeHasAction(mainRoutes, TuiRouteAction::AdvancedMenu) &&
-                                          !routeHasAction(mainRoutes, TuiRouteAction::SecurityMenu) &&
-                                          securityRoutes.items.size() <= 6 &&
+                                          !routeHasAction(mainRoutes, TuiRouteAction::UfwAnalyzeMenu) &&
+                                          !routeHasAction(mainRoutes, TuiRouteAction::Fail2banPanel) &&
+                                          securityRoutes.items.size() == 5 &&
                                           routeHasAction(securityRoutes, TuiRouteAction::ReliabilitySelfCheck) &&
                                           routeHasAction(securityRoutes, TuiRouteAction::Fail2banPanel) &&
-                                          routeHasAction(securityRoutes, TuiRouteAction::AdvancedMenu) &&
-                                          !routeHasAction(securityRoutes, TuiRouteAction::OneClickRepair));
+                                          routeHasAction(securityRoutes, TuiRouteAction::SecurityOpsMenu) &&
+                                          routeHasAction(securityRoutes, TuiRouteAction::OneClickRepair) &&
+                                          !routeHasAction(securityRoutes, TuiRouteAction::AdvancedMenu));
     check("TUI 流量查询直达", trafficRoutes.items.size() == 6 &&
-                                  !routeHasAction(trafficRoutes, TuiRouteAction::TrafficPeriodMenu) &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficDay) &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficMonth) &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficYear) &&
                                   routeHasAction(trafficRoutes, TuiRouteAction::TrafficMaintenanceMenu) &&
-                                  !routeHasAction(trafficRoutes, TuiRouteAction::RemoveTrafficAccounting) &&
-                                  routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficDay) &&
-                                  routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficMonth) &&
-                                  routeHasAction(trafficPeriodRoutes, TuiRouteAction::TrafficYear));
+                                  !routeHasAction(trafficRoutes, TuiRouteAction::RemoveTrafficAccounting));
     check("TUI 低频流量维护后移", routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RemoveTrafficPorts) &&
                                       routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RemoveTrafficAccounting) &&
                                       routeHasAction(trafficMaintenanceRoutes, TuiRouteAction::RawNftTable));

@@ -9,7 +9,6 @@ enum class TuiRouteAction {
     Dashboard,
     OneClickRepair,
     TrafficMenu,
-    TrafficPeriodMenu,
     TrafficMaintenanceMenu,
     SecurityMenu,
     AdvancedMenu,
@@ -22,7 +21,6 @@ enum class TuiRouteAction {
     TrafficRealtime,
     RemoveTrafficPorts,
     RemoveTrafficAccounting,
-    SecurityStatus,
     UfwAnalyzeMenu,
     SecurityOpsMenu,
     Fail2banPanel,
@@ -65,7 +63,6 @@ public:
     virtual void routeShowDashboard() = 0;
     virtual void routeOneClickRepair() = 0;
     virtual void routeShowTrafficMenu() = 0;
-    virtual void routeShowTrafficPeriodMenu() = 0;
     virtual void routeShowTrafficMaintenanceMenu() = 0;
     virtual void routeShowSecurityMenu() = 0;
     virtual void routeShowAdvancedMenu() = 0;
@@ -78,7 +75,6 @@ public:
     virtual void routeTrafficRealtime() = 0;
     virtual void routeRemoveTrafficPorts() = 0;
     virtual void routeRemoveTrafficAccounting() = 0;
-    virtual void routeSecurityStatus() = 0;
     virtual void routeShowUfwAnalyzeMenu() = 0;
     virtual void routeShowSecurityOpsMenu() = 0;
     virtual void routeShowFail2banPanel() = 0;
@@ -105,7 +101,6 @@ void dispatchTuiRoute(TuiRouteAction action, TuiRouteCallbacks &callbacks);
 TuiMenuDefinition tuiMainMenuDefinition(const std::string &title);
 TuiMenuDefinition tuiSetupAssistantMenuDefinition(const std::string &title);
 TuiMenuDefinition tuiTrafficMenuDefinition();
-TuiMenuDefinition tuiTrafficPeriodMenuDefinition();
 TuiMenuDefinition tuiTrafficMaintenanceMenuDefinition();
 TuiMenuDefinition tuiSecurityMenuDefinition();
 TuiMenuDefinition tuiAdvancedMenuDefinition();

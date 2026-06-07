@@ -267,7 +267,7 @@ Install or update the local database from the TUI:
 
 ```text
 sudo ltg
-Security Center -> Advanced/Diagnostics -> Install/update IP country database
+Diagnostics -> Install/update IP country database
 ```
 
 The database is stored at:
