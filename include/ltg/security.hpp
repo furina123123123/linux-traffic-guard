@@ -2,6 +2,7 @@
 
 #include "ltg/types.hpp"
 
+#include <ctime>
 #include <set>
 #include <string>
 #include <vector>
@@ -30,10 +31,18 @@ bool applyJailConfigValue(const std::string &jail,
                           const std::string &value,
                           std::string &backupPath,
                           std::string &error);
+bool writeManagedFileWithBackup(const std::string &path,
+                                const std::string &content,
+                                std::string &backupPath,
+                                std::string &error);
 F2bJailRuntimeInfo fail2banJailRuntimeStatus(const std::string &jail);
 std::set<std::string> bannedSetForJail(const std::string &jail);
 std::string fail2banJailStatusLine(const std::string &jail);
 std::string recentBanLineForJail(const std::string &jail);
+bool ufwStatusHasDenyForIp(const std::string &output, const std::string &ip, bool requireFail2banComment);
+std::time_t lastBanTimestamp(const std::string &jail, const std::string &ip);
+long long resolveBantimeSeconds(const std::string &jail);
+std::string remainingBanTime(const std::string &jail, const std::string &ip);
 std::string policyRoleForJail(const std::string &jail);
 std::set<std::string> configuredFail2banJails();
 std::set<std::string> runningFail2banJails();

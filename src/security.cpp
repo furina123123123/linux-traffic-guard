@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <ctime>
 #include <regex>
 #include <set>
+#include <sstream>
 #include <vector>
 
 #ifndef _WIN32
@@ -15,6 +17,20 @@
 #endif
 
 namespace linux_traffic_guard {
+
+namespace {
+
+const std::string kFail2banDb = "/var/lib/fail2ban/fail2ban.sqlite3";
+
+std::time_t parseFail2banDbTime(const std::string &text) {
+    std::smatch match;
+    if (!std::regex_search(text, match, std::regex(R"(([0-9]{10,}))"))) {
+        return 0;
+    }
+    return static_cast<std::time_t>(std::stoll(match[1].str()));
+}
+
+} // namespace
 
 bool isValidPositiveInt(const std::string &value) {
     if (value.empty()) {
@@ -359,6 +375,25 @@ bool applyJailConfigValue(const std::string &jail,
     return true;
 }
 
+bool writeManagedFileWithBackup(const std::string &path,
+                                const std::string &content,
+                                std::string &backupPath,
+                                std::string &error) {
+    const std::size_t slash = path.find_last_of('/');
+    if (slash != std::string::npos) {
+        ensureDirectory(path.substr(0, slash));
+    }
+    if (!backupFileIfExists(path, backupPath)) {
+        error = "无法备份 " + path;
+        return false;
+    }
+    if (!writeTextFile(path, content)) {
+        error = "无法写入 " + path;
+        return false;
+    }
+    return true;
+}
+
 F2bJailRuntimeInfo fail2banJailRuntimeStatus(const std::string &jail) {
     if (!Shell::exists("fail2ban-client")) {
         return parseFail2banJailStatus(jail, "", false);
@@ -388,6 +423,83 @@ std::string recentBanLineForJail(const std::string &jail) {
         "(grep -h '\\[" + jail + "\\].* Ban ' /var/log/fail2ban.log* 2>/dev/null || "
         "journalctl -u fail2ban --no-pager 2>/dev/null | grep '\\[" + jail + "\\].* Ban ') | tail -1";
     return trim(Shell::capture(cmd).output);
+}
+
+bool ufwStatusHasDenyForIp(const std::string &output, const std::string &ip, bool requireFail2banComment) {
+    for (const auto &line : splitLines(output)) {
+        const std::string lower = lowerCopy(line);
+        if (line.find(ip) == std::string::npos || lower.find("deny") == std::string::npos) {
+            continue;
+        }
+        if (!requireFail2banComment ||
+            lower.find("f2b") != std::string::npos ||
+            lower.find("fail2ban") != std::string::npos ||
+            lower.find("ufw-drop") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::time_t lastBanTimestamp(const std::string &jail, const std::string &ip) {
+    if (Shell::exists("sqlite3")) {
+        const std::string query =
+            "select timeofban from bans where jail=" + shellQuote(jail) +
+            " and ip=" + shellQuote(ip) + " order by timeofban desc limit 1;";
+        const CommandResult db = Shell::capture("sqlite3 " + shellQuote(kFail2banDb) + " " + shellQuote(query) + " 2>/dev/null || true");
+        const std::time_t ts = parseFail2banDbTime(db.output);
+        if (ts > 0) {
+            return ts;
+        }
+    }
+    const std::string cmd =
+        "(grep -h ' Ban " + ip + "' /var/log/fail2ban.log* 2>/dev/null || "
+        "journalctl -u fail2ban --no-pager 2>/dev/null | grep ' Ban " + ip + "') | tail -1";
+    const std::string line = trim(Shell::capture(cmd).output);
+    std::smatch match;
+    if (std::regex_search(line, match, std::regex(R"(^([0-9]{4})-([0-9]{2})-([0-9]{2})[ T]([0-9]{2}):([0-9]{2}):([0-9]{2}))"))) {
+        std::tm tm{};
+        tm.tm_year = std::stoi(match[1].str()) - 1900;
+        tm.tm_mon = std::stoi(match[2].str()) - 1;
+        tm.tm_mday = std::stoi(match[3].str());
+        tm.tm_hour = std::stoi(match[4].str());
+        tm.tm_min = std::stoi(match[5].str());
+        tm.tm_sec = std::stoi(match[6].str());
+        return makeLocalTime(tm);
+    }
+    return 0;
+}
+
+long long resolveBantimeSeconds(const std::string &jail) {
+    const F2bJailConfig cfg = readJailConfig(jail);
+    long long seconds = 0;
+    if (parseTimeToSeconds(configValueOr(cfg.bantime, jail == kRule2Jail ? "1d" : "600"), seconds)) {
+        return seconds;
+    }
+    return jail == kRule2Jail ? 86400 : 600;
+}
+
+std::string remainingBanTime(const std::string &jail, const std::string &ip) {
+    const std::time_t start = lastBanTimestamp(jail, ip);
+    if (start <= 0) {
+        return "未知";
+    }
+    const long long duration = resolveBantimeSeconds(jail);
+    const long long left = start + duration - std::time(nullptr);
+    if (left <= 0) {
+        return "可能已到期";
+    }
+    std::ostringstream out;
+    long long value = left;
+    const long long days = value / 86400;
+    value %= 86400;
+    const long long hours = value / 3600;
+    value %= 3600;
+    const long long mins = value / 60;
+    if (days > 0) out << days << "d ";
+    if (hours > 0) out << hours << "h ";
+    out << mins << "m";
+    return out.str();
 }
 
 std::string policyRoleForJail(const std::string &jail) {

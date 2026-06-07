@@ -96,7 +96,6 @@ inline const std::string kDbIpLiteMmdbPath = "/var/lib/linux-traffic-guard/dbip-
 inline const std::string kDbIpLiteMetaPath = "/var/lib/linux-traffic-guard/dbip-city-lite.url";
 inline const std::string kDbIpLiteAttribution = "IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0";
 inline const std::string kUfwCacheDir = "/var/tmp/linux_traffic_guard_ufw_cache_v2";
-inline const std::string kFail2banDb = "/var/lib/fail2ban/fail2ban.sqlite3";
 inline constexpr int kUfwCacheIdleDays = 14;
 inline constexpr int kUfwLiveGapFastFallbackSeconds = 10 * 60;
 inline constexpr std::size_t kDashboardTrafficDays = 31;
@@ -190,110 +189,6 @@ inline std::string currentExecutablePath(const char *argv0) {
     }
     return argv0 ? argv0 : "/usr/local/bin/ltg";
 #endif
-}
-
-inline bool writeManagedFileWithBackup(const std::string &path,
-                                       const std::string &content,
-                                       std::string &backupPath,
-                                       std::string &error) {
-    const std::size_t slash = path.find_last_of('/');
-    if (slash != std::string::npos) {
-        ensureDirectory(path.substr(0, slash));
-    }
-    if (!backupFileIfExists(path, backupPath)) {
-        error = "无法备份 " + path;
-        return false;
-    }
-    if (!writeTextFile(path, content)) {
-        error = "无法写入 " + path;
-        return false;
-    }
-    return true;
-}
-
-inline bool ufwStatusHasDenyForIp(const std::string &output, const std::string &ip, bool requireFail2banComment) {
-    for (const auto &line : splitLines(output)) {
-        const std::string lower = lowerCopy(line);
-        if (line.find(ip) == std::string::npos || lower.find("deny") == std::string::npos) {
-            continue;
-        }
-        if (!requireFail2banComment ||
-            lower.find("f2b") != std::string::npos ||
-            lower.find("fail2ban") != std::string::npos ||
-            lower.find("ufw-drop") != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-inline std::time_t parseFail2banDbTime(const std::string &text) {
-    std::smatch match;
-    if (!std::regex_search(text, match, std::regex(R"(([0-9]{10,}))"))) {
-        return 0;
-    }
-    return static_cast<std::time_t>(std::stoll(match[1].str()));
-}
-
-inline std::time_t lastBanTimestamp(const std::string &jail, const std::string &ip) {
-    if (Shell::exists("sqlite3")) {
-        const std::string query =
-            "select timeofban from bans where jail=" + shellQuote(jail) +
-            " and ip=" + shellQuote(ip) + " order by timeofban desc limit 1;";
-        const CommandResult db = Shell::capture("sqlite3 " + shellQuote(kFail2banDb) + " " + shellQuote(query) + " 2>/dev/null || true");
-        const std::time_t ts = parseFail2banDbTime(db.output);
-        if (ts > 0) {
-            return ts;
-        }
-    }
-    const std::string cmd =
-        "(grep -h ' Ban " + ip + "' /var/log/fail2ban.log* 2>/dev/null || "
-        "journalctl -u fail2ban --no-pager 2>/dev/null | grep ' Ban " + ip + "') | tail -1";
-    const std::string line = trim(Shell::capture(cmd).output);
-    std::smatch match;
-    if (std::regex_search(line, match, std::regex(R"(^([0-9]{4})-([0-9]{2})-([0-9]{2})[ T]([0-9]{2}):([0-9]{2}):([0-9]{2}))"))) {
-        std::tm tm{};
-        tm.tm_year = std::stoi(match[1].str()) - 1900;
-        tm.tm_mon = std::stoi(match[2].str()) - 1;
-        tm.tm_mday = std::stoi(match[3].str());
-        tm.tm_hour = std::stoi(match[4].str());
-        tm.tm_min = std::stoi(match[5].str());
-        tm.tm_sec = std::stoi(match[6].str());
-        return makeLocalTime(tm);
-    }
-    return 0;
-}
-
-inline long long resolveBantimeSeconds(const std::string &jail) {
-    const F2bJailConfig cfg = readJailConfig(jail);
-    long long seconds = 0;
-    if (parseTimeToSeconds(configValueOr(cfg.bantime, jail == kRule2Jail ? "1d" : "600"), seconds)) {
-        return seconds;
-    }
-    return jail == kRule2Jail ? 86400 : 600;
-}
-
-inline std::string remainingBanTime(const std::string &jail, const std::string &ip) {
-    const std::time_t start = lastBanTimestamp(jail, ip);
-    if (start <= 0) {
-        return "未知";
-    }
-    const long long duration = resolveBantimeSeconds(jail);
-    const long long left = start + duration - std::time(nullptr);
-    if (left <= 0) {
-        return "可能已到期";
-    }
-    std::ostringstream out;
-    long long value = left;
-    const long long days = value / 86400;
-    value %= 86400;
-    const long long hours = value / 3600;
-    value %= 3600;
-    const long long mins = value / 60;
-    if (days > 0) out << days << "d ";
-    if (hours > 0) out << hours << "h ";
-    out << mins << "m";
-    return out.str();
 }
 
 inline std::map<std::string, std::string> listeningProcesses() {
