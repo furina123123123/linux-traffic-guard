@@ -1,11 +1,13 @@
 #include "ltg/security.hpp"
 
 #include "ltg/core.hpp"
+#include "ltg/protection_bootstrap.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <regex>
+#include <set>
 #include <vector>
 
 #ifndef _WIN32
@@ -310,6 +312,191 @@ bool isSafeLogPath(const std::string &value) {
         return false;
     }
     return true;
+}
+
+std::string configValueOr(const std::string &value, const std::string &fallback) {
+    return trim(value).empty() ? fallback : trim(value);
+}
+
+F2bJailConfig readJailConfig(const std::string &jail) {
+    IniConfig ini;
+    ini.load(kJailConf);
+    F2bJailConfig cfg;
+    cfg.enabled = ini.get(jail, "enabled");
+    cfg.maxretry = ini.get(jail, "maxretry");
+    cfg.findtime = ini.get(jail, "findtime");
+    cfg.bantime = ini.get(jail, "bantime");
+    cfg.banaction = ini.get(jail, "banaction");
+    cfg.ignoreip = ini.get(jail, "ignoreip");
+    cfg.increment = ini.get(jail, "bantime.increment");
+    cfg.factor = ini.get(jail, "bantime.factor");
+    cfg.maxtime = ini.get(jail, "bantime.maxtime");
+    return cfg;
+}
+
+std::string readJailValue(const std::string &jail, const std::string &key) {
+    IniConfig ini;
+    ini.load(kJailConf);
+    return ini.get(jail, key);
+}
+
+bool applyJailConfigValue(const std::string &jail,
+                          const std::string &key,
+                          const std::string &value,
+                          std::string &backupPath,
+                          std::string &error) {
+    ensureDirectory("/etc/fail2ban");
+    IniConfig ini;
+    if (!ini.load(kJailConf)) {
+        error = "无法读取 " + kJailConf;
+        return false;
+    }
+    ini.set(jail, key, value);
+    if (!ini.save(backupPath)) {
+        error = "无法写入 " + kJailConf;
+        return false;
+    }
+    return true;
+}
+
+F2bJailRuntimeInfo fail2banJailRuntimeStatus(const std::string &jail) {
+    if (!Shell::exists("fail2ban-client")) {
+        return parseFail2banJailStatus(jail, "", false);
+    }
+    const CommandResult result = Shell::capture("fail2ban-client status " + shellQuote(jail) + " 2>&1");
+    return parseFail2banJailStatus(jail, result.output, true);
+}
+
+std::set<std::string> bannedSetForJail(const std::string &jail) {
+    return fail2banJailRuntimeStatus(jail).bannedIps;
+}
+
+std::string fail2banJailStatusLine(const std::string &jail) {
+    const F2bJailRuntimeInfo info = fail2banJailRuntimeStatus(jail);
+    if (info.raw.empty()) {
+        return info.label;
+    }
+    std::string firstLine = splitLines(info.raw).empty() ? info.raw : splitLines(info.raw).front();
+    if (firstLine.size() > 160) {
+        firstLine = firstLine.substr(0, 157) + "...";
+    }
+    return info.label + ": " + firstLine;
+}
+
+std::string recentBanLineForJail(const std::string &jail) {
+    const std::string cmd =
+        "(grep -h '\\[" + jail + "\\].* Ban ' /var/log/fail2ban.log* 2>/dev/null || "
+        "journalctl -u fail2ban --no-pager 2>/dev/null | grep '\\[" + jail + "\\].* Ban ') | tail -1";
+    return trim(Shell::capture(cmd).output);
+}
+
+std::string policyRoleForJail(const std::string &jail) {
+    if (jail == kRule1Jail) {
+        return "默认策略: SSH 登录防护";
+    }
+    if (jail == kRule2Jail) {
+        return "默认策略: UFW 慢扫升级";
+    }
+    return "自定义策略";
+}
+
+std::set<std::string> configuredFail2banJails() {
+    std::set<std::string> out;
+    out.insert(kRule1Jail);
+    out.insert(kRule2Jail);
+    IniConfig ini;
+    ini.load(kJailConf);
+    for (const auto &section : ini.sections()) {
+        if (section != "DEFAULT" && !section.empty()) {
+            out.insert(section);
+        }
+    }
+    return out;
+}
+
+std::set<std::string> runningFail2banJails() {
+    std::set<std::string> out;
+    if (!Shell::exists("fail2ban-client")) {
+        return out;
+    }
+    const std::string output = Shell::capture("fail2ban-client status 2>/dev/null || true").output;
+    for (const auto &line : splitLines(output)) {
+        const std::size_t pos = line.find("Jail list:");
+        if (pos == std::string::npos) {
+            continue;
+        }
+        std::string list = line.substr(pos + std::string("Jail list:").size());
+        std::replace(list.begin(), list.end(), ',', ' ');
+        for (const auto &name : splitWords(list)) {
+            if (isSafeIdentifier(name)) {
+                out.insert(name);
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<F2bPolicyInfo> collectFail2banPolicies(bool includeRuntimeStatus) {
+    std::set<std::string> names = configuredFail2banJails();
+    const std::set<std::string> running = runningFail2banJails();
+    names.insert(running.begin(), running.end());
+    IniConfig ini;
+    ini.load(kJailConf);
+    const std::vector<std::string> sections = ini.sections();
+    const std::set<std::string> configuredSections(sections.begin(), sections.end());
+
+    std::vector<F2bPolicyInfo> policies;
+    for (const auto &name : names) {
+        F2bPolicyInfo info;
+        info.name = name;
+        info.role = policyRoleForJail(name);
+        info.managedDefault = name == kRule1Jail || name == kRule2Jail;
+        info.configured = configuredSections.count(name) > 0;
+        info.config = readJailConfig(name);
+        info.filter = readJailValue(name, "filter");
+        info.backend = readJailValue(name, "backend");
+        info.logpath = readJailValue(name, "logpath");
+        info.port = readJailValue(name, "port");
+        const F2bJailRuntimeInfo runtime = includeRuntimeStatus ? fail2banJailRuntimeStatus(name) : F2bJailRuntimeInfo{};
+        info.jailLoaded = includeRuntimeStatus ? runtime.loaded() : running.count(name) > 0;
+        info.runtimeDetail = includeRuntimeStatus ? runtime.label : (running.count(name) ? "已加载" : "-");
+        const bool configuredEnabled = lowerCopy(configValueOr(info.config.enabled, running.count(name) ? "true" : "false")) == "true";
+        if (includeRuntimeStatus) {
+            info.state = runtime.label;
+            info.bannedCount = runtime.bannedIps.size();
+            info.recentBan = recentBanLineForJail(name).empty() ? "-" : "有";
+        } else {
+            info.state = running.count(name) ? "运行中" : (configuredEnabled ? "已配置/待重载" : "未启用");
+        }
+        policies.push_back(info);
+    }
+    std::sort(policies.begin(), policies.end(), [](const F2bPolicyInfo &a, const F2bPolicyInfo &b) {
+        if (a.managedDefault != b.managedDefault) {
+            return a.managedDefault > b.managedDefault;
+        }
+        return a.name < b.name;
+    });
+    return policies;
+}
+
+std::vector<F2bPolicyInfo> collectDefaultFail2banPolicies(bool includeRuntimeStatus) {
+    std::vector<F2bPolicyInfo> defaults;
+    for (const auto &policy : collectFail2banPolicies(includeRuntimeStatus)) {
+        if (policy.name == kRule1Jail || policy.name == kRule2Jail) {
+            defaults.push_back(policy);
+        }
+    }
+    return defaults;
+}
+
+std::vector<std::string> customFail2banJailNames() {
+    std::vector<std::string> out;
+    for (const auto &policy : collectFail2banPolicies(false)) {
+        if (!policy.managedDefault && policy.name != "DEFAULT") {
+            out.push_back(policy.name);
+        }
+    }
+    return out;
 }
 
 } // namespace linux_traffic_guard
